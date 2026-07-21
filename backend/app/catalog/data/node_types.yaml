@@ -1,0 +1,64 @@
+# Canvas palette. Ports are server-declared so the frontend never hardcodes them.
+#
+# `generate` is special: its output modality and whether it exposes an
+# `init_image` port depend on the selected model, so the compiler resolves those
+# from providers.yaml at validate time. What is declared here is the base shape.
+#
+# modality "any" means the port accepts any modality and takes its effective
+# type from whatever is connected.
+
+node_types:
+  - kind: input.text
+    label: Text
+    category: input
+    description: A prompt or text value feeding one or more generate nodes.
+    inputs: []
+    outputs:
+      - {id: out, modality: text}
+    default_data: {text: ""}
+
+  - kind: input.upload
+    label: Upload
+    category: input
+    description: An image, video, or audio file you uploaded. Ingested to B2 with its own provenance manifest.
+    inputs: []
+    outputs:
+      - {id: out, modality: any}
+    default_data: {asset_id: null}
+
+  - kind: generate
+    label: Generate
+    category: generate
+    description: One generation step — provider, model, prompt, parameters.
+    inputs:
+      - {id: prompt, modality: text, required: false, multi: false}
+      - {id: init_image, modality: image, required: false, multi: false, model_gated: true}
+    outputs:
+      - {id: out, modality: any}
+    default_data:
+      provider: mock
+      model: mock-video-v1
+      modality: video
+      prompt: null
+      params: {}
+      fallback_models: []
+
+  - kind: transform.composite
+    label: Combine A/V
+    category: transform
+    description: Muxes a video track and an audio track into a single MP4 with ffmpeg.
+    inputs:
+      - {id: video, modality: video, required: true, multi: false}
+      - {id: audio, modality: audio, required: true, multi: false}
+    outputs:
+      - {id: out, modality: video}
+    default_data: {op: mux}
+
+  - kind: output
+    label: Output
+    category: output
+    description: Marks a result to surface in the run summary and asset library.
+    inputs:
+      - {id: in, modality: any, required: true, multi: false}
+    outputs: []
+    default_data: {label: null}

@@ -1,0 +1,288 @@
+// Drizzle schema — the single source of truth for the database.
+//
+// The FastAPI backend (backend/app/db/models.py) mirrors these tables with
+// SQLAlchemy but runs NO migrations of its own: two migration tools pointed at
+// one database is a genuine hazard. Schema changes go here, then `pnpm db:push`.
+// backend/app/db/verify.py reflects the live schema at startup and fails loudly
+// if the mirror has drifted.
+//
+// Column names derive automatically from `casing: "snake_case"`, so `tenantId`
+// becomes `tenant_id` without spelling it out.
+//
+// Division of responsibility: B2 is the system of record for artifacts and
+// provenance manifests. These tables are a queryable index over it — pointers,
+// so we can paginate and join without S3 round-trips. Dropping this database
+// loses convenience, not provenance.
+
+import { relations, sql } from "drizzle-orm";
+import {
+  bigserial,
+  doublePrecision,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  real,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
+
+export const runStatus = pgEnum("run_status", [
+  "queued",
+  "running",
+  "succeeded",
+  "partial",
+  "failed",
+  "canceled",
+  "interrupted",
+]);
+
+export const stepStatus = pgEnum("step_status", [
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "skipped",
+  "canceled",
+]);
+
+export const assetKind = pgEnum("asset_kind", ["upload", "generated"]);
+
+const timestamps = {
+  createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+};
+
+/** A saved canvas. `graph` is the node/edge document the compiler consumes. */
+export const workflows = pgTable(
+  "workflows",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    tenantId: text().notNull(),
+    ownerUserId: text().notNull(),
+    name: text().notNull(),
+    description: text(),
+    graph: jsonb().notNull().default({ version: 1, nodes: [], edges: [] }),
+    thumbnailAssetId: uuid(),
+    deletedAt: timestamp({ withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [index("workflows_tenant_updated_idx").on(t.tenantId, t.updatedAt)],
+);
+
+/**
+ * A run is also the job queue row — a run *is* the job, which halves the state
+ * machine. Workers claim with `FOR UPDATE SKIP LOCKED` and hold a lease.
+ *
+ * `graphSnapshot` and `planSnapshot` make a run reproducible and let the worker
+ * map GenBlaze step indices back to canvas node ids without recompiling.
+ */
+export const runs = pgTable(
+  "runs",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    tenantId: text().notNull(),
+    ownerUserId: text().notNull(),
+    workflowId: uuid().references(() => workflows.id, { onDelete: "set null" }),
+    idempotencyKey: text(),
+
+    graphSnapshot: jsonb().notNull(),
+    planSnapshot: jsonb().notNull(),
+
+    genblazeRunId: text(),
+    parentRunId: uuid(),
+
+    status: runStatus().notNull().default("queued"),
+    error: text(),
+    errorCode: text(),
+
+    // Provenance — the manifest in B2 is the canonical record; these are pointers.
+    manifestUri: text(),
+    manifestHash: text(),
+    /** null when not applicable (e.g. local storage mode, where a passing
+     *  verify() would not actually mean "durably stored"). */
+    manifestVerified: text(),
+    b2Prefix: text(),
+
+    totalCostUsd: doublePrecision(),
+    durationSec: real(),
+
+    // queue bookkeeping
+    claimedBy: text(),
+    leaseExpiresAt: timestamp({ withTimezone: true }),
+    attempt: integer().notNull().default(0),
+    maxAttempts: integer().notNull().default(3),
+    cancelRequested: timestamp({ withTimezone: true }),
+
+    startedAt: timestamp({ withTimezone: true }),
+    finishedAt: timestamp({ withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("runs_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("runs_status_created_idx").on(t.status, t.createdAt),
+    index("runs_workflow_idx").on(t.workflowId),
+    // Partial: many rows legitimately have no idempotency key, and NULLs would
+    // otherwise not collide anyway — being explicit documents the intent.
+    uniqueIndex("runs_idempotency_idx")
+      .on(t.tenantId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} is not null`),
+  ],
+);
+
+/** One row per canvas node that became a GenBlaze step. */
+export const runSteps = pgTable(
+  "run_steps",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    runId: uuid()
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    nodeId: text().notNull(),
+    stepIndex: integer().notNull(),
+    genblazeStepId: text(),
+
+    provider: text().notNull(),
+    model: text().notNull(),
+    modality: text().notNull(),
+    stepType: text().notNull().default("generate"),
+    status: stepStatus().notNull().default("pending"),
+
+    prompt: text(),
+    params: jsonb().notNull().default({}),
+
+    /** Upstream provider job id (Replicate prediction, Runway task, ...).
+     *  GenBlaze exposes no `on_submit` hook despite what its docs show, so this
+     *  is captured from the `request_id` on progress/completed/failed events. */
+    upstreamId: text(),
+
+    progressPct: real(),
+    previewUrl: text(),
+    elapsedSec: real(),
+    costUsd: doublePrecision(),
+
+    error: text(),
+    errorCode: text(),
+    retries: integer().notNull().default(0),
+
+    startedAt: timestamp({ withTimezone: true }),
+    finishedAt: timestamp({ withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("run_steps_run_node_idx").on(t.runId, t.nodeId)],
+);
+
+/**
+ * Append-only event log. This is the SSE source, the audit trail, and the replay
+ * buffer all at once. Consumers read `seq > afterSeq`, which gives
+ * reconnect-with-Last-Event-ID and exactly-once-per-seq delivery for free.
+ *
+ * Events go through the table rather than an in-memory bus because the worker
+ * may be a different process from the API — and because Supabase's transaction
+ * pooler does not support LISTEN/NOTIFY.
+ */
+export const runEvents = pgTable(
+  "run_events",
+  {
+    id: bigserial({ mode: "number" }).primaryKey(),
+    runId: uuid()
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    seq: integer().notNull(),
+    type: text().notNull(),
+    nodeId: text(),
+    payload: jsonb().notNull().default({}),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("run_events_run_seq_idx").on(t.runId, t.seq)],
+);
+
+/** Uploads and generated media. `sha256` mirrors B2 content-addressing. */
+export const assets = pgTable(
+  "assets",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    tenantId: text().notNull(),
+    kind: assetKind().notNull(),
+
+    genblazeAssetId: text(),
+    runId: uuid().references(() => runs.id, { onDelete: "set null" }),
+    nodeId: text(),
+
+    b2Key: text(),
+    /** Durable, credential-free URL. Never a presigned one — those embed the
+     *  key id and would break canonical-hash stability. Presigning happens at
+     *  serve time in GET /v1/assets/{id}/content. */
+    url: text().notNull(),
+    mediaType: text().notNull(),
+    modality: text().notNull(),
+    sha256: text(),
+    sizeBytes: integer(),
+
+    width: integer(),
+    height: integer(),
+    durationSec: real(),
+
+    manifestUri: text(),
+    filename: text(),
+    metadata: jsonb().notNull().default({}),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("assets_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("assets_run_idx").on(t.runId),
+    index("assets_tenant_sha_idx").on(t.tenantId, t.sha256),
+    // Dedup applies to UPLOADS ONLY, and the partial predicate is the whole
+    // point: re-uploading the same file should be a no-op, but two runs that
+    // generate identical bytes are two distinct artifacts, each with its own
+    // provenance manifest and lineage. Constraining generated assets here would
+    // make the second run fail on insert rather than record its own history.
+    uniqueIndex("assets_tenant_sha_upload_idx")
+      .on(t.tenantId, t.sha256)
+      .where(sql`${t.kind} = 'upload' and ${t.sha256} is not null`),
+  ],
+);
+
+// --- relations ------------------------------------------------------------
+
+export const workflowsRelations = relations(workflows, ({ many }) => ({
+  runs: many(runs),
+}));
+
+export const runsRelations = relations(runs, ({ one, many }) => ({
+  workflow: one(workflows, {
+    fields: [runs.workflowId],
+    references: [workflows.id],
+  }),
+  steps: many(runSteps),
+  events: many(runEvents),
+  assets: many(assets),
+}));
+
+export const runStepsRelations = relations(runSteps, ({ one }) => ({
+  run: one(runs, { fields: [runSteps.runId], references: [runs.id] }),
+}));
+
+export const runEventsRelations = relations(runEvents, ({ one }) => ({
+  run: one(runs, { fields: [runEvents.runId], references: [runs.id] }),
+}));
+
+export const assetsRelations = relations(assets, ({ one }) => ({
+  run: one(runs, { fields: [assets.runId], references: [runs.id] }),
+}));
+
+// --- inferred types -------------------------------------------------------
+
+export type Workflow = typeof workflows.$inferSelect;
+export type NewWorkflow = typeof workflows.$inferInsert;
+export type Run = typeof runs.$inferSelect;
+export type NewRun = typeof runs.$inferInsert;
+export type RunStep = typeof runSteps.$inferSelect;
+export type NewRunStep = typeof runSteps.$inferInsert;
+export type RunEvent = typeof runEvents.$inferSelect;
+export type NewRunEvent = typeof runEvents.$inferInsert;
+export type Asset = typeof assets.$inferSelect;
+export type NewAsset = typeof assets.$inferInsert;
