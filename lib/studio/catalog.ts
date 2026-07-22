@@ -51,10 +51,22 @@ export type CatalogModel = {
   provider: string;
   provider_label: string;
   modality: Modality;
+  /**
+   * What the model is for, when modality is too coarse: music, text-to-speech
+   * and sound effects are all `audio`. Drives the node's icon and caption.
+   */
+  role?: string | null;
   status: ProviderStatus;
   expected_duration_sec?: number | null;
   est_cost_usd?: number | null;
   output_media_type?: string | null;
+  /**
+   * Shape this model emits, for models with no `aspect_ratio` param to pick it
+   * (lipsync follows its avatar). Absent means square.
+   */
+  output_aspect_ratio?: string | null;
+  /** False for models driven entirely by their ports — the canvas drops the prompt box. */
+  requires_prompt?: boolean;
   params: ParamDescriptor[];
   accepts: PortHandoff[];
 };
@@ -110,9 +122,9 @@ const MOCK_MODELS: CatalogModel[] = [
         label: "Aspect ratio",
         default: "16:9",
         options: [
-          { value: "16:9", label: "Landscape" },
-          { value: "9:16", label: "Portrait" },
-          { value: "1:1", label: "Square" },
+          { value: "16:9" },
+          { value: "9:16" },
+          { value: "1:1" },
         ],
       },
     ],
@@ -127,23 +139,41 @@ const MOCK_MODELS: CatalogModel[] = [
     expected_duration_sec: 2,
     est_cost_usd: 0,
     output_media_type: "image/png",
-    accepts: [
-      { port: "init_image", via: "external_inputs", modality: "image" },
-      { port: "image_ref", via: "external_inputs", modality: "image" },
-    ],
+    // Text-to-image only — `init_image` is a video-model port. Mirrors providers.yaml.
+    accepts: [{ port: "image_ref", via: "external_inputs", modality: "image" }],
     params: [
       {
         name: "aspect_ratio",
         type: "enum",
         label: "Aspect ratio",
-        default: "1:1",
+        default: "16:9",
         options: [
-          { value: "1:1", label: "Square" },
-          { value: "16:9", label: "Landscape" },
-          { value: "9:16", label: "Portrait" },
+          { value: "16:9" },
+          { value: "9:16" },
+          { value: "1:1" },
         ],
       },
     ],
+  },
+  {
+    id: "mock-lipsync-v1",
+    label: "Mock Lip Sync",
+    provider: "mock",
+    provider_label: "Mock (no API key)",
+    modality: "video",
+    role: "lipsync",
+    status: "ready",
+    expected_duration_sec: 6,
+    est_cost_usd: 0,
+    output_media_type: "video/mp4",
+    // Output follows the avatar, so there is no ratio to offer. Mirrors providers.yaml.
+    output_aspect_ratio: "1:1",
+    requires_prompt: false,
+    accepts: [
+      { port: "avatar", via: "external_inputs", modality: "image" },
+      { port: "speech", via: "external_inputs", modality: "audio" },
+    ],
+    params: [],
   },
   {
     id: "mock-audio-v1",
@@ -151,6 +181,7 @@ const MOCK_MODELS: CatalogModel[] = [
     provider: "mock",
     provider_label: "Mock (no API key)",
     modality: "audio",
+    role: "music",
     status: "ready",
     expected_duration_sec: 3,
     est_cost_usd: 0,
@@ -187,6 +218,8 @@ const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
       { id: "prompt", modality: "text", required: false, multi: false, model_gated: false },
       { id: "init_image", modality: "image", required: false, multi: false, model_gated: true },
       { id: "end_frame", modality: "image", required: false, multi: false, model_gated: true },
+      { id: "avatar", modality: "image", required: false, multi: false, model_gated: true },
+      { id: "speech", modality: "audio", required: false, multi: false, model_gated: true },
       { id: "image_ref", modality: "image", required: false, multi: true, model_gated: true },
     ],
     outputs: [{ id: "out", modality: "any", required: false, multi: false, model_gated: false }],
@@ -232,6 +265,16 @@ export const FALLBACK_CATALOG: Catalog = {
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 /**
+ * Cache window for the catalog fetch.
+ *
+ * Zero in development: the catalog is hand-authored YAML, so a five-minute
+ * window means an edit to `providers.yaml` does not reach the canvas until the
+ * dev server is restarted — which reads as "my change did nothing" rather than
+ * "my change is cached". The cost is two localhost requests per render.
+ */
+const CATALOG_REVALIDATE = process.env.NODE_ENV === "development" ? 0 : 300;
+
+/**
  * Server-side only. Both endpoints are public (no tenant data), so this needs
  * no Clerk token. Revalidated rather than cached forever because provider
  * availability changes when a key is added to the environment.
@@ -239,8 +282,12 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000
 export async function fetchCatalog(): Promise<Catalog> {
   try {
     const [modelsRes, typesRes] = await Promise.all([
-      fetch(`${API_URL}/v1/catalog/models`, { next: { revalidate: 300 } }),
-      fetch(`${API_URL}/v1/catalog/node-types`, { next: { revalidate: 300 } }),
+      fetch(`${API_URL}/v1/catalog/models`, {
+        next: { revalidate: CATALOG_REVALIDATE },
+      }),
+      fetch(`${API_URL}/v1/catalog/node-types`, {
+        next: { revalidate: CATALOG_REVALIDATE },
+      }),
     ]);
     if (!modelsRes.ok || !typesRes.ok) return FALLBACK_CATALOG;
 

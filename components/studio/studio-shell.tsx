@@ -17,7 +17,22 @@ import {
 } from "@/lib/studio/graph";
 import { isCreateTool } from "@/lib/studio/node-ui";
 import { fetchAssetPreviews, uploadAsset } from "@/lib/studio/assets-client";
-import { createWorkflow, loadWorkflow, saveWorkflow } from "@/app/studio/actions";
+import {
+  createWorkflow,
+  deleteWorkflow,
+  loadWorkflow,
+  saveWorkflow,
+} from "@/app/studio/actions";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { StudioCanvas, type CanvasApi } from "./canvas";
 import { Toolbar, type ToolId } from "./toolbar";
 import { TopBar, type SaveState } from "./top-bar";
@@ -54,6 +69,15 @@ export function StudioShell({
   const [saveState, setSaveState] = React.useState<SaveState>("saved");
   const [touched, setTouched] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
+  const [pendingDelete, setPendingDelete] = React.useState<WorkflowCard | null>(null);
+  /**
+   * Cards removed locally. Held as ids rather than a copy of the list so the
+   * server's own refreshed `workflows` prop stays authoritative — once the row
+   * is really gone this filter is simply a no-op, with no state to resync.
+   */
+  const [deletedIds, setDeletedIds] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /** Bumped to remount the canvas when a *different* document is loaded. */
   const [session, setSession] = React.useState(0);
   const [seed, setSeed] = React.useState<{
@@ -212,6 +236,33 @@ export function StudioShell({
     },
     [authFor],
   );
+
+  const visibleWorkflows = React.useMemo(
+    () => workflows.filter((w) => !deletedIds.has(w.id)),
+    [workflows, deletedIds],
+  );
+
+  const confirmDelete = React.useCallback(async () => {
+    const card = pendingDelete;
+    if (!card) return;
+
+    // Hide it now; the dialog closing onto a card that is still there reads as
+    // a failure even when the request is merely slow.
+    setDeletedIds((current) => new Set(current).add(card.id));
+    setPendingDelete(null);
+
+    const result = await deleteWorkflow(card.id);
+    if (!result.ok) {
+      setDeletedIds((current) => {
+        const next = new Set(current);
+        next.delete(card.id);
+        return next;
+      });
+      toast.error(result.error);
+      return;
+    }
+    toast.success(`Deleted “${card.name}”.`);
+  }, [pendingDelete]);
 
   const exitCanvas = React.useCallback(() => {
     // Don't let a pending debounce drop the last edit on the way out.
@@ -456,8 +507,9 @@ export function StudioShell({
           style={{ transitionTimingFunction: EASE }}
         >
           <WorkflowCards
-            workflows={workflows}
+            workflows={visibleWorkflows}
             onOpen={openWorkflow}
+            onDelete={setPendingDelete}
             onStartTemplate={(name) => {
               resetDocument();
               setWorkflowName(name);
@@ -466,6 +518,31 @@ export function StudioShell({
             }}
           />
         </div>
+
+        <AlertDialog
+          open={pendingDelete !== null}
+          onOpenChange={(next) => {
+            if (!next) setPendingDelete(null);
+          }}
+        >
+          <AlertDialogContent className="border border-[#1f211c]/10 bg-white text-[#1f211c] shadow-[0_28px_70px_-20px_rgba(31,33,28,0.4)] ring-0">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="text-[15px] font-semibold">
+                Delete “{pendingDelete?.name}”?
+              </AlertDialogTitle>
+              <AlertDialogDescription className="text-[12px] leading-5 text-[#8a8271]">
+                It comes off your recents. Media already generated from it stays
+                in your library with its provenance intact.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction variant="destructive" onClick={confirmDelete}>
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </TooltipProvider>
   );

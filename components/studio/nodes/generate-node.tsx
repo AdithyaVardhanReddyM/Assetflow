@@ -40,6 +40,7 @@ import { accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { ImageGenIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { OutputPort, PortRail } from "./ports";
+import { ROLE_ICON, ROLE_LABEL } from "./roles";
 import {
   BarButton,
   BarDivider,
@@ -59,7 +60,23 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const NODE_WIDTH = 440;
+/**
+ * The card is inscribed in this box: a landscape node is MAX_WIDTH across, a
+ * portrait one is MAX_WIDTH tall. MIN_WIDTH keeps the narrowest ratios wide
+ * enough for the prompt row — the well's height still follows from the width,
+ * so the shape stays exact.
+ */
+const MAX_WIDTH = 572;
+const MIN_WIDTH = 390;
+/** ~70% of MAX_WIDTH — see the note in `nodeShape` on why squares get less. */
+const SQUARE_WIDTH = 400;
+/**
+ * Audio keeps the original 440 and is deliberately left out of the growth
+ * above: its well is a fixed strip, not a preview, so a wider card would only
+ * add empty space.
+ */
+const AUDIO_WIDTH = 440;
+const AUDIO_WELL_HEIGHT = 120;
 
 const MODALITY_ICON = {
   image: ImageGenIcon,
@@ -75,12 +92,52 @@ const MODALITY_LABEL = {
   text: "Text",
 } as const;
 
-/** Aspect ratio of the preview well, so the node previews the shape it will produce. */
-function previewRatio(params: Record<string, unknown>): string {
-  const raw = params.aspect_ratio;
-  if (typeof raw !== "string" || !raw.includes(":")) return "4 / 3";
-  const [w, h] = raw.split(":");
-  return Number(w) > 0 && Number(h) > 0 ? `${w} / ${h}` : "4 / 3";
+/** Landscape unless the node says otherwise — the shape most generations take. */
+const DEFAULT_RATIO = "16:9";
+/** What a model with no ratio control and no declared output shape falls back to. */
+const SQUARE_RATIO = "1:1";
+
+/**
+ * The shape this node will produce.
+ *
+ * A model that exposes an `aspect_ratio` param is steered by the user, so the
+ * node's own value wins and the param's default backs it. A model without that
+ * param has nothing to steer — lipsync inherits its avatar's framing — so the
+ * shape comes from whatever the catalog says it emits, and squares up when the
+ * catalog is silent.
+ */
+function ratioOf(params: Record<string, unknown>, model?: CatalogModel): string {
+  const spec = model?.params.find((p) => p.name === "aspect_ratio");
+  if (spec) {
+    const own = params.aspect_ratio;
+    if (typeof own === "string" && own.includes(":")) return own;
+    const fallback = spec.default;
+    return typeof fallback === "string" && fallback.includes(":")
+      ? fallback
+      : DEFAULT_RATIO;
+  }
+  if (!model) return DEFAULT_RATIO;
+  const declared = model.output_aspect_ratio;
+  return typeof declared === "string" && declared.includes(":") ? declared : SQUARE_RATIO;
+}
+
+/**
+ * Card width and well height for a ratio. The *node* takes the shape rather
+ * than letterboxing a preview inside a fixed frame, so a 9:16 node reads as a
+ * portrait card on the canvas at a glance.
+ */
+function nodeShape(ratio: string, modality: string): { width: number; well: number } {
+  if (modality === "audio") return { width: AUDIO_WIDTH, well: AUDIO_WELL_HEIGHT };
+
+  const [w, h] = ratio.split(":").map(Number);
+  const r = w > 0 && h > 0 ? w / h : 16 / 9;
+  // A square at the full width covers nearly twice the canvas a 16:9 node does,
+  // so squares inscribe in a smaller box. Landscape and portrait keep theirs.
+  const box = Math.abs(r - 1) < 0.01 ? SQUARE_WIDTH : MAX_WIDTH;
+  const width = Math.round(
+    Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, r >= 1 ? box : MAX_WIDTH * r)),
+  );
+  return { width, well: Math.round(width / r) };
 }
 
 export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
@@ -106,9 +163,30 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     updateNodeInternals(id);
   }, [id, portKey, updateNodeInternals]);
 
-  const Icon = MODALITY_ICON[modality] ?? ImageGenIcon;
-  const accent = accentFor(modality);
+  // The model's role wins over its modality where it has one, so the three
+  // audio tools do not all render as an identical "Audio" node.
+  const role = model?.role ?? "";
+  const Icon = ROLE_ICON[role] ?? MODALITY_ICON[modality] ?? ImageGenIcon;
+  const kindLabel = ROLE_LABEL[role] ?? MODALITY_LABEL[modality] ?? "Generate";
+  const accent = accentFor(role || modality);
   const promptDriven = connected.has("prompt");
+  const ratio = ratioOf(wire.params ?? {}, model);
+  const shape = nodeShape(ratio, modality);
+
+  // A model driven entirely by its ports has nothing to describe, so it shows
+  // neither the text box nor the port that would fill it.
+  const takesPrompt = model?.requires_prompt !== false;
+
+  // The rail is split across two surfaces: media inputs sit beside the preview,
+  // `prompt` beside the prompt box it fills.
+  const promptPort = takesPrompt ? ports.find((p) => p.id === "prompt") : undefined;
+  const mediaPorts = ports.filter((p) => p.id !== "prompt");
+
+  // The card's width is part of its geometry, so React Flow has to re-measure
+  // the handles when the ratio changes or edges keep their old endpoints.
+  React.useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, shape.width, shape.well, updateNodeInternals]);
 
   function selectModel(next: CatalogModel) {
     updateNode(id, {
@@ -130,122 +208,10 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const unavailable = model ? statusReason(model) : null;
 
   return (
-    <div style={{ width: NODE_WIDTH }}>
-      <div className="flex items-center justify-between gap-3">
-        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          <Icon className="size-3.5 shrink-0 text-[#8a8271]" />
-          <NodeCaption
-            value={wire.title ?? ""}
-            placeholder={MODALITY_LABEL[modality] ?? "Generate"}
-            onChange={(v) => updateNode(id, { title: v || null })}
-          />
-        </span>
-        <span className="mb-1.5 shrink-0 truncate text-[11px] text-[#8a8271]">
-          {model?.label ?? "No model"}
-        </span>
-      </div>
-
-      <NodeCard selected={selected}>
-        <PortRail
-          ports={ports}
-          nodeModality={modality}
-          connectedHandles={connected}
-          // Anchored to the bottom of the preview well so the text port lands
-          // level with the prompt box it feeds.
-          className="top-0 bottom-[86px]"
-        />
-        <OutputPort modality={modality} className="top-11" />
-
-        {/* Preview well */}
-        <div
-          className="relative flex items-center justify-center border-b border-[#1f211c]/8 bg-[#faf8f4]"
-          style={
-            modality === "audio"
-              ? { height: 120 }
-              : { aspectRatio: previewRatio(wire.params ?? {}) }
-          }
-        >
-          <div className="flex flex-col items-center gap-2 text-center">
-            <span
-              className="grid size-9 place-items-center"
-              style={{ background: accent.soft, color: accent.ink }}
-            >
-              <Icon className="size-4.5" />
-            </span>
-            <p className="text-[12px] text-[#a09a88]">Your generation will appear here</p>
-          </div>
-        </div>
-
-        {/* Prompt */}
-        <div className="flex items-end gap-2 p-3">
-          <textarea
-            rows={2}
-            value={promptDriven ? "" : (wire.prompt ?? "")}
-            disabled={promptDriven}
-            onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
-            placeholder={
-              promptDriven
-                ? "Driven by the connected text node"
-                : `Describe the ${(MODALITY_LABEL[modality] ?? "output").toLowerCase()}…`
-            }
-            className="nodrag max-h-28 min-h-11 flex-1 resize-none bg-transparent text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88] disabled:text-[#a09a88]"
-          />
-
-          <div className="nodrag flex shrink-0 items-stretch">
-            <button
-              type="button"
-              onClick={() => runFrom(id, "node")}
-              className="flex h-9 items-center gap-1.5 bg-[#1f211c] px-3.5 text-[13px] font-semibold text-[#f7f4ee] transition-all duration-150 hover:brightness-125 active:scale-[0.97]"
-            >
-              <PlayIcon weight="fill" className="size-3.5" />
-              Run
-            </button>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <button
-                    type="button"
-                    aria-label="Run options"
-                    className="grid h-9 w-7 place-items-center border-l border-[#f7f4ee]/25 bg-[#1f211c] text-[#f7f4ee] transition-all duration-150 hover:brightness-125"
-                  >
-                    <CaretDownIcon className="size-3" weight="bold" />
-                  </button>
-                }
-              />
-              <DropdownMenuContent
-                align="end"
-                side="top"
-                sideOffset={8}
-                className={cn(menuSurface, "w-56 p-1.5")}
-              >
-                <DropdownMenuItem onClick={() => runFrom(id, "node")} className={menuItem}>
-                  <PlayIcon className="size-3.5" />
-                  Run this node
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runFrom(id, "chain")} className={menuItem}>
-                  <LightningIcon className="size-3.5" />
-                  <span className="flex flex-col">
-                    Run from here
-                    <span className="text-[10px] font-normal text-[#a09a88]">
-                      This node and everything downstream
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-      </NodeCard>
-
-      {unavailable ? (
-        <p className="mt-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[#a9743f]">
-          <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-          {unavailable}
-        </p>
-      ) : null}
-
+    <div style={{ width: shape.width }}>
+      {/* Properties, above the preview they act on. */}
       <div className="flex justify-center">
-        <FloatingBar>
+        <FloatingBar className="mt-0 mb-2">
           {/* Model */}
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -333,6 +299,144 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           </MoreMenu>
         </FloatingBar>
       </div>
+
+      <NodeCard selected={selected}>
+        {/* Media inputs belong to the preview; `prompt` rides with the prompt
+            box below, so each port sits beside the thing it actually feeds. */}
+        <PortRail
+          ports={mediaPorts}
+          nodeModality={modality}
+          connectedHandles={connected}
+          className="inset-y-0 justify-center"
+        />
+        <OutputPort
+          modality={modality}
+          role={role}
+          className="top-1/2 -translate-y-1/2"
+        />
+
+        {/* Preview well — the card's own shape, not a frame matted inside one. */}
+        <div
+          className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
+          style={{ height: shape.well }}
+        >
+          <div className="flex flex-col items-center gap-2.5 px-3 text-center">
+            <span
+              className="grid size-10 place-items-center"
+              style={{ background: accent.soft, color: accent.ink }}
+            >
+              <Icon className="size-5" />
+            </span>
+            <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
+              Your {kindLabel.toLowerCase()} will appear here
+            </p>
+          </div>
+        </div>
+      </NodeCard>
+
+      {/* Prompt — its own surface, detached from the preview card. Its footer
+          carries the node's whole identity (name and model), so what will run
+          sits with the text that drives it. */}
+      <NodeCard selected={selected} className="mt-1.5 flex flex-col gap-1.5 p-2.5">
+        {promptPort ? (
+          <PortRail
+            ports={[promptPort]}
+            nodeModality={modality}
+            connectedHandles={connected}
+            className="inset-y-0 justify-center"
+          />
+        ) : null}
+
+        {takesPrompt ? (
+        <textarea
+          rows={2}
+          value={promptDriven ? "" : (wire.prompt ?? "")}
+          disabled={promptDriven}
+          onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
+          placeholder={
+            promptDriven
+              ? "Driven by the connected text node"
+              : `Describe the ${kindLabel.toLowerCase()}…`
+          }
+          className="nodrag max-h-28 min-h-7 w-full resize-none bg-transparent py-0.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88] disabled:text-[#a09a88]"
+        />
+        ) : null}
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-[#8a8271]">
+            <Icon className="size-3.5 shrink-0" />
+            {/* Sized to its own text so the separator sits right after the
+                name; `min-w-0` still lets it compress on a narrow ratio. */}
+            <NodeCaption
+              value={wire.title ?? ""}
+              placeholder={kindLabel}
+              onChange={(v) => updateNode(id, { title: v || null })}
+              className="mb-0 min-w-0 shrink truncate px-0"
+              style={{
+                width: `${Math.max((wire.title ?? kindLabel).length, 4) + 1}ch`,
+              }}
+            />
+            {/* Both truncate, so a long name and a long model id share the row
+                instead of one pushing Run off the edge on a narrow ratio. */}
+            <span className="shrink-0 text-[#cfc8b7]">·</span>
+            <span className="max-w-[45%] shrink-0 truncate">
+              {model?.label ?? "No model"}
+            </span>
+          </span>
+
+          <div className="nodrag flex shrink-0 items-stretch">
+            <button
+              type="button"
+              onClick={() => runFrom(id, "node")}
+              className="flex h-7 items-center gap-1.5 bg-[#1f211c] px-2.5 text-[12px] font-semibold text-[#f7f4ee] transition-all duration-150 hover:brightness-125 active:scale-[0.97]"
+            >
+              <PlayIcon weight="fill" className="size-3" />
+              Run
+            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="Run options"
+                    className="grid h-7 w-5 place-items-center border-l border-[#f7f4ee]/25 bg-[#1f211c] text-[#f7f4ee] transition-all duration-150 hover:brightness-125"
+                  >
+                    <CaretDownIcon className="size-2.5" weight="bold" />
+                  </button>
+                }
+              />
+              <DropdownMenuContent
+                align="end"
+                side="top"
+                sideOffset={8}
+                className={cn(menuSurface, "w-56 p-1.5")}
+              >
+                <DropdownMenuItem onClick={() => runFrom(id, "node")} className={menuItem}>
+                  <PlayIcon className="size-3.5" />
+                  Run this node
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => runFrom(id, "chain")} className={menuItem}>
+                  <LightningIcon className="size-3.5" />
+                  <span className="flex flex-col">
+                    Run from here
+                    <span className="text-[10px] font-normal text-[#a09a88]">
+                      This node and everything downstream
+                    </span>
+                  </span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+      </NodeCard>
+
+      {unavailable ? (
+        <p className="mt-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[#a9743f]">
+          <WarningIcon className="size-3.5 shrink-0" weight="fill" />
+          {unavailable}
+        </p>
+      ) : null}
+
     </div>
   );
 }

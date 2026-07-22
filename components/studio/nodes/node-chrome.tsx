@@ -23,8 +23,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
+/**
+ * Menus size to their content. The base popup used to pin its width to
+ * `--anchor-width`, which for a 40px param chip clipped every option to a
+ * sliver — hence `w-max` there and no `min-w-0` here.
+ */
 export const menuSurface =
-  "min-w-0 border border-[#1f211c]/10 bg-white/97 p-1 shadow-[0_24px_60px_-16px_rgba(31,33,28,0.35)] ring-0 backdrop-blur-xl";
+  "border border-[#1f211c]/10 bg-white/97 p-1 shadow-[0_24px_60px_-16px_rgba(31,33,28,0.35)] ring-0 backdrop-blur-xl";
 
 /** The white card. Zero radius throughout, per the studio's design language. */
 export function NodeCard({
@@ -80,20 +85,29 @@ export function NodeCaption({
   value,
   placeholder,
   onChange,
+  className,
+  style,
 }: {
   value: string;
   placeholder: string;
   onChange: (v: string) => void;
+  /** Layout only — callers that inline the caption override width and margin. */
+  className?: string;
+  style?: React.CSSProperties;
 }) {
   return (
     <input
       value={value}
       placeholder={placeholder}
       spellCheck={false}
+      style={style}
       onChange={(e) => onChange(e.target.value)}
       // React Flow drags the node on pointerdown anywhere in it; `nodrag` opts
       // this element out so the caret can be placed by clicking.
-      className="nodrag mb-1.5 w-full bg-transparent px-0.5 text-[11px] font-medium text-[#8a8271] outline-none placeholder:text-[#bdb7a7] hover:text-[#1f211c] focus:text-[#1f211c]"
+      className={cn(
+        "nodrag mb-1.5 w-full bg-transparent px-0.5 text-[11px] font-medium text-[#8a8271] outline-none placeholder:text-[#bdb7a7] hover:text-[#1f211c] focus:text-[#1f211c]",
+        className,
+      )}
     />
   );
 }
@@ -170,10 +184,13 @@ function paramLabel(param: ParamDescriptor): string {
 }
 
 function formatValue(param: ParamDescriptor, value: unknown): string {
-  if (value === undefined || value === null || value === "") return "—";
-  if (param.type === "boolean") return value ? "On" : "Off";
-  const option = param.options?.find((o) => o.value === String(value));
-  const text = option?.label ?? String(value);
+  // An unset param still runs at the catalog default, so show that rather than
+  // a dash — a chip reading "—" claims the node has no aspect ratio when it does.
+  const effective = value === undefined || value === null || value === "" ? param.default : value;
+  if (effective === undefined || effective === null || effective === "") return "—";
+  if (param.type === "boolean") return effective ? "On" : "Off";
+  const option = param.options?.find((o) => o.value === String(effective));
+  const text = option?.label ?? String(effective);
   return param.unit ? `${text}${param.unit}` : text;
 }
 
@@ -192,9 +209,11 @@ export function ParamControl({
   onChange: (v: unknown) => void;
 }) {
   const label = paramLabel(param);
+  // What the node would actually send: an untouched param runs at its default.
+  const effective = value === undefined || value === null || value === "" ? param.default : value;
 
   if (param.type === "boolean") {
-    const on = Boolean(value);
+    const on = Boolean(effective);
     return (
       <button
         type="button"
@@ -229,7 +248,7 @@ export function ParamControl({
               className="px-2.5 py-1.5 text-xs font-medium text-[#1f211c] focus:bg-[#f7f4ee]"
             >
               {option.label ?? option.value}
-              {String(value) === option.value ? (
+              {String(effective) === option.value ? (
                 <CheckIcon className="ml-auto size-3.5" weight="bold" />
               ) : null}
             </DropdownMenuItem>
@@ -243,7 +262,7 @@ export function ParamControl({
     const min = param.min ?? 0;
     const max = param.max ?? 100;
     const step = param.step ?? (param.type === "integer" ? 1 : 0.5);
-    const current = typeof value === "number" ? value : Number(value ?? min);
+    const current = typeof effective === "number" ? effective : Number(effective ?? min);
     return (
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -289,7 +308,7 @@ export function ParamControl({
       <DropdownMenuTrigger
         render={
           <button type="button" className={barChip} title={label} aria-label={label}>
-            <span className="max-w-24 truncate">{formatValue(param, value)}</span>
+            <span className="max-w-24 truncate">{formatValue(param, effective)}</span>
             <CaretDownIcon className="size-3 text-[#a09a88]" />
           </button>
         }

@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from app.catalog.models import ProviderStatus
+from app.catalog.models import ModelDescriptor, ProviderStatus
 from app.catalog.registry import load_catalog, resolve_status
 
 
@@ -152,3 +152,33 @@ def test_params_have_ui_metadata(catalog):
                     assert param.default in values, (
                         f"{model.id}.{param.name} default is not among its options"
                     )
+
+
+def test_lipsync_model_is_port_driven(catalog):
+    """Lipsync is steered by its inputs, not by text or an aspect ratio."""
+    model = catalog.model("mock", "mock-lipsync-v1")
+    assert model is not None
+    assert {a.port for a in model.accepts} == {"avatar", "speech"}
+    assert model.accepts_port("avatar").modality.value == "image"
+    assert model.accepts_port("speech").modality.value == "audio"
+    # No ratio to steer, so the canvas falls back to what the model emits.
+    assert model.param("aspect_ratio") is None
+    assert model.output_aspect_ratio == "1:1"
+    # Nothing to describe — the compiler must not demand a prompt.
+    assert model.requires_prompt is False
+
+
+def test_model_payload_carries_every_descriptor_field(catalog):
+    """`_model_payload` is hand-written, so a field added to ModelDescriptor
+    silently stops reaching the canvas unless it is added there too. Lipsync
+    shipped broken exactly this way once."""
+    from app.routers.catalog import _model_payload
+
+    internal = {
+        "provider_key",  # sent as "provider"
+        "provider_label",  # sent verbatim under its own key
+        "adapter",  # deliberately server-side: an import path is not the canvas's business
+    }
+    payload = _model_payload(catalog.model("mock", "mock-lipsync-v1"))
+    missing = set(ModelDescriptor.model_fields) - internal - set(payload)
+    assert not missing, f"_model_payload drops {sorted(missing)}"

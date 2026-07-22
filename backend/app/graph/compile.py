@@ -510,7 +510,10 @@ def _build_step(
         source = by_id[edge.source]
         if source.kind is NodeKind.TEXT and edge.target_handle == "prompt":
             prompt = source.typed_data().text
-    if not (prompt or "").strip():
+    # Some models are driven entirely by their input ports — lipsync takes an
+    # avatar and a speech track and has nothing to describe — so a missing
+    # prompt is only an error for models that declare they need one.
+    if model.requires_prompt and not (prompt or "").strip():
         ctx.fail(
             ErrorCode.NO_PROMPT,
             "This node needs a prompt.",

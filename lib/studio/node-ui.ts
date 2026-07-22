@@ -46,7 +46,12 @@ export type NodeBlueprint = {
 export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
   image: { kind: "generate", modality: "image", label: "Image" },
   video: { kind: "generate", modality: "video", label: "Video" },
-  lipsync: { kind: "generate", modality: "video", label: "Lip sync" },
+  lipsync: {
+    kind: "generate",
+    modality: "video",
+    prefer: ["mock-lipsync-v1"],
+    label: "Lip sync",
+  },
   music: { kind: "generate", modality: "audio", label: "Music" },
   speech: {
     kind: "generate",
@@ -165,20 +170,38 @@ export function modalitiesCompatible(source: string, target: string): boolean {
 
 /**
  * Muted duos that sit on the cream canvas without competing with the amber
- * `--primary`, which is reserved for the active tool and Generate.
+ * `--primary`, which is reserved for the active tool and Generate. Kept warm
+ * throughout — a cool blue read as foreign against the paper background.
  */
 export type Accent = { soft: string; ink: string };
 
 export const MODALITY_ACCENT: Record<string, Accent> = {
-  image: { soft: "#dbe6f5", ink: "#3f6ea8" },
-  video: { soft: "#e6def5", ink: "#6f57a8" },
-  audio: { soft: "#dceadd", ink: "#4d8358" },
+  image: { soft: "#f4e3d5", ink: "#a86a45" },
+  video: { soft: "#ece1ee", ink: "#7b5f86" },
+  audio: { soft: "#dfe9dd", ink: "#527d5a" },
   text: { soft: "#e8e4da", ink: "#6b6558" },
   any: { soft: "#e8e4da", ink: "#6b6558" },
 };
 
-export function accentFor(modality: string | undefined): Accent {
-  return MODALITY_ACCENT[modality ?? "any"] ?? MODALITY_ACCENT.any;
+/**
+ * Accents keyed by a model's `role`, for nodes whose modality is too coarse to
+ * tell them apart — the three audio tools otherwise share one green.
+ *
+ * These colour a node's own icon and the connector it emits from. *Input* ports
+ * stay on `MODALITY_ACCENT`, because their colour is what tells you what may
+ * legally connect, and that is a question about modality, not about role.
+ */
+export const ROLE_ACCENT: Record<string, Accent> = {
+  music: { soft: "#dfe9dd", ink: "#527d5a" },
+  speech: { soft: "#f2e6c8", ink: "#8d6f24" },
+  sfx: { soft: "#f2dcdf", ink: "#9d5763" },
+  lipsync: { soft: "#e3e7d2", ink: "#6c7a42" },
+};
+
+/** Looks up a role first, then a modality. Either may be passed. */
+export function accentFor(key: string | undefined): Accent {
+  if (!key) return MODALITY_ACCENT.any;
+  return ROLE_ACCENT[key] ?? MODALITY_ACCENT[key] ?? MODALITY_ACCENT.any;
 }
 
 // --- placement ------------------------------------------------------------
@@ -187,7 +210,7 @@ export function accentFor(modality: string | undefined): Accent {
 export const NODE_SIZE: Record<NodeKind, { width: number; height: number }> = {
   "input.text": { width: 300, height: 210 },
   "input.upload": { width: 260, height: 300 },
-  generate: { width: 440, height: 430 },
+  generate: { width: 572, height: 480 },
   "transform.composite": { width: 300, height: 150 },
   output: { width: 260, height: 130 },
 };

@@ -170,9 +170,11 @@ body {
   pointer-events: all;
 }
 
+/* Warm taupe rather than a cool blue — the wire should read as part of the
+   paper the canvas is drawn on, not as a foreign element on top of it. */
 .studio-canvas .react-flow__edge-path,
 .studio-canvas .react-flow__connection-path {
-  stroke: #8fb4dd;
+  stroke: #b5a893;
   stroke-width: 1.6;
 }
 

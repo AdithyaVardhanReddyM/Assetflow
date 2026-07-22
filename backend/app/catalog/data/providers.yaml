@@ -35,9 +35,9 @@ providers:
             label: Aspect ratio
             default: "16:9"
             options:
-              - {value: "16:9", label: Landscape}
-              - {value: "9:16", label: Portrait}
-              - {value: "1:1", label: Square}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
 
       - id: mock-image-v1
         label: Mock Image
@@ -46,22 +46,44 @@ providers:
         expected_duration_sec: 2
         est_cost_usd: 0
         output_media_type: image/png
+        # No init_image: image generation here is text-to-image only. The port
+        # is a video-model concept (the literal first frame) and offering it on
+        # an image node would draw a handle nothing consumes.
         accepts:
-          - {port: init_image, via: external_inputs, modality: image}
           - {port: image_ref, via: external_inputs, modality: image}
         params:
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
-            default: "1:1"
+            default: "16:9"
             options:
-              - {value: "1:1", label: Square}
-              - {value: "16:9", label: Landscape}
-              - {value: "9:16", label: Portrait}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+
+      - id: mock-lipsync-v1
+        label: Mock Lip Sync
+        modality: video
+        role: lipsync
+        adapter: app.engine.mock_providers:video_provider
+        expected_duration_sec: 6
+        est_cost_usd: 0
+        output_media_type: video/mp4
+        # No aspect_ratio param: the output inherits the avatar's framing, so
+        # there is nothing for the user to pick. `output_aspect_ratio` is what
+        # the canvas previews instead.
+        output_aspect_ratio: "1:1"
+        # Driven by its ports, not by text.
+        requires_prompt: false
+        accepts:
+          - {port: avatar, via: external_inputs, modality: image}
+          - {port: speech, via: external_inputs, modality: audio}
+        params: []
 
       - id: mock-audio-v1
         label: Mock Audio
         modality: audio
+        role: music
         adapter: app.engine.mock_providers:audio_provider
         expected_duration_sec: 3
         est_cost_usd: 0
@@ -90,7 +112,7 @@ providers:
             type: enum
             label: Aspect ratio
             default: "16:9"
-            options: [{value: "16:9", label: Landscape}, {value: "9:16", label: Portrait}]
+            options: [{value: "16:9"}, {value: "9:16"}]
           - name: resolution
             type: enum
             label: Resolution
@@ -109,11 +131,11 @@ providers:
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
-            default: "1:1"
+            default: "16:9"
             options:
-              - {value: "1:1", label: Square}
-              - {value: "16:9", label: Landscape}
-              - {value: "9:16", label: Portrait}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
               - {value: "4:3"}
               - {value: "3:4"}
 
@@ -135,8 +157,8 @@ providers:
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
-            default: "1:1"
-            options: [{value: "1:1"}, {value: "16:9"}, {value: "9:16"}, {value: "4:3"}, {value: "3:4"}]
+            default: "16:9"
+            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}, {value: "4:3"}, {value: "3:4"}]
           - {name: num_outputs, type: integer, label: Outputs, default: 1, min: 1, max: 4, step: 1, group: advanced}
 
       - id: black-forest-labs/flux-dev
@@ -149,8 +171,8 @@ providers:
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
-            default: "1:1"
-            options: [{value: "1:1"}, {value: "16:9"}, {value: "9:16"}]
+            default: "16:9"
+            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}]
 
   - key: runway
     label: Runway
@@ -179,7 +201,7 @@ providers:
             type: enum
             label: Aspect ratio
             default: "16:9"
-            options: [{value: "16:9", label: Landscape}, {value: "9:16", label: Portrait}]
+            options: [{value: "16:9"}, {value: "9:16"}]
 
   - key: luma
     label: Luma
@@ -224,6 +246,7 @@ providers:
       - id: eleven_multilingual_v2
         label: Multilingual v2 (TTS)
         modality: audio
+        role: speech
         adapter: genblaze_elevenlabs:ElevenLabsTTSProvider
         expected_duration_sec: 15
         output_media_type: audio/mpeg
@@ -239,6 +262,7 @@ providers:
       - id: eleven_text_to_sound_v2
         label: Sound Effects
         modality: audio
+        role: sfx
         adapter: genblaze_elevenlabs:ElevenLabsSFXProvider
         expected_duration_sec: 15
         output_media_type: audio/mpeg

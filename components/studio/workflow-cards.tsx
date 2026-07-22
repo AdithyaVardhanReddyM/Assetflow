@@ -7,6 +7,7 @@ import {
   ImageSquareIcon,
   MusicNotesIcon,
   SparkleIcon,
+  TrashIcon,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 
@@ -39,35 +40,46 @@ function hashHue(name: string) {
   return SWATCHES[Math.abs(h) % SWATCHES.length];
 }
 
+/**
+ * The card frame. The open action is a button *inside* the frame rather than
+ * the frame itself, so overlay controls (delete) can sit on top without
+ * nesting a button in a button.
+ */
 function CardShell({
   onClick,
   children,
   delay,
+  overlay,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   delay: number;
+  overlay?: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
       style={{ animationDelay: `${delay}ms` }}
-      className="group w-52 shrink-0 overflow-hidden border border-[#1f211c]/8 bg-white/88 text-left shadow-[0_1px_2px_rgba(31,33,28,0.05),0_8px_20px_-12px_rgba(31,33,28,0.22)] backdrop-blur-sm transition-all duration-200 animate-[studio-rise_0.65s_cubic-bezier(0.32,0.72,0,1)_both] hover:-translate-y-1 hover:border-[#1f211c]/16 hover:shadow-[0_2px_4px_rgba(31,33,28,0.06),0_18px_36px_-18px_rgba(31,33,28,0.28)]"
+      className="group relative w-52 shrink-0 overflow-hidden border border-[#1f211c]/8 bg-white/88 shadow-[0_1px_2px_rgba(31,33,28,0.05),0_8px_20px_-12px_rgba(31,33,28,0.22)] backdrop-blur-sm transition-all duration-200 animate-[studio-rise_0.65s_cubic-bezier(0.32,0.72,0,1)_both] hover:-translate-y-1 hover:border-[#1f211c]/16 hover:shadow-[0_2px_4px_rgba(31,33,28,0.06),0_18px_36px_-18px_rgba(31,33,28,0.28)]"
     >
-      {children}
-    </button>
+      <button type="button" onClick={onClick} className="block w-full text-left">
+        {children}
+      </button>
+      {overlay}
+    </div>
   );
 }
 
 export function WorkflowCards({
   workflows,
   onOpen,
+  onDelete,
   onStartTemplate,
 }: {
   workflows: WorkflowCard[];
   /** Passed the whole card: opening one has to load its graph by id. */
   onOpen: (card: WorkflowCard) => void;
+  /** Asks to delete — the shell owns the confirmation and the server call. */
+  onDelete: (card: WorkflowCard) => void;
   /** Templates are not saved rows — they open a blank canvas under that name. */
   onStartTemplate: (name: string) => void;
 }) {
@@ -93,7 +105,21 @@ export function WorkflowCards({
           ? workflows.map((wf, i) => {
               const [from, to] = hashHue(wf.name);
               return (
-                <CardShell key={wf.id} delay={i * 55} onClick={() => onOpen(wf)}>
+                <CardShell
+                  key={wf.id}
+                  delay={i * 55}
+                  onClick={() => onOpen(wf)}
+                  overlay={
+                    <button
+                      type="button"
+                      aria-label={`Delete ${wf.name}`}
+                      onClick={() => onDelete(wf)}
+                      className="absolute top-2 right-2 grid size-7 place-items-center bg-white/85 text-[#4c4a41] opacity-0 shadow-[0_2px_10px_-3px_rgba(31,33,28,0.4)] backdrop-blur-sm transition-all duration-150 group-hover:opacity-100 hover:bg-[#cf7c7c]/18 hover:text-[#a94848] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#1f211c]/40"
+                    >
+                      <TrashIcon className="size-3.5" />
+                    </button>
+                  }
+                >
                   <div
                     className="relative h-[104px] w-full"
                     style={{

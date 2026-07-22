@@ -24,10 +24,13 @@ def _model_payload(model: ModelDescriptor) -> dict[str, Any]:
         "provider": model.provider_key,
         "provider_label": model.provider_label,
         "modality": model.modality.value,
+        "role": model.role,
         "status": model.status.value,
         "expected_duration_sec": model.expected_duration_sec,
         "est_cost_usd": model.est_cost_usd,
         "output_media_type": model.output_media_type,
+        "output_aspect_ratio": model.output_aspect_ratio,
+        "requires_prompt": model.requires_prompt,
         "params": [p.model_dump(exclude_none=True) for p in model.params],
         "accepts": [a.model_dump() for a in model.accepts],
     }

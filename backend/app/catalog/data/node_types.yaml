@@ -36,6 +36,10 @@ node_types:
       # "Start frame" on video nodes and "Init image" on image nodes.
       - {id: init_image, modality: image, required: false, multi: false, model_gated: true}
       - {id: end_frame, modality: image, required: false, multi: false, model_gated: true}
+      # Lipsync pair: the face to drive, and the speech that drives it. Both
+      # model_gated, so they surface only on models that declare them.
+      - {id: avatar, modality: image, required: false, multi: false, model_gated: true}
+      - {id: speech, modality: audio, required: false, multi: false, model_gated: true}
       # Reference images (style, subject, wardrobe). Multi because the canonical
       # case is several references conditioning one generation.
       - {id: image_ref, modality: image, required: false, multi: true, model_gated: true}

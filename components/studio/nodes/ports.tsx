@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * The port rail — the circular connectors down the left edge of a node and the
- * single output on its right.
+ * The port rail — the connector islands that float clear of a node's left edge,
+ * and the single output that floats off its right.
  *
  * Which ports exist is never decided here: `visiblePorts()` resolves them from
  * the catalog, including the model-gating rule that a `model_gated` port shows
@@ -16,12 +16,15 @@ import {
   AlignLeftSimpleIcon,
   AlignRightSimpleIcon,
   ArrowLineRightIcon,
+  MicrophoneIcon,
   TextTIcon,
+  UserIcon,
 } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 import type { PortSpec } from "@/lib/studio/catalog";
 import { accentFor } from "@/lib/studio/node-ui";
+import { ROLE_ICON, ROLE_LABEL } from "./roles";
 import { ImageGenIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -31,11 +34,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
  * image inputs above it.
  */
 const PORT_ORDER = [
+  "avatar",
   "init_image",
   "end_frame",
   "image_ref",
   "video",
   "audio",
+  "speech",
   "in",
   "prompt",
 ];
@@ -58,6 +63,10 @@ export function portLabel(portId: string, nodeModality?: string): string {
       return "End frame";
     case "image_ref":
       return "Reference";
+    case "avatar":
+      return "Avatar";
+    case "speech":
+      return "Speech";
     case "prompt":
       return "Text";
     case "video":
@@ -96,6 +105,10 @@ function PortGlyph({
       return <AlignRightSimpleIcon className={className} weight="fill" />;
     case "image_ref":
       return <ImageGenIcon className={className} />;
+    case "avatar":
+      return <UserIcon className={className} weight="fill" />;
+    case "speech":
+      return <MicrophoneIcon className={className} weight="fill" />;
     case "prompt":
       return <TextTIcon className={className} weight="fill" />;
     case "video":
@@ -107,8 +120,27 @@ function PortGlyph({
   }
 }
 
-const DOT =
-  "grid size-[30px] place-items-center rounded-full border border-white/70 shadow-[0_2px_8px_-2px_rgba(31,33,28,0.3)] transition-transform duration-150 hover:scale-110";
+/**
+ * The handle is the 30px hit area only. Its look lives on the child span below,
+ * because `globals.css` resets `border` on `.react-flow__handle` at a
+ * specificity these utilities cannot beat — styling a child sidesteps that.
+ */
+const HIT_AREA = "grid size-[30px] place-items-center";
+
+/**
+ * Ports read as islands: they clear the card entirely (see `PORT_OFFSET`) and
+ * carry their own border and elevation, so each is its own object rather than a
+ * bump on the node's edge. `pointer-events-none` keeps the visual out of the
+ * pointer stream React Flow needs to start a connection.
+ */
+const ISLAND =
+  "pointer-events-none grid size-full place-items-center border border-[#1f211c]/10 shadow-[0_4px_12px_-2px_rgba(31,33,28,0.26),0_1px_2px_rgba(31,33,28,0.10)] transition-transform duration-150 group-hover/port:scale-110";
+
+/**
+ * How far the rails sit outside the card. The island is 30px, so this leaves a
+ * ~10px gap of canvas between it and the card edge.
+ */
+const PORT_OFFSET = "-40px";
 
 function PortDot({
   port,
@@ -128,7 +160,7 @@ function PortDot({
         render={
           // The tooltip trigger wraps the handle rather than being it: React
           // Flow needs the handle's own pointer events to start a connection.
-          <span className="relative flex">
+          <span className="group/port relative flex">
             <Handle
               type="target"
               position={Position.Left}
@@ -137,15 +169,18 @@ function PortDot({
               // existing edge out rather than making the user delete it first.
               // Refusing here would look like the port was simply broken.
               aria-label={label}
-              className={cn(DOT, !port.multi && connected && "ring-2 ring-white")}
-              style={{ background: accent.soft, color: accent.ink }}
+              className={HIT_AREA}
             >
-              {/* Icons must not swallow the pointer stream the handle needs. */}
-              <PortGlyph
-                portId={port.id}
-                nodeModality={nodeModality}
-                className="pointer-events-none size-[15px]"
-              />
+              <span
+                className={cn(ISLAND, !port.multi && connected && "ring-2 ring-white")}
+                style={{ background: accent.soft, color: accent.ink }}
+              >
+                <PortGlyph
+                  portId={port.id}
+                  nodeModality={nodeModality}
+                  className="size-[15px]"
+                />
+              </span>
             </Handle>
           </span>
         }
@@ -178,8 +213,9 @@ export function PortRail({
 
   return (
     <div
+      style={{ left: PORT_OFFSET }}
       className={cn(
-        "absolute -left-[15px] z-10 flex flex-col items-center justify-end gap-2.5",
+        "absolute z-10 flex flex-col items-center justify-end gap-2.5",
         className,
       )}
     >
@@ -200,37 +236,52 @@ export function PortRail({
   );
 }
 
-/** The single output connector, top-right. */
+/**
+ * The single output connector. Carries the model's `role` where it has one, so
+ * a Speech node emits from a speech-marked connector rather than from the same
+ * generic audio dot as Music — and colours it to match the node it belongs to.
+ */
 export function OutputPort({
   modality,
+  role,
   className,
 }: {
   modality?: string;
+  role?: string | null;
   className?: string;
 }) {
-  const accent = accentFor(modality);
+  const accent = accentFor(role || modality);
+  const RoleGlyph = role ? ROLE_ICON[role] : undefined;
   const glyphPort =
     modality === "video" ? "video" : modality === "audio" ? "audio" : "image_ref";
 
   return (
-    <div className={cn("absolute -right-[15px] z-10", className)}>
+    <div style={{ right: PORT_OFFSET }} className={cn("absolute z-10", className)}>
       <Tooltip>
         <TooltipTrigger
           render={
-            <span className="relative flex">
+            <span className="group/port relative flex">
               <Handle
                 type="source"
                 position={Position.Right}
                 id="out"
                 aria-label="Output"
-                className={DOT}
-                style={{ background: accent.soft, color: accent.ink }}
+                className={HIT_AREA}
               >
-                <PortGlyph
-                  portId={glyphPort}
-                  nodeModality={modality}
-                  className="pointer-events-none size-[15px]"
-                />
+                <span
+                  className={ISLAND}
+                  style={{ background: accent.soft, color: accent.ink }}
+                >
+                  {RoleGlyph ? (
+                    <RoleGlyph className="size-[15px]" />
+                  ) : (
+                    <PortGlyph
+                      portId={glyphPort}
+                      nodeModality={modality}
+                      className="size-[15px]"
+                    />
+                  )}
+                </span>
               </Handle>
             </span>
           }
@@ -240,7 +291,7 @@ export function OutputPort({
           sideOffset={8}
           className="bg-[#1f211c] text-[#f7f4ee]"
         >
-          Drag to connect
+          {role && ROLE_LABEL[role] ? `${ROLE_LABEL[role]} out` : "Drag to connect"}
         </TooltipContent>
       </Tooltip>
     </div>

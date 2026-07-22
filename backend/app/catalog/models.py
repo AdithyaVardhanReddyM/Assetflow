@@ -72,10 +72,23 @@ class ModelDescriptor(BaseModel):
     id: str
     label: str
     modality: Modality
+    # What the model is *for*, when modality alone is too coarse to tell the
+    # canvas how to present it. Music, text-to-speech and sound effects are all
+    # `audio` and would otherwise render as three identical nodes. Optional:
+    # image and video models are adequately described by their modality.
+    role: str | None = None
     adapter: str  # "module:ClassName", imported lazily and only when running
     expected_duration_sec: float | None = None
     est_cost_usd: float | None = None
     output_media_type: str | None = None
+    # Shape of what this model emits, for models that expose no `aspect_ratio`
+    # param to choose it. Lipsync is the case: the output follows the avatar
+    # that drove it, so the canvas has nothing to offer the user but still
+    # wants to preview the right shape. Absent means "square".
+    output_aspect_ratio: str | None = None
+    # False for models driven entirely by their input ports. The compiler skips
+    # its NO_PROMPT check and the canvas drops the prompt box for these.
+    requires_prompt: bool = True
     params: list[ParamDescriptor] = Field(default_factory=list)
     accepts: list[PortHandoff] = Field(default_factory=list)
 
