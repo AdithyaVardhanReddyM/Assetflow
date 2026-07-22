@@ -32,7 +32,13 @@ node_types:
     description: One generation step — provider, model, prompt, parameters.
     inputs:
       - {id: prompt, modality: text, required: false, multi: false}
+      # `init_image` is the first-frame conditioning image; the canvas labels it
+      # "Start frame" on video nodes and "Init image" on image nodes.
       - {id: init_image, modality: image, required: false, multi: false, model_gated: true}
+      - {id: end_frame, modality: image, required: false, multi: false, model_gated: true}
+      # Reference images (style, subject, wardrobe). Multi because the canonical
+      # case is several references conditioning one generation.
+      - {id: image_ref, modality: image, required: false, multi: true, model_gated: true}
     outputs:
       - {id: out, modality: any}
     default_data:

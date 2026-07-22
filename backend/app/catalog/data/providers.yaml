@@ -20,6 +20,14 @@ providers:
         expected_duration_sec: 5
         est_cost_usd: 0
         output_media_type: video/mp4
+        # The mock adapter is ours and ignores its inputs, so it can safely
+        # declare the full port rail — that is what gives the canvas something
+        # to demo without claiming capabilities a real provider has not been
+        # verified to have.
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: end_frame, via: external_inputs, modality: image}
+          - {port: image_ref, via: external_inputs, modality: image}
         params:
           - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 1, max: 10, step: 1}
           - name: aspect_ratio
@@ -38,6 +46,9 @@ providers:
         expected_duration_sec: 2
         est_cost_usd: 0
         output_media_type: image/png
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: image_ref, via: external_inputs, modality: image}
         params:
           - name: aspect_ratio
             type: enum

@@ -5,7 +5,10 @@ import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { CheckCircleIcon, InfoIcon, WarningIcon, XCircleIcon, SpinnerIcon } from "@phosphor-icons/react"
 
 const Toaster = ({ ...props }: ToasterProps) => {
-  const { theme = "system" } = useTheme()
+  // No ThemeProvider is mounted, so this falls back to the default. Light, not
+  // "system" — the app renders light-only, and a dark resolve here would paint
+  // sonner's dark text onto our light popover.
+  const { theme = "light" } = useTheme()
 
   return (
     <Sonner
@@ -39,6 +42,9 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         classNames: {
           toast: "cn-toast",
+          // Important: sonner's own `[data-description]` rule outranks a plain
+          // utility class.
+          description: "text-muted-foreground!",
         },
       }}
       {...props}

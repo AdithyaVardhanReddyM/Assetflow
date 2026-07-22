@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
@@ -13,16 +13,23 @@ from app.config import StorageMode
 from app.db.models import Asset, Run, RunStep
 from app.deps import CurrentUser, Session, SettingsDep
 from app.errors import NotFound
+from app.services.uploads import ingest_upload
 
 router = APIRouter(prefix="/v1/assets", tags=["assets"])
 
 
 def _serialize(asset: Asset) -> dict[str, Any]:
+    from app.engine.manifests import preview_url
+
     return {
         "id": str(asset.id),
         "kind": asset.kind.value,
         "url": asset.url,
         "content_url": f"/v1/assets/{asset.id}/content",
+        # Short-lived and deliberately not persisted anywhere. `content_url`
+        # needs an Authorization header, which an <img> cannot send, so the
+        # canvas renders from this instead.
+        "preview_url": preview_url(asset.b2_key or asset.url),
         "media_type": asset.media_type,
         "modality": asset.modality,
         "sha256": asset.sha256,
@@ -45,6 +52,31 @@ async def _get_owned(session: Session, asset_id: uuid.UUID, user: CurrentUser) -
     if asset is None:
         raise NotFound(f"Asset {asset_id} was not found.")
     return asset
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def upload_asset(
+    session: Session,
+    user: CurrentUser,
+    response: Response,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Ingest a user's file so the canvas can reference it by asset id.
+
+    Returns 200 rather than 201 when the bytes were already in this tenant's
+    library — the client gets the same asset either way, and the status says
+    whether anything new was stored.
+    """
+    asset, created = await ingest_upload(
+        session,
+        tenant_id=user.tenant_id,
+        stream=file.file,
+        filename=file.filename,
+        media_type=file.content_type,
+    )
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return _serialize(asset)
 
 
 @router.get("")

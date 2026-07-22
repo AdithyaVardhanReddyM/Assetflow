@@ -76,7 +76,24 @@ def test_linear_chain_maps_edges_to_input_from(catalog):
         [edge("e1", "img", "vid", "init_image")],
     )
     result = plan_graph(graph, catalog=catalog)
-    # mock-video-v1 declares no `accepts`, so init_image is not a valid port
+    assert result.valid, result.errors
+    # Visual order puts the image step first, and the video step consumes it by
+    # index rather than by node id.
+    assert [s.node_id for s in result.plan.steps] == ["img", "vid"]
+    assert result.plan.step_for_node("vid").input_from == [0]
+
+
+def test_port_is_gated_on_the_model_declaring_it(catalog):
+    """`init_image` is model_gated, so it exists only for models whose catalog
+    entry declares it in `accepts` — mock-audio-v1 does not."""
+    graph = build(
+        [
+            gen("img", model="mock-image-v1", modality="image", y=0),
+            gen("aud", model="mock-audio-v1", modality="audio", y=100),
+        ],
+        [edge("e1", "img", "aud", "init_image")],
+    )
+    result = plan_graph(graph, catalog=catalog)
     assert not result.valid
     assert ErrorCode.UNKNOWN_HANDLE in codes(result)
 

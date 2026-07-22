@@ -8,6 +8,7 @@ really is in the bucket and still intact. Echoing our own row would prove nothin
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Any
 
 from app.config import StorageMode, get_settings
@@ -30,6 +31,52 @@ def _backend() -> Any:
         key_id=settings.b2_key_id,
         app_key=settings.b2_app_key,
     )
+
+
+@lru_cache(maxsize=1)
+def _signing_backend() -> Any:
+    """A backend used only to mint presigned URLs.
+
+    Separate from `_backend()` and cached because listing a page of assets
+    presigns every row: constructing a fresh client each time would repeat the
+    bucket preflight per asset. Signing itself is local HMAC work with no
+    network call, so one long-lived client is all this needs.
+    """
+    settings = get_settings()
+    from genblaze_s3 import S3StorageBackend
+
+    return S3StorageBackend.for_backblaze(
+        settings.b2_bucket,
+        region=settings.b2_region,
+        key_id=settings.b2_key_id,
+        app_key=settings.b2_app_key,
+        preflight=False,
+    )
+
+
+def preview_url(url_or_key: str | None, *, expires_in: int = 3600) -> str | None:
+    """Best-effort presigned URL for rendering in an `<img>`/`<video>`.
+
+    Returns None rather than raising: a thumbnail that cannot be signed should
+    degrade to a placeholder, not fail the whole listing.
+    """
+    settings = get_settings()
+    if settings.storage_mode is StorageMode.LOCAL:
+        # Local media is already served unauthenticated from /media.
+        return url_or_key
+    if not url_or_key or not settings.b2_configured:
+        return None
+    try:
+        backend = _signing_backend()
+        key = (
+            backend.key_from_url(url_or_key)
+            if url_or_key.startswith("http")
+            else url_or_key
+        )
+        return backend.presigned_get_url(key, expires_in=expires_in) if key else None
+    except Exception as exc:  # noqa: BLE001 - a preview is not worth a 500
+        log.warning("storage.preview_url_failed", error=f"{type(exc).__name__}: {exc}")
+        return None
 
 
 async def read_manifest(run: Run) -> dict[str, Any]:

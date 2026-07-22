@@ -55,6 +55,10 @@ class TextNodeData(BaseModel):
 
 class UploadNodeData(BaseModel):
     asset_id: str | None = None
+    #: Canvas-only caption. Node data is round-tripped through these models and
+    #: re-dumped, so anything the editor wants to persist has to be declared —
+    #: undeclared keys are silently dropped.
+    title: str | None = Field(default=None, max_length=120)
 
 
 class GenerateNodeData(BaseModel):
@@ -65,6 +69,8 @@ class GenerateNodeData(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     fallback_models: list[str] = Field(default_factory=list, max_length=3)
     expected_duration_sec: float | None = None
+    #: Canvas-only caption; never sent to a provider.
+    title: str | None = Field(default=None, max_length=120)
 
 
 class CompositeNodeData(BaseModel):

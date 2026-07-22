@@ -10,6 +10,7 @@
   --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
   --font-heading: var(--font-heading);
+  --font-serif: var(--font-instrument-serif);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -121,6 +122,93 @@ body {
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* --- Studio ---------------------------------------------------------- */
+
+@keyframes studio-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+    filter: blur(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes studio-drift-in {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* --- Studio canvas ---------------------------------------------------
+   Only `base.css` is imported from @xyflow/react — the full `style.css`
+   themes nodes, handles and controls for a look this canvas does not use,
+   and unpicking it costs more than styling from the base up.
+
+   Handles are laid out by the node's own flex rail rather than by React
+   Flow's absolute positioning, so the port stack stays a normal column and
+   each dot keeps whatever vertical rhythm the node gives it. React Flow
+   measures handle bounds from the DOM, so connections still land correctly. */
+
+.studio-canvas .react-flow__handle {
+  position: relative;
+  inset: auto;
+  transform: none;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  pointer-events: all;
+}
+
+.studio-canvas .react-flow__edge-path,
+.studio-canvas .react-flow__connection-path {
+  stroke: #8fb4dd;
+  stroke-width: 1.6;
+}
+
+.studio-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: #1f211c;
+  stroke-width: 2;
+}
+
+/* The pane owns the marquee; nodes must not inherit a text cursor. */
+.studio-canvas .react-flow__node {
+  cursor: default;
+}
+
+.studio-canvas .react-flow__selection {
+  background: rgba(31, 33, 28, 0.05);
+  border: 1px solid rgba(31, 33, 28, 0.35);
+}
+
+/* Dragging a connection dims every port that cannot legally receive it, so the
+   valid targets are the only thing that stays lit. */
+.studio-canvas .react-flow__handle-connecting {
+  opacity: 0.35;
+}
+
+.studio-canvas .react-flow__handle-valid {
+  opacity: 1;
+}
+
+@utility no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -134,4 +222,69 @@ body {
   html {
     @apply font-sans;
   }
+}
+
+/* border-beam's rotate presets ("sm"/"md") build their stroke as
+   `<monochrome conic>, <coloured radials>` — the mono pass is hardcoded black
+   under theme="light" and white under theme="dark", and it sits on top. Neither
+   suits the cream prompt bar: the black reads as a grey streak, the white
+   dissolves into the surface, and no prop reaches it.
+
+   So repaint the background outright in the brand amber. Only the *colour*
+   layers are ours — the library's rotating conic mask is left alone, and since
+   its colour layers were always static radials anyway (the mask is what
+   travels), the motion is identical. Spacing the blobs evenly around the
+   perimeter also fixes the stock palette's habit of parking its warmest spot
+   at one corner.
+
+   The extra [data-beam] outweighs the library's [data-beam][data-active] rules
+   without needing !important. */
+
+.beam-colour-only[data-beam][data-active]::after,
+.beam-colour-only[data-beam][data-fading]::after {
+  background:
+    radial-gradient(ellipse 150px 46px at 12% 0%, var(--primary), transparent),
+    radial-gradient(ellipse 170px 46px at 38% 0%, oklch(0.9 0.16 96), transparent),
+    radial-gradient(ellipse 170px 46px at 62% 0%, var(--primary), transparent),
+    radial-gradient(ellipse 150px 46px at 88% 0%, oklch(0.82 0.19 78), transparent),
+    radial-gradient(ellipse 150px 46px at 12% 100%, oklch(0.82 0.19 78), transparent),
+    radial-gradient(ellipse 170px 46px at 38% 100%, var(--primary), transparent),
+    radial-gradient(ellipse 170px 46px at 62% 100%, oklch(0.9 0.16 96), transparent),
+    radial-gradient(ellipse 150px 46px at 88% 100%, var(--primary), transparent),
+    radial-gradient(ellipse 44px 90px at 0% 50%, oklch(0.88 0.17 88), transparent),
+    radial-gradient(ellipse 44px 90px at 100% 50%, oklch(0.88 0.17 88), transparent);
+}
+
+/* The inner glow is already colour-only, but it inherits the sunset reds and
+   carries `box-shadow: inset 0 0 9px 1px <innerShadow>` — rgba(0,0,0,0.14) on
+   the light preset, i.e. a grey fog against white. Match it to the stroke. */
+.beam-colour-only[data-beam][data-active]::before,
+.beam-colour-only[data-beam][data-fading]::before {
+  box-shadow: none;
+  background:
+    radial-gradient(ellipse 190px 64px at 25% 0%, oklch(0.88 0.17 88 / 0.5), transparent),
+    radial-gradient(ellipse 190px 64px at 75% 0%, oklch(0.88 0.17 88 / 0.5), transparent),
+    radial-gradient(ellipse 190px 64px at 25% 100%, oklch(0.88 0.17 88 / 0.5), transparent),
+    radial-gradient(ellipse 190px 64px at 75% 100%, oklch(0.88 0.17 88 / 0.5), transparent),
+    radial-gradient(ellipse 60px 110px at 0% 50%, oklch(0.88 0.17 88 / 0.5), transparent),
+    radial-gradient(ellipse 60px 110px at 100% 50%, oklch(0.88 0.17 88 / 0.5), transparent);
+}
+
+/* The studio morph fades the graph, not the whole canvas.
+
+   React Flow renders <Background> as a *sibling* of .react-flow__viewport, so
+   dimming the canvas wrapper dims the dot grid along with the nodes — and the
+   dots then visibly brighten again on the way into canvas mode. Fading only the
+   viewport leaves the grid at full strength either side of the morph.
+
+   Written as plain CSS rather than a Tailwind arbitrary variant because `_` is
+   Tailwind's escape for a space: `[&_.react-flow__viewport]:opacity-35`
+   compiles to `.react-flow viewport`, which matches nothing. */
+
+.studio-canvas .react-flow__viewport {
+  transition: opacity 700ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-studio-ghost="true"] .studio-canvas .react-flow__viewport {
+  opacity: 0.35;
 }
