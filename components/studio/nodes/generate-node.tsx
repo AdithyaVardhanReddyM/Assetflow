@@ -23,7 +23,6 @@ import {
   PlayIcon,
   TrashIcon,
   WarningIcon,
-  WaveformIcon,
 } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
@@ -38,9 +37,9 @@ import {
 import type { GenerateNodeData, StudioNode } from "@/lib/studio/graph";
 import { accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
-import { ImageGenIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
+import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { OutputPort, PortRail } from "./ports";
-import { ROLE_ICON, ROLE_LABEL } from "./roles";
+import { ROLE_COPY, ROLE_ICON, ROLE_LABEL } from "./roles";
 import {
   BarButton,
   BarDivider,
@@ -77,12 +76,19 @@ const SQUARE_WIDTH = 400;
  */
 const AUDIO_WIDTH = 440;
 const AUDIO_WELL_HEIGHT = 120;
+/**
+ * Text is sized like audio and for the same reason: its result is words, not a
+ * picture, so the well is a reading strip rather than a preview. Slightly
+ * taller than audio's — a rewritten prompt is a paragraph, not a waveform.
+ */
+const TEXT_WIDTH = 440;
+const TEXT_WELL_HEIGHT = 150;
 
 const MODALITY_ICON = {
   image: ImageGenIcon,
   video: VideoGenIcon,
   audio: MusicGenIcon,
-  text: WaveformIcon,
+  text: LlmIcon,
 } as const;
 
 const MODALITY_LABEL = {
@@ -128,6 +134,7 @@ function ratioOf(params: Record<string, unknown>, model?: CatalogModel): string 
  */
 function nodeShape(ratio: string, modality: string): { width: number; well: number } {
   if (modality === "audio") return { width: AUDIO_WIDTH, well: AUDIO_WELL_HEIGHT };
+  if (modality === "text") return { width: TEXT_WIDTH, well: TEXT_WELL_HEIGHT };
 
   const [w, h] = ratio.split(":").map(Number);
   const r = w > 0 && h > 0 ? w / h : 16 / 9;
@@ -169,6 +176,7 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const Icon = ROLE_ICON[role] ?? MODALITY_ICON[modality] ?? ImageGenIcon;
   const kindLabel = ROLE_LABEL[role] ?? MODALITY_LABEL[modality] ?? "Generate";
   const accent = accentFor(role || modality);
+  const copy = ROLE_COPY[role];
   const promptDriven = connected.has("prompt");
   const ratio = ratioOf(wire.params ?? {}, model);
   const shape = nodeShape(ratio, modality);
@@ -328,7 +336,7 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
               <Icon className="size-5" />
             </span>
             <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
-              Your {kindLabel.toLowerCase()} will appear here
+              {copy?.well ?? `Your ${kindLabel.toLowerCase()} will appear here`}
             </p>
           </div>
         </div>
@@ -355,10 +363,15 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
           placeholder={
             promptDriven
-              ? "Driven by the connected text node"
-              : `Describe the ${kindLabel.toLowerCase()}…`
+              ? // Either a Text node's literal or an LLM node's rewrite — from
+                // here they are the same thing: this box no longer decides.
+                "Driven by the connected node"
+              : (copy?.placeholder ?? `Describe the ${kindLabel.toLowerCase()}…`)
           }
-          className="nodrag max-h-28 min-h-7 w-full resize-none bg-transparent py-0.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88] disabled:text-[#a09a88]"
+          // `nodrag` keeps a click from dragging the node; `nowheel` keeps the
+          // canvas from swallowing the wheel to pan with (`panOnScroll`), which
+          // otherwise leaves a long prompt scrollable only by its scrollbar.
+          className="nodrag nowheel thin-scrollbar max-h-28 min-h-7 w-full resize-none overflow-y-auto bg-transparent py-0.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88] disabled:text-[#a09a88]"
         />
         ) : null}
 

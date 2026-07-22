@@ -237,7 +237,7 @@ export function PromptBar({
               }
             }}
             placeholder="Describe the scene you imagine…"
-            className="max-h-50 min-h-20 flex-1 resize-none bg-transparent pt-1 text-[15px] leading-6 text-[#1f211c] outline-none placeholder:text-[#a09a88]"
+            className="thin-scrollbar max-h-50 min-h-20 flex-1 resize-none overflow-y-auto bg-transparent pt-1 text-[15px] leading-6 text-[#1f211c] outline-none placeholder:text-[#a09a88]"
           />
         </div>
 

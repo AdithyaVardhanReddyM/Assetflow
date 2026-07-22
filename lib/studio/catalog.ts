@@ -14,6 +14,8 @@
  * of every provider.
  */
 
+import { audioPortId, compositeTracks } from "./graph";
+
 export type Modality = "image" | "video" | "audio" | "text";
 
 export type ProviderStatus = "ready" | "missing_key" | "not_installed";
@@ -77,6 +79,18 @@ export type PortSpec = {
   required: boolean;
   multi: boolean;
   model_gated: boolean;
+  /**
+   * Source roles this port takes, where its modality alone is too permissive —
+   * lipsync's `speech` is audio, but so are music and sound effects. Empty (or
+   * absent, on an older backend) means any source of the right modality.
+   */
+  roles?: string[];
+  /**
+   * True when this describes a *family* of handles rather than one: the
+   * composite node expands it into a port per audio lane it carries. A template
+   * is never itself connectable — see `visiblePorts`.
+   */
+  per_track?: boolean;
 };
 
 export type CatalogNodeType = {
@@ -191,6 +205,44 @@ const MOCK_MODELS: CatalogModel[] = [
       { name: "duration", type: "integer", label: "Duration", unit: "s", default: 8, min: 1, max: 60, step: 1 },
     ],
   },
+  {
+    id: "mock-llm-v1",
+    label: "Mock Prompt Writer",
+    provider: "mock",
+    provider_label: "Mock (no API key)",
+    modality: "text",
+    role: "llm",
+    status: "ready",
+    expected_duration_sec: 2,
+    est_cost_usd: 0,
+    output_media_type: "text/plain",
+    accepts: [],
+    params: [
+      {
+        name: "target",
+        type: "enum",
+        label: "Write for",
+        default: "image",
+        options: [{ value: "image" }, { value: "video" }, { value: "audio" }],
+      },
+      { name: "temperature", type: "number", label: "Temperature", default: 0.7, min: 0, max: 1, step: 0.1, group: "advanced" },
+    ],
+  },
+  {
+    id: "mock-speech-v1",
+    label: "Mock Speech",
+    provider: "mock",
+    provider_label: "Mock (no API key)",
+    modality: "audio",
+    // The keyless source for a lipsync `speech` port. Mirrors providers.yaml.
+    role: "speech",
+    status: "ready",
+    expected_duration_sec: 3,
+    est_cost_usd: 0,
+    output_media_type: "audio/mpeg",
+    accepts: [],
+    params: [],
+  },
 ];
 
 const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
@@ -219,7 +271,9 @@ const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
       { id: "init_image", modality: "image", required: false, multi: false, model_gated: true },
       { id: "end_frame", modality: "image", required: false, multi: false, model_gated: true },
       { id: "avatar", modality: "image", required: false, multi: false, model_gated: true },
-      { id: "speech", modality: "audio", required: false, multi: false, model_gated: true },
+      // Only a text-to-speech node or an upload may drive a mouth — see the
+      // note on `roles` in node_types.yaml.
+      { id: "speech", modality: "audio", required: false, multi: false, model_gated: true, roles: ["speech"] },
       { id: "image_ref", modality: "image", required: false, multi: true, model_gated: true },
     ],
     outputs: [{ id: "out", modality: "any", required: false, multi: false, model_gated: false }],
@@ -235,14 +289,22 @@ const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
   },
   {
     kind: "transform.composite",
-    label: "Combine A/V",
+    label: "Composition",
     category: "transform",
     inputs: [
-      { id: "video", modality: "video", required: true, multi: false, model_gated: false },
-      { id: "audio", modality: "audio", required: true, multi: false, model_gated: false },
+      // `multi` on both: a track is a timeline, so several sources can sit on
+      // one, each becoming a clip the user positions in time.
+      { id: "video", modality: "video", required: true, multi: true, model_gated: false },
+      // A template the node expands per lane — see `per_track` on PortSpec.
+      { id: "audio", modality: "audio", required: false, multi: true, model_gated: false, per_track: true },
     ],
     outputs: [{ id: "out", modality: "video", required: false, multi: false, model_gated: false }],
-    default_data: { op: "mux" },
+    default_data: {
+      op: "mux",
+      timeline_sec: 30,
+      video: { id: "video", label: null, gain: 1, muted: false, clips: [] },
+      tracks: [{ id: "a1", label: null, gain: 1, muted: false, clips: [] }],
+    },
   },
   {
     kind: "output",
@@ -339,12 +401,26 @@ export function visiblePorts(
   catalog: Catalog,
   kind: string,
   model?: CatalogModel,
+  /** The node's own `wire` data — only consulted to expand `per_track` ports. */
+  wire?: Record<string, unknown>,
 ): PortSpec[] {
   const type = nodeType(catalog, kind);
   if (!type) return [];
-  return type.inputs.filter(
-    (p) => !p.model_gated || Boolean(model?.accepts.some((a) => a.port === p.id)),
-  );
+
+  const out: PortSpec[] = [];
+  for (const port of type.inputs) {
+    if (port.per_track) {
+      // The catalog describes what one lane's port looks like; the node says
+      // how many there are. Same expansion as `plan_graph`, in the same order.
+      for (const track of compositeTracks(wire)) {
+        out.push({ ...port, id: audioPortId(track.id), per_track: false });
+      }
+      continue;
+    }
+    if (port.model_gated && !model?.accepts.some((a) => a.port === port.id)) continue;
+    out.push(port);
+  }
+  return out;
 }
 
 export function statusReason(model: CatalogModel): string | null {

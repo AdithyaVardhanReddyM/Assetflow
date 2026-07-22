@@ -45,6 +45,8 @@ import {
   blueprintData,
   modalitiesCompatible,
   outputModality,
+  outputRole,
+  rolesCompatible,
 } from "@/lib/studio/node-ui";
 import { StudioProvider, type RunScope } from "./studio-context";
 import { NODE_TYPES } from "./nodes";
@@ -164,6 +166,16 @@ function CanvasInner({
       onInteract();
     },
     [setNodes, onInteract],
+  );
+
+  const disconnectPort = React.useCallback(
+    (id: string, handle: string) => {
+      setEdges((current) =>
+        current.filter((e) => !(e.target === id && e.targetHandle === handle)),
+      );
+      onInteract();
+    },
+    [setEdges, onInteract],
   );
 
   const deleteNode = React.useCallback(
@@ -368,9 +380,14 @@ function CanvasInner({
               String(targetNode.data.wire.model ?? ""),
             )
           : undefined;
-      const port = visiblePorts(catalog, targetNode.data.kind, model).find(
-        (p) => p.id === targetHandle,
-      );
+      // `data.wire` matters for a composition node: its audio handles exist
+      // per lane, so the port list cannot be resolved from the kind alone.
+      const port = visiblePorts(
+        catalog,
+        targetNode.data.kind,
+        model,
+        targetNode.data.wire,
+      ).find((p) => p.id === targetHandle);
       if (!port) return false;
 
       const from = outputModality(
@@ -379,7 +396,16 @@ function CanvasInner({
         catalog,
         sourceNode.data.asset?.modality,
       );
-      return modalitiesCompatible(from, port.modality);
+      if (!modalitiesCompatible(from, port.modality)) return false;
+
+      // Some ports are narrower than their modality: lipsync's `speech` takes a
+      // voice, and music is audio without being one. Refused here rather than
+      // left to the compiler — the port rail already says what it wants, so a
+      // handle that lights up and then errors would contradict it.
+      return rolesCompatible(
+        outputRole(sourceNode.data.kind, sourceNode.data.wire, catalog),
+        port.roles,
+      );
     },
     [catalog, nodeById, reaches],
   );
@@ -396,9 +422,12 @@ function CanvasInner({
             )
           : undefined;
       const port = targetNode
-        ? visiblePorts(catalog, targetNode.data.kind, model).find(
-            (p) => p.id === connection.targetHandle,
-          )
+        ? visiblePorts(
+            catalog,
+            targetNode.data.kind,
+            model,
+            targetNode.data.wire,
+          ).find((p) => p.id === connection.targetHandle)
         : undefined;
 
       setEdges((current) => {
@@ -454,12 +483,22 @@ function CanvasInner({
       catalog,
       assets,
       updateNode,
+      disconnectPort,
       deleteNode,
       duplicateNode,
       pickFileFor,
       runFrom: onRun,
     }),
-    [catalog, assets, updateNode, deleteNode, duplicateNode, pickFileFor, onRun],
+    [
+      catalog,
+      assets,
+      updateNode,
+      disconnectPort,
+      deleteNode,
+      duplicateNode,
+      pickFileFor,
+      onRun,
+    ],
   );
 
   return (

@@ -26,6 +26,7 @@ _SAMPLES = {
     "video": ("sample.mp4", "video/mp4"),
     "image": ("sample.png", "image/png"),
     "audio": ("sample.mp3", "audio/mpeg"),
+    "text": ("sample.txt", "text/plain"),
 }
 
 
@@ -56,12 +57,18 @@ def _asset(modality: str) -> Any:
 
     filename, media_type = _SAMPLES[modality]
     path = _staged(filename)
+    # A text asset carries its words in `metadata["text"]` as well as in its
+    # bytes: that is the field GenBlaze itself reads text out of (it screens it
+    # for moderation), so a consumer never has to fetch and decode the file to
+    # learn what an LLM step said.
+    metadata = {"text": path.read_text(encoding="utf-8")} if modality == "text" else {}
     # No sha256 here on purpose — the sink computes it from the bytes it actually
     # transfers, which is what makes Manifest.verify() meaningful.
     return Asset(
         url=path.resolve().as_uri(),
         media_type=media_type,
         size_bytes=path.stat().st_size,
+        metadata=metadata,
     )
 
 
@@ -86,3 +93,9 @@ def image_provider(**kwargs: Any) -> Any:
 
 def audio_provider(**kwargs: Any) -> Any:
     return _provider("audio", **kwargs)
+
+
+def text_provider(**kwargs: Any) -> Any:
+    """Stands in for an LLM. Returns a sample rewritten prompt, so the
+    prompt-writer node demonstrates end to end with no credentials."""
+    return _provider("text", **kwargs)

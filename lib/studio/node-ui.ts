@@ -13,7 +13,15 @@ import {
   defaultParams,
   modelsForModality,
 } from "./catalog";
-import type { GenerateNodeData, Modality as WireModality, NodeKind } from "./graph";
+import {
+  type CompositeNodeData,
+  type GenerateNodeData,
+  type Modality as WireModality,
+  type NodeKind,
+  DEFAULT_TIMELINE_SEC,
+  VIDEO_TRACK_ID,
+  newTrack,
+} from "./graph";
 
 /** Toolbar ids that place a node. The pointer tools are handled separately. */
 export type CreateToolId =
@@ -56,7 +64,10 @@ export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
   speech: {
     kind: "generate",
     modality: "audio",
-    prefer: ["eleven_multilingual_v2"],
+    // The mock is named second so a keyless canvas still places a *speech*
+    // node: falling through to "any audio model" would hand back Mock Audio,
+    // which is music, and music is not something a lipsync node will take.
+    prefer: ["eleven_multilingual_v2", "mock-speech-v1"],
     label: "Speech",
   },
   sfx: {
@@ -66,9 +77,14 @@ export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
     label: "Sound effects",
   },
   character: { kind: "generate", modality: "image", label: "Character sheet" },
-  llm: { kind: "generate", modality: "text", label: "LLM" },
+  llm: {
+    kind: "generate",
+    modality: "text",
+    prefer: ["mock-llm-v1"],
+    label: "LLM",
+  },
   text: { kind: "input.text", label: "Text" },
-  composition: { kind: "transform.composite", label: "Combine A/V" },
+  composition: { kind: "transform.composite", label: "Composition" },
   upload: { kind: "input.upload", label: "Upload" },
 };
 
@@ -104,7 +120,15 @@ export function blueprintData(
       return { asset_id: null, title: overrides.title ?? null };
 
     case "transform.composite":
-      return { op: "mux" };
+      // One audio lane to start. Its id is generated rather than fixed so two
+      // composition nodes never share lane ids — which matters the moment one
+      // is duplicated, since the copy carries its own edges.
+      return {
+        op: "mux",
+        timeline_sec: DEFAULT_TIMELINE_SEC,
+        video: newTrack(VIDEO_TRACK_ID),
+        tracks: [newTrack()],
+      } satisfies CompositeNodeData as unknown as Record<string, unknown>;
 
     case "output":
       return { label: overrides.title ?? null };
@@ -166,6 +190,35 @@ export function modalitiesCompatible(source: string, target: string): boolean {
   return source === ANY || source === target || target === ANY;
 }
 
+/**
+ * What a node's output is *for*, past its modality. Only a generate node has
+ * one, and it comes from the model rather than the node — same rule as
+ * `out_role` in compile.py. An upload has none: a file makes no claim about
+ * what is inside it, which is why an uploaded voice track may feed a port that
+ * a music node may not.
+ */
+export function outputRole(
+  kind: NodeKind,
+  wire: Record<string, unknown>,
+  catalog: Catalog,
+): string | null {
+  if (kind !== "generate") return null;
+  const data = wire as unknown as GenerateNodeData;
+  const model = catalog.models.find(
+    (m) => m.provider === data.provider && m.id === data.model,
+  );
+  return model?.role ?? null;
+}
+
+/** Mirrors the `port.roles` gate in compile.py. */
+export function rolesCompatible(
+  sourceRole: string | null,
+  portRoles: string[] | undefined,
+): boolean {
+  if (!portRoles?.length || sourceRole === null) return true;
+  return portRoles.includes(sourceRole);
+}
+
 // --- accents --------------------------------------------------------------
 
 /**
@@ -187,15 +240,20 @@ export const MODALITY_ACCENT: Record<string, Accent> = {
  * Accents keyed by a model's `role`, for nodes whose modality is too coarse to
  * tell them apart — the three audio tools otherwise share one green.
  *
- * These colour a node's own icon and the connector it emits from. *Input* ports
- * stay on `MODALITY_ACCENT`, because their colour is what tells you what may
- * legally connect, and that is a question about modality, not about role.
+ * These colour a node's own icon and the connector it emits from — and the few
+ * *input* ports that constrain their sources by role (lipsync's `speech`), so
+ * the two ends of a legal wire carry the same colour. Every other input port
+ * stays on `MODALITY_ACCENT`: its colour is what tells you what may connect,
+ * and where there is no role gate that is purely a question of modality.
  */
 export const ROLE_ACCENT: Record<string, Accent> = {
   music: { soft: "#dfe9dd", ink: "#527d5a" },
   speech: { soft: "#f2e6c8", ink: "#8d6f24" },
   sfx: { soft: "#f2dcdf", ink: "#9d5763" },
   lipsync: { soft: "#e3e7d2", ink: "#6c7a42" },
+  // The writing node deliberately keeps the neutral of the text it deals in,
+  // one shade darker so its glyph still reads on the tile.
+  llm: { soft: "#e8e4da", ink: "#5a5347" },
 };
 
 /** Looks up a role first, then a modality. Either may be passed. */
@@ -211,7 +269,7 @@ export const NODE_SIZE: Record<NodeKind, { width: number; height: number }> = {
   "input.text": { width: 300, height: 210 },
   "input.upload": { width: 260, height: 300 },
   generate: { width: 572, height: 480 },
-  "transform.composite": { width: 300, height: 150 },
+  "transform.composite": { width: 572, height: 560 },
   output: { width: 260, height: 130 },
 };
 

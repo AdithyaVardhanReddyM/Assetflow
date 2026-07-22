@@ -33,9 +33,15 @@ _EXT_BY_MEDIA_TYPE = {
     "image/webp": ".webp",
     "audio/mpeg": ".mp3",
     "audio/wav": ".wav",
+    "text/plain": ".txt",
 }
 
-_SAMPLE_BY_MODALITY = {"video": "sample.mp4", "image": "sample.png", "audio": "sample.mp3"}
+_SAMPLE_BY_MODALITY = {
+    "video": "sample.mp4",
+    "image": "sample.png",
+    "audio": "sample.mp3",
+    "text": "sample.txt",
+}
 
 
 @dataclass(slots=True)
@@ -205,7 +211,8 @@ def _materialize(
         shutil.copyfile(sample, dest)
         # The provider's declared media type may not match the stand-in bytes.
         record.media_type = {
-            "video": "video/mp4", "audio": "audio/mpeg", "image": "image/png"
+            "video": "video/mp4", "audio": "audio/mpeg", "image": "image/png",
+            "text": "text/plain",
         }.get(record.modality, record.media_type)
         dest = dest.with_suffix(_EXT_BY_MEDIA_TYPE.get(record.media_type, dest.suffix))
         if not dest.exists():

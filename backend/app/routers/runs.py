@@ -14,6 +14,7 @@ from app.db.models import Asset, Run, RunStatus, RunStep, Workflow
 from app.deps import CatalogDep, CurrentUser, Session
 from app.errors import Conflict, NotFound, UnprocessableGraph
 from app.graph.compile import plan_graph
+from app.graph.errors import ErrorCode, error
 from app.graph.schema import Graph
 from app.services.workflows import load_asset_refs
 
@@ -144,6 +145,27 @@ async def create_run(
         raise UnprocessableGraph(
             "This workflow cannot run yet.",
             errors=[d.as_dict() for d in plan_result.errors],
+        )
+
+    # A prompt written by an upstream LLM step is not knowable when the GenBlaze
+    # pipeline is built, and a run that quietly used the un-rewritten prompt
+    # would spend real money producing the wrong thing. Refuse instead — the
+    # canvas already carries the same message as a warning.
+    chained = plan_result.plan.prompt_chained_node_ids
+    if chained:
+        raise UnprocessableGraph(
+            "Running a workflow whose prompt comes from an LLM node isn't "
+            "supported yet.",
+            errors=[
+                error(
+                    ErrorCode.PROMPT_CHAIN_UNSUPPORTED,
+                    "This node's prompt is written by an LLM node.",
+                    node_id=node_id,
+                    hint="Disconnect the LLM node and type the prompt, or run the "
+                    "LLM node on its own first.",
+                ).as_dict()
+                for node_id in chained
+            ],
         )
 
     run = Run(

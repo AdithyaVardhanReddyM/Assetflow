@@ -21,6 +21,14 @@ export type StudioContextValue = {
   assets: Record<string, AssetPreview>;
   /** Shallow-merge a patch into a node's wire data. */
   updateNode: (id: string, patch: Record<string, unknown>) => void;
+  /**
+   * Drop whatever is wired into one input handle.
+   *
+   * Needed by nodes whose handles come and go: deleting a composition lane has
+   * to take its edge with it, or the graph keeps an edge pointing at a handle
+   * that no longer exists and the compiler rejects the whole workflow.
+   */
+  disconnectPort: (id: string, handle: string) => void;
   deleteNode: (id: string) => void;
   duplicateNode: (id: string) => void;
   /** Attach (or replace) the file behind an upload node. */

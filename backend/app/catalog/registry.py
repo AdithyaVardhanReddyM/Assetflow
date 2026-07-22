@@ -33,6 +33,17 @@ class PortSpec(BaseModel):
     multi: bool = False
     # True when the port only exists if the selected model declares it in `accepts`.
     model_gated: bool = False
+    # True when this is a *template* rather than a handle: the node expands it
+    # into one port per item in its own data. The composite node's audio lanes
+    # are the only user — see `audio_port_id` in graph/schema.py. A template
+    # port never survives resolution, so nothing can connect to it.
+    per_track: bool = False
+    # Source roles this port takes, when its modality alone is too permissive.
+    # A lipsync `speech` port is audio, but so are music and sound effects, and
+    # neither drives a mouth. Empty means "any source of the right modality".
+    # A source with no role of its own — an upload — always passes: a file
+    # carries no claim about what is inside it.
+    roles: list[str] = Field(default_factory=list)
 
 
 class NodeTypeDescriptor(BaseModel):
@@ -102,12 +113,40 @@ def load_catalog() -> Catalog:
     return Catalog(providers=providers, node_types=node_types)
 
 
-@lru_cache(maxsize=1)
-def get_catalog() -> Catalog:
+def _data_stamp() -> tuple[float, ...]:
+    """Modification times of the YAML the catalog is built from."""
+    stamps = []
+    for name in ("providers.yaml", "node_types.yaml"):
+        try:
+            stamps.append((DATA_DIR / name).stat().st_mtime)
+        except OSError:
+            stamps.append(0.0)
+    return tuple(stamps)
+
+
+@lru_cache(maxsize=4)
+def _catalog_for(_stamp: tuple[float, ...]) -> Catalog:
     return load_catalog()
 
 
+def get_catalog() -> Catalog:
+    """The catalog, rebuilt when its YAML changes.
+
+    Keyed on the data files' mtimes rather than cached outright, because the
+    catalog is hand-authored YAML read by a long-lived process: caching it for
+    the life of the server means an edit to `node_types.yaml` does not reach the
+    canvas until someone restarts, which reads as "my change did nothing" rather
+    than "my change is cached" — and quietly serves ports the compiler no longer
+    agrees with. `lib/studio/catalog.ts` makes the same call on the Next side.
+
+    The cost is two `stat` calls per lookup; the parse itself still only happens
+    when a file actually changed.
+    """
+    return _catalog_for(_data_stamp())
+
+
 def refresh_catalog() -> Catalog:
-    """Re-resolve availability (e.g. after credentials change). Used by /readyz."""
-    get_catalog.cache_clear()
+    """Force a rebuild — after credentials change, where availability depends on
+    the environment rather than on the files."""
+    _catalog_for.cache_clear()
     return get_catalog()

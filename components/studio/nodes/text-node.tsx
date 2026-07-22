@@ -48,7 +48,10 @@ export function TextNode({ id, data, selected }: NodeProps<StudioNode>) {
           maxLength={MAX_LENGTH}
           onChange={(e) => updateNode(id, { text: e.target.value })}
           placeholder="Enter your text…"
-          className="nodrag h-40 w-full resize-none bg-transparent p-3.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88]"
+          // `nodrag` keeps a click from dragging the node; `nowheel` keeps the
+          // canvas from swallowing the wheel to pan with (`panOnScroll`), which
+          // otherwise leaves a long text scrollable only by its scrollbar.
+          className="nodrag nowheel thin-scrollbar h-40 w-full resize-none overflow-y-auto bg-transparent p-3.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88]"
         />
       </NodeCard>
 

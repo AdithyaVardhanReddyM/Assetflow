@@ -20,7 +20,9 @@ from app.catalog.registry import Catalog, PortSpec
 from app.graph.errors import Diagnostic, ErrorCode, WarningCode, error, warning
 from app.graph.plan import ExecutionPlan, PlanEstimates, PlannedStep, PlanResult
 from app.graph.schema import (
+    VIDEO_TRACK_ID,
     AssetRef,
+    CompositeTrack,
     Edge,
     Graph,
     Node,
@@ -30,6 +32,13 @@ from app.graph.schema import (
 
 #: Pseudo-provider for the ffmpeg mux step; resolved by the engine, not the catalog.
 FFMPEG_PROVIDER = "__ffmpeg__"
+
+#: The one input port whose edges carry text rather than an asset.
+PROMPT_PORT = "prompt"
+
+#: The composite node's video bed. Its audio lanes are named per track — see
+#: `audio_port_id` in graph/schema.py.
+VIDEO_PORT = "video"
 
 _ANY = "any"
 
@@ -125,6 +134,9 @@ def plan_graph(
     models: dict[str, ModelDescriptor] = {}
     in_ports: dict[str, dict[str, PortSpec]] = {}
     out_modality: dict[str, str] = {}
+    # What each node's output is *for*, where it says. Only a generate node has
+    # one (from its model); an upload stays None, which every port accepts.
+    out_role: dict[str, str | None] = {}
 
     for node in graph.nodes:
         node_type = catalog.node_type(node.kind.value)
@@ -138,6 +150,7 @@ def plan_graph(
 
         ports = {p.id: p.model_copy() for p in node_type.inputs}
         modality = node_type.outputs[0].modality if node_type.outputs else _ANY
+        role: str | None = None
 
         if node.kind is NodeKind.GENERATE:
             data = node.typed_data()
@@ -159,6 +172,7 @@ def plan_graph(
             else:
                 models[node.id] = model
                 modality = model.modality.value
+                role = model.role
                 if data.modality != modality:
                     ctx.fail(
                         ErrorCode.MODALITY_UNSUPPORTED,
@@ -171,6 +185,17 @@ def plan_graph(
                 for port_id, port in list(ports.items()):
                     if port.model_gated and model.accepts_port(port_id) is None:
                         del ports[port_id]
+
+        elif node.kind is NodeKind.COMPOSITE:
+            # Expand the `audio` template into one handle per lane. The canvas
+            # does the same in `visiblePorts`, and the two must agree or a
+            # handle the user can draw to earns an UNKNOWN_HANDLE here.
+            template = ports.pop("audio", None)
+            if template is not None:
+                for track in node.typed_data().tracks:
+                    ports[track.port_id] = template.model_copy(
+                        update={"id": track.port_id, "per_track": False}
+                    )
 
         elif node.kind is NodeKind.UPLOAD:
             data = node.typed_data()
@@ -192,6 +217,7 @@ def plan_graph(
 
         in_ports[node.id] = ports
         out_modality[node.id] = modality
+        out_role[node.id] = role
 
     if ctx.errors:
         return ctx.result()
@@ -221,6 +247,23 @@ def plan_graph(
                 edge_id=edge.id,
                 node_id=edge.target,
                 port=edge.target_handle,
+            )
+            continue
+        # A port may also name the *roles* it takes, which is how lipsync's
+        # `speech` input refuses a music track that is nonetheless valid audio.
+        # A roleless source (an upload) passes: the file may well be a voice.
+        src_role = out_role.get(edge.source)
+        if port.roles and src_role is not None and src_role not in port.roles:
+            wanted = " or ".join(port.roles)
+            ctx.fail(
+                ErrorCode.ROLE_MISMATCH,
+                f"Input {edge.target_handle!r} takes {wanted}, but "
+                f"{by_id[edge.source].id} produces {src_role}.",
+                edge_id=edge.id,
+                node_id=edge.target,
+                port=edge.target_handle,
+                hint=f"Connect a {wanted} node, or an uploaded "
+                f"{port.modality} file.",
             )
             continue
         incoming[edge.target].append(edge)
@@ -257,13 +300,23 @@ def plan_graph(
     step_ids = {n.id for n in graph.nodes if n.is_step}
     upload_ids = {n.id for n in graph.nodes if n.kind is NodeKind.UPLOAD}
 
-    step_preds: dict[str, list[str]] = defaultdict(list)
+    # Both keep the port an edge arrived on: which port a chained input lands
+    # in decides whether several of them are a legal multi-input step or a
+    # fan-in the provider cannot reconcile (see `_build_step`).
+    step_preds: dict[str, list[tuple[str, str]]] = defaultdict(list)  # (port, node_id)
     upload_preds: dict[str, list[tuple[str, str]]] = defaultdict(list)  # (port, node_id)
+    # An edge into `prompt` carries words, not an asset, so it is kept apart
+    # from the chain inputs above: an LLM step feeding a prompt writes what the
+    # next step says, it does not hand it a file to work from.
+    prompt_preds: dict[str, str] = {}
     for edge in edges:
         if edge.target not in step_ids:
             continue
         if edge.source in step_ids:
-            step_preds[edge.target].append(edge.source)
+            if edge.target_handle == PROMPT_PORT:
+                prompt_preds[edge.target] = edge.source
+            else:
+                step_preds[edge.target].append((edge.target_handle, edge.source))
         elif edge.source in upload_ids:
             upload_preds[edge.target].append((edge.target_handle, edge.source))
 
@@ -275,7 +328,7 @@ def plan_graph(
         return ctx.result()
 
     # --- 6. deterministic topological order over step nodes -----------------
-    order = _topo_order(by_id, step_ids, step_preds)
+    order = _topo_order(by_id, step_ids, step_preds, prompt_preds)
     index_of = {node_id: i for i, node_id in enumerate(order)}
 
     if len(order) > limits.max_steps:
@@ -299,6 +352,7 @@ def plan_graph(
             by_id=by_id,
             step_preds=step_preds[node_id],
             upload_preds=upload_preds[node_id],
+            prompt_pred=prompt_preds.get(node_id),
             index_of=index_of,
             catalog=catalog,
             allow_mock_fallback=allow_mock_fallback,
@@ -326,6 +380,18 @@ def plan_graph(
                 WarningCode.UNUSED_OUTPUT,
                 "This node's result is not connected to anything.",
                 node_id=node_id,
+            )
+
+    # Drawable and valid, but not yet runnable — say so here rather than let the
+    # user find out from a failed run. See `PlannedStep.prompt_from`.
+    for step in steps:
+        if step.prompt_from is not None:
+            ctx.warn(
+                WarningCode.PROMPT_CHAIN_PENDING,
+                "This node's prompt is written by an LLM node. Running a workflow "
+                "that chains prompts isn't supported yet.",
+                node_id=step.node_id,
+                hint="Run the LLM node on its own and paste its result for now.",
             )
 
     duration = _critical_path(steps)
@@ -418,16 +484,26 @@ def _find_cycle(by_id: dict[str, Node], edges: list[Edge]) -> list[str]:
 
 
 def _topo_order(
-    by_id: dict[str, Node], step_ids: set[str], step_preds: dict[str, list[str]]
+    by_id: dict[str, Node],
+    step_ids: set[str],
+    step_preds: dict[str, list[tuple[str, str]]],
+    prompt_preds: dict[str, str],
 ) -> list[str]:
     """Kahn with a heap keyed by visual position, so ordering is stable and
-    matches top-to-bottom reading order."""
+    matches top-to-bottom reading order.
+
+    Prompt edges are ordering constraints too: the step that writes a prompt
+    has to run before the step that is described by it.
+    """
     succ: dict[str, list[str]] = defaultdict(list)
     indeg = dict.fromkeys(step_ids, 0)
     for target, sources in step_preds.items():
-        for source in sources:
+        for _, source in sources:
             succ[source].append(target)
             indeg[target] += 1
+    for target, source in prompt_preds.items():
+        succ[source].append(target)
+        indeg[target] += 1
 
     heap = [(by_id[n].sort_key(), n) for n, d in indeg.items() if d == 0]
     heapq.heapify(heap)
@@ -451,8 +527,9 @@ def _build_step(
     assets: dict[str, AssetRef],
     incoming: list[Edge],
     by_id: dict[str, Node],
-    step_preds: list[str],
+    step_preds: list[tuple[str, str]],
     upload_preds: list[tuple[str, str]],
+    prompt_pred: str | None,
     index_of: dict[str, int],
     catalog: Catalog,
     allow_mock_fallback: bool,
@@ -460,23 +537,14 @@ def _build_step(
     metadata: dict[str, Any] = {"node_id": node.id}
 
     if node.kind is NodeKind.COMPOSITE:
-        if len(step_preds) < 2:
-            ctx.fail(
-                ErrorCode.MISSING_REQUIRED_INPUT,
-                "Combine A/V needs both a video and an audio input.",
-                node_id=node.id,
-            )
-            return None
-        return PlannedStep(
-            node_id=node.id,
+        return _build_mix_step(
+            node=node,
             index=index,
-            provider_key=FFMPEG_PROVIDER,
-            model="mux",
-            modality="video",
-            step_type="mix",
-            input_from=sorted(index_of[p] for p in step_preds),
-            expected_duration_sec=10.0,
-            est_cost_usd=0.0,
+            ctx=ctx,
+            incoming=incoming,
+            by_id=by_id,
+            assets=assets,
+            index_of=index_of,
             metadata=metadata,
         )
 
@@ -508,17 +576,21 @@ def _build_step(
     prompt = data.prompt
     for edge in incoming:
         source = by_id[edge.source]
-        if source.kind is NodeKind.TEXT and edge.target_handle == "prompt":
+        if source.kind is NodeKind.TEXT and edge.target_handle == PROMPT_PORT:
             prompt = source.typed_data().text
+    # An upstream LLM step writes this prompt, so there is nothing to resolve
+    # here: the words do not exist until that step has run.
+    prompt_from = index_of[prompt_pred] if prompt_pred is not None else None
     # Some models are driven entirely by their input ports — lipsync takes an
     # avatar and a speech track and has nothing to describe — so a missing
     # prompt is only an error for models that declare they need one.
-    if model.requires_prompt and not (prompt or "").strip():
+    if model.requires_prompt and prompt_from is None and not (prompt or "").strip():
         ctx.fail(
             ErrorCode.NO_PROMPT,
             "This node needs a prompt.",
             node_id=node.id,
-            hint="Type a prompt on the node, or connect a Text node to its prompt input.",
+            hint="Type a prompt on the node, or connect a Text or LLM node to its "
+            "prompt input.",
         )
         return None
 
@@ -548,12 +620,18 @@ def _build_step(
         )
         return None
 
-    if len(step_preds) > 1:
+    # Several nodes may feed one step when the model declares a port for each:
+    # lipsync is the canonical case — an avatar and a speech track are two
+    # chained inputs the provider knows apart, not a fan-in it has to
+    # reconcile. What stays rejected is sources arriving through one port, or
+    # through a port this model never declared.
+    chained_ports = {port for port, _ in step_preds if model.accepts_port(port)}
+    if len(step_preds) > 1 and len(chained_ports) != len(step_preds):
         ctx.fail(
             ErrorCode.FANIN_UNSUPPORTED,
-            f"{model.label} accepts one input, but {len(step_preds)} nodes feed it.",
+            f"{model.label} cannot take {len(step_preds)} inputs at once.",
             node_id=node.id,
-            hint="Use a Combine A/V node to merge multiple inputs.",
+            hint="Use a Composition node to merge multiple inputs.",
         )
         return None
 
@@ -566,13 +644,155 @@ def _build_step(
         step_type="generate",
         prompt=prompt,
         params=params,
-        input_from=sorted(index_of[p] for p in step_preds),
+        input_from=sorted(index_of[n] for _, n in step_preds),
+        prompt_from=prompt_from,
         external_input_asset_ids=external_ids,
         fallback_models=data.fallback_models,
         expected_duration_sec=data.expected_duration_sec or model.expected_duration_sec,
         est_cost_usd=model.est_cost_usd,
         metadata=metadata,
     )
+
+
+def _build_mix_step(
+    *,
+    node: Node,
+    index: int,
+    ctx: _Ctx,
+    incoming: list[Edge],
+    by_id: dict[str, Node],
+    assets: dict[str, AssetRef],
+    index_of: dict[str, int],
+    metadata: dict[str, Any],
+) -> PlannedStep | None:
+    """The composition node: a timeline of clips across a picture track and N
+    audio lanes.
+
+    The whole job here is to hand the compositor an edit it can render, which
+    means every clip has to stay attached to the asset it plays and the second
+    it plays at. Two mechanisms carry a clip's source, and which one applies is
+    decided by what is connected:
+
+    - a **chained** clip (another step's output) rides `input_from`, and is
+      matched by *position* — the compositor walks the edit and `step.inputs`
+      together, so this list must stay in clip order and must never be sorted;
+    - an **uploaded** clip travels as a URL inside the edit itself, because
+      GenBlaze refuses `external_inputs` and `input_from` on one step, and
+      "generated video, uploaded music" is the ordinary case rather than an
+      edge one. `_build_step` already hands uploads to param-ported models the
+      same way.
+    """
+    data = node.typed_data()
+
+    # Which sources are wired to each track. A track's port is `multi`, so this
+    # is a list — one clip per edge.
+    sources_by_port: dict[str, list[Node]] = defaultdict(list)
+    for edge in incoming:
+        sources_by_port[edge.target_handle].append(by_id[edge.source])
+
+    def clip_entry(source: Node, track: CompositeTrack, start_sec: float) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "start_sec": round(start_sec, 3),
+            "label": track.label or _source_label(source),
+        }
+        if source.kind is NodeKind.UPLOAD:
+            # Present in `assets` because phase 3 fails an upload node whose
+            # file is missing or unknown, and returns before reaching here.
+            ref = assets[source.typed_data().asset_id]
+            # The media type travels with the URL so the compositor can record
+            # the clip on the run manifest as the file it actually is.
+            entry["url"] = ref.url
+            entry["media_type"] = ref.media_type
+        return entry
+
+    # Mix order, and therefore `input_from` order: the picture track first,
+    # then the audio lanes top to bottom, each left to right along the timeline.
+    ordered_sources: list[Node] = []
+    lanes: list[dict[str, Any]] = []
+    audio_clip_count = 0
+
+    for track in data.all_tracks():
+        connected = sources_by_port.get(track.port_id, [])
+        # A clip's position is stored per source; a source that was only just
+        # connected has none yet and starts at zero.
+        placed = sorted(
+            connected,
+            key=lambda s: (
+                track.clip_for(s.id).start_sec if track.clip_for(s.id) else 0.0,
+                s.id,
+            ),
+        )
+        clips: list[dict[str, Any]] = []
+        for source in placed:
+            stored = track.clip_for(source.id)
+            ordered_sources.append(source)
+            clips.append(clip_entry(source, track, stored.start_sec if stored else 0.0))
+        if track.id != VIDEO_TRACK_ID:
+            audio_clip_count += len(clips)
+        lanes.append(
+            {
+                "id": track.id,
+                "kind": "video" if track.id == VIDEO_TRACK_ID else "audio",
+                "gain": round(track.effective_gain, 4),
+                "clips": clips,
+            }
+        )
+
+    if not lanes[0]["clips"]:
+        # The `video` port is required, so phase 4 already reported this and
+        # `plan_graph` returned. Belt and braces: never build a pictureless edit.
+        return None
+
+    if not audio_clip_count:
+        ctx.fail(
+            ErrorCode.MISSING_REQUIRED_INPUT,
+            "This composition has no audio — connect a track to at least one lane.",
+            node_id=node.id,
+            port=data.tracks[0].port_id,
+            hint="Connect a music, speech, sound effects or uploaded audio node "
+            "to one of the audio lanes.",
+        )
+        return None
+
+    # The timeline has to reach the end of the last clip, whatever the node
+    # last stored — a clip that runs past the edit would be silently truncated.
+    timeline = max(
+        data.timeline_sec,
+        max(
+            (
+                clip.end_sec
+                for track in data.all_tracks()
+                for clip in track.clips
+                if any(s.id == clip.source for s in sources_by_port.get(track.port_id, []))
+            ),
+            default=0.0,
+        ),
+    )
+
+    return PlannedStep(
+        node_id=node.id,
+        index=index,
+        provider_key=FFMPEG_PROVIDER,
+        model="mux",
+        modality="video",
+        step_type="mix",
+        # Deliberately unsorted — see the note above on positional matching.
+        input_from=[index_of[n.id] for n in ordered_sources if n.is_step],
+        params={"edit": {"timeline_sec": round(timeline, 3), "tracks": lanes}},
+        expected_duration_sec=10.0,
+        est_cost_usd=0.0,
+        metadata=metadata,
+    )
+
+
+def _source_label(source: Node) -> str:
+    """What a clip is called when its track has no name of its own."""
+    if source.kind is NodeKind.UPLOAD:
+        return source.typed_data().title or "Upload"
+    if source.kind is NodeKind.GENERATE:
+        data = source.typed_data()
+        return data.title or data.model
+    return source.id
 
 
 def _validate_params(
@@ -697,6 +917,14 @@ def _coerce_param(
     return text
 
 
+def _depends_on(step: PlannedStep) -> list[int]:
+    """Every prior step this one waits for. A prompt written upstream is as
+    real a dependency as a chained asset — the step cannot start without it."""
+    if step.prompt_from is None:
+        return step.input_from
+    return [*step.input_from, step.prompt_from]
+
+
 def _critical_path(steps: list[PlannedStep]) -> float | None:
     """Longest dependency chain by duration — steps without a dependency run
     concurrently, so summing everything would badly overestimate."""
@@ -710,7 +938,7 @@ def _critical_path(steps: list[PlannedStep]) -> float | None:
             return memo[index]
         step = by_index[index]
         own = step.expected_duration_sec or 0.0
-        upstream = max((longest(i) for i in step.input_from if i in by_index), default=0.0)
+        upstream = max((longest(i) for i in _depends_on(step) if i in by_index), default=0.0)
         memo[index] = own + upstream
         return memo[index]
 
@@ -730,7 +958,7 @@ def _max_concurrency(steps: list[PlannedStep], ceiling: int) -> int:
             return depth[index]
         step = by_index[index]
         depth[index] = (
-            1 + max((level(i) for i in step.input_from if i in by_index), default=-1)
+            1 + max((level(i) for i in _depends_on(step) if i in by_index), default=-1)
         )
         return depth[index]
 

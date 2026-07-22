@@ -39,7 +39,11 @@ node_types:
       # Lipsync pair: the face to drive, and the speech that drives it. Both
       # model_gated, so they surface only on models that declare them.
       - {id: avatar, modality: image, required: false, multi: false, model_gated: true}
-      - {id: speech, modality: audio, required: false, multi: false, model_gated: true}
+      # `roles` narrows this past its modality: music and sound effects are
+      # audio too and neither is a voice, so only a text-to-speech node may
+      # feed it. An upload still passes — it carries no role, and an uploaded
+      # voice recording is the other half of how this port is meant to be filled.
+      - {id: speech, modality: audio, required: false, multi: false, model_gated: true, roles: [speech]}
       # Reference images (style, subject, wardrobe). Multi because the canonical
       # case is several references conditioning one generation.
       - {id: image_ref, modality: image, required: false, multi: true, model_gated: true}
@@ -54,15 +58,26 @@ node_types:
       fallback_models: []
 
   - kind: transform.composite
-    label: Combine A/V
+    label: Composition
     category: transform
-    description: Muxes a video track and an audio track into a single MP4 with ffmpeg.
+    description: Lays a video track under one or more audio tracks — music, speech, sound effects or uploads — and mixes them to a single MP4 with ffmpeg.
     inputs:
-      - {id: video, modality: video, required: true, multi: false}
-      - {id: audio, modality: audio, required: true, multi: false}
+      # `multi` on both: a track is a timeline, so several sources can sit on
+      # one, each becoming a clip the user positions in time.
+      - {id: video, modality: video, required: true, multi: true}
+      # A template, not a handle: the node expands it into `audio_<track id>`
+      # for each lane it carries, so every fader has a port of its own. Not
+      # `required` per lane — an empty lane is just an empty lane — but the
+      # compiler does insist on at least one lane being connected.
+      - {id: audio, modality: audio, required: false, multi: true, per_track: true}
     outputs:
       - {id: out, modality: video}
-    default_data: {op: mux}
+    default_data:
+      op: mux
+      timeline_sec: 30.0
+      video: {id: video, label: null, gain: 1.0, muted: false, clips: []}
+      tracks:
+        - {id: a1, label: null, gain: 1.0, muted: false, clips: []}
 
   - kind: output
     label: Output

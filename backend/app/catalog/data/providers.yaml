@@ -91,6 +91,41 @@ providers:
         params:
           - {name: duration, type: integer, label: Duration, unit: s, default: 8, min: 1, max: 60, step: 1}
 
+      # The keyless other end of the lipsync chain. Without it the `speech` port
+      # is only reachable from ElevenLabs or an upload, so the flow the mock
+      # provider exists to demonstrate — speak, then drive a face with it —
+      # would need a credential to draw at all.
+      # Text in, text out: the node that rewrites a rough idea into a prompt
+      # worth spending a generation on. Mock-only for now — genblaze-google and
+      # genblaze-openai ship LLM-capable packages, but neither is installed
+      # here, and this file does not claim a provider class it has not seen.
+      - id: mock-llm-v1
+        label: Mock Prompt Writer
+        modality: text
+        role: llm
+        adapter: app.engine.mock_providers:text_provider
+        expected_duration_sec: 2
+        est_cost_usd: 0
+        output_media_type: text/plain
+        params:
+          - name: target
+            type: enum
+            label: Write for
+            help: Which kind of generation the rewritten prompt is aimed at.
+            default: image
+            options: [{value: image}, {value: video}, {value: audio}]
+          - {name: temperature, type: number, label: Temperature, default: 0.7, min: 0, max: 1, step: 0.1, group: advanced}
+
+      - id: mock-speech-v1
+        label: Mock Speech
+        modality: audio
+        role: speech
+        adapter: app.engine.mock_providers:audio_provider
+        expected_duration_sec: 3
+        est_cost_usd: 0
+        output_media_type: audio/mpeg
+        params: []
+
   - key: google
     label: Google
     package: genblaze_google

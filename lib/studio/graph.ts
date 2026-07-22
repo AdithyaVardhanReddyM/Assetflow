@@ -80,7 +80,124 @@ export type GenerateNodeData = {
   title: string | null;
 };
 
-export type CompositeNodeData = { op: "mux" };
+/** Mirrors the limits in schema.py. */
+export const MAX_AUDIO_TRACKS = 6;
+export const MAX_CLIPS_PER_TRACK = 12;
+export const DEFAULT_TIMELINE_SEC = 30;
+export const MAX_TIMELINE_SEC = 600;
+
+/** The picture track's id and handle. A composition has exactly one. */
+export const VIDEO_TRACK_ID = "video";
+
+/**
+ * One source placed on a track at a point in time.
+ *
+ * A clip is derived from an edge — connecting a node to a track creates one —
+ * but its position is the user's, so it is stored. `source` is the key rather
+ * than an index because clips are moved by dragging, and an index would hand a
+ * moved clip someone else's start time.
+ */
+export type Clip = {
+  source: string;
+  start_sec: number;
+  /** The canvas's best estimate of the source's length; advisory. */
+  duration_sec: number | null;
+};
+
+export type CompositeTrack = {
+  id: string;
+  label: string | null;
+  /** Linear gain, straight into ffmpeg's `volume` filter. 1 is unity, 2 is +6dB. */
+  gain: number;
+  muted: boolean;
+  clips: Clip[];
+};
+
+export type CompositeNodeData = {
+  op: "mux";
+  timeline_sec: number;
+  video: CompositeTrack;
+  tracks: CompositeTrack[];
+};
+
+/**
+ * The handle a composite node exposes for one audio lane. Mirrors
+ * `audio_port_id` in `graph/schema.py` — the compiler resolves handles by this
+ * exact name, so the two spellings must never drift.
+ */
+export function audioPortId(trackId: string): string {
+  return `audio_${trackId}`;
+}
+
+/** The handle a track's clips arrive on, picture track included. */
+export function trackPortId(trackId: string): string {
+  return trackId === VIDEO_TRACK_ID ? VIDEO_TRACK_ID : audioPortId(trackId);
+}
+
+/**
+ * A fresh lane id. Short because `CompositeTrack.id` is bounded at 16
+ * characters on the backend, and random rather than positional because lanes
+ * get deleted: an index would hand a new lane the port — and so the edges — of
+ * a dead one.
+ */
+export function newTrackId(): string {
+  return `t${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+}
+
+export function newTrack(id = newTrackId()): CompositeTrack {
+  return { id, label: null, gain: 1, muted: false, clips: [] };
+}
+
+function readTrack(raw: unknown, fallbackId: string): CompositeTrack {
+  const t = (raw ?? {}) as Partial<CompositeTrack>;
+  return {
+    id: typeof t.id === "string" && t.id ? t.id : fallbackId,
+    label: typeof t.label === "string" ? t.label : null,
+    gain: typeof t.gain === "number" && Number.isFinite(t.gain) ? t.gain : 1,
+    muted: Boolean(t.muted),
+    clips: Array.isArray(t.clips)
+      ? t.clips
+          .filter((c): c is Clip => Boolean(c) && typeof c.source === "string")
+          .slice(0, MAX_CLIPS_PER_TRACK)
+          .map((c) => ({
+            source: c.source,
+            start_sec: Number.isFinite(c.start_sec) ? Math.max(0, c.start_sec) : 0,
+            duration_sec:
+              typeof c.duration_sec === "number" && Number.isFinite(c.duration_sec)
+                ? c.duration_sec
+                : null,
+          }))
+      : [],
+  };
+}
+
+/**
+ * The audio lanes on a composite node, read defensively: this drives which
+ * handles render, so a document that predates tracks — or arrives malformed —
+ * has to still open with one lane rather than a node with no audio inputs.
+ */
+export function compositeTracks(wire: Record<string, unknown> | undefined): CompositeTrack[] {
+  const raw = wire?.tracks;
+  if (!Array.isArray(raw) || !raw.length) return [newTrack("a1")];
+  return raw
+    .slice(0, MAX_AUDIO_TRACKS)
+    .map((t, i) => readTrack(t, `a${i + 1}`))
+    .filter((t) => t.id !== VIDEO_TRACK_ID);
+}
+
+/** The picture track, defaulted the same way. */
+export function compositeVideoTrack(
+  wire: Record<string, unknown> | undefined,
+): CompositeTrack {
+  return readTrack(wire?.video, VIDEO_TRACK_ID);
+}
+
+export function compositeTimeline(wire: Record<string, unknown> | undefined): number {
+  const raw = wire?.timeline_sec;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0
+    ? Math.min(raw, MAX_TIMELINE_SEC)
+    : DEFAULT_TIMELINE_SEC;
+}
 
 export type OutputNodeData = { label: string | null };
 

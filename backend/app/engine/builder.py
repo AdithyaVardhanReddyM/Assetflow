@@ -73,6 +73,17 @@ def build_pipeline(plan: ExecutionPlan, ctx: BuildContext) -> Any:
     from genblaze_core import Modality, Pipeline
     from genblaze_core.models.enums import StepType
 
+    # A Pipeline fixes every prompt at construction, so a prompt that an LLM
+    # step has not written yet cannot be expressed here. The runs router
+    # already refuses these; this is the backstop that keeps a plan reaching
+    # a provider with the wrong prompt from being possible at all.
+    if plan.prompt_chained_node_ids:
+        raise ValueError(
+            "Cannot build a pipeline whose prompt comes from an LLM step: "
+            f"{', '.join(plan.prompt_chained_node_ids)}. Prompt chaining needs "
+            "the run split into a text stage and a media stage."
+        )
+
     pipeline = Pipeline(
         plan.name,
         tenant_id=ctx.tenant_id,

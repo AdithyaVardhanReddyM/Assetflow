@@ -11,7 +11,7 @@ import pytest
 from app.catalog.registry import get_catalog
 from app.graph.compile import plan_graph
 from app.graph.errors import ErrorCode, WarningCode
-from app.graph.schema import AssetRef, Graph, PlanLimits
+from app.graph.schema import AssetRef, Graph, PlanLimits, audio_port_id
 
 
 @pytest.fixture
@@ -19,8 +19,42 @@ def catalog():
     return get_catalog()
 
 
+#: A composite node's audio handles are named per lane, and a fresh node starts
+#: with the single lane `a1` — see `audio_port_id` and `_default_tracks`.
+AUDIO_LANE = audio_port_id("a1")
+
+
 def node(node_id, kind, *, x=0.0, y=0.0, **data):
     return {"id": node_id, "kind": kind, "position": {"x": x, "y": y}, "data": data}
+
+
+def track(track_id, *clips, gain=1.0, muted=False, label=None):
+    """A composition lane. Clips are `(source_node_id, start_sec, duration_sec)`."""
+    return {
+        "id": track_id,
+        "label": label,
+        "gain": gain,
+        "muted": muted,
+        "clips": [
+            {"source": src, "start_sec": start, "duration_sec": dur}
+            for src, start, dur in clips
+        ],
+    }
+
+
+def comp(video=None, tracks=None, timeline_sec=30.0):
+    """Composite node data. Defaults match `default_data` in node_types.yaml."""
+    return {
+        "op": "mux",
+        "timeline_sec": timeline_sec,
+        "video": video or track("video"),
+        "tracks": tracks or [track("a1")],
+    }
+
+
+def lanes(*track_ids):
+    """Shorthand for a node with empty lanes under the given ids."""
+    return comp(tracks=[track(t) for t in track_ids])
 
 
 def gen(
@@ -105,7 +139,7 @@ def test_fan_in_to_composite(catalog):
             gen("aud", model="mock-audio-v1", modality="audio", y=10),
             node("mux", "transform.composite", y=200),
         ],
-        [edge("e1", "vid", "mux", "video"), edge("e2", "aud", "mux", "audio")],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "aud", "mux", AUDIO_LANE)],
     )
     result = plan_graph(graph, catalog=catalog)
     assert result.valid, result.errors
@@ -224,20 +258,392 @@ def test_modality_mismatch(catalog):
             node("mux", "transform.composite", y=200),
         ],
         # audio wired into the video port
-        [edge("e1", "aud", "mux", "video"), edge("e2", "vid", "mux", "audio")],
+        [edge("e1", "aud", "mux", "video"), edge("e2", "vid", "mux", AUDIO_LANE)],
     )
     result = plan_graph(graph, catalog=catalog)
     assert ErrorCode.MODALITY_MISMATCH in codes(result)
 
 
-def test_port_arity_rejects_two_edges_into_single_port(catalog):
+def test_lipsync_speech_port_refuses_audio_that_is_not_a_voice(catalog):
+    """`speech` is audio, but so is music — and music drives no mouth."""
     graph = build(
         [
-            gen("v1", modality="video", y=0),
-            gen("v2", modality="video", y=1),
-            node("mux", "transform.composite", y=99),
+            gen("music", model="mock-audio-v1", modality="audio", y=0),
+            gen("face", model="mock-image-v1", modality="image", y=100),
+            gen("sync", model="mock-lipsync-v1", modality="video", prompt=None, y=200),
         ],
-        [edge("e1", "v1", "mux", "video"), edge("e2", "v2", "mux", "video")],
+        [
+            edge("e1", "face", "sync", "avatar"),
+            edge("e2", "music", "sync", "speech"),
+        ],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.ROLE_MISMATCH in codes(result)
+    # And the message has to name the way out, not just the refusal.
+    diagnostic = next(d for d in result.errors if d.code == ErrorCode.ROLE_MISMATCH)
+    assert "speech" in diagnostic.hint
+
+
+def test_lipsync_speech_port_takes_a_text_to_speech_node(catalog):
+    graph = build(
+        [
+            gen("tts", model="mock-speech-v1", modality="audio", y=0),
+            gen("face", model="mock-image-v1", modality="image", y=100),
+            gen("sync", model="mock-lipsync-v1", modality="video", prompt=None, y=200),
+        ],
+        [
+            edge("e1", "face", "sync", "avatar"),
+            edge("e2", "tts", "sync", "speech"),
+        ],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    # Two chained inputs, not a fan-in: the model declares a port for each, so
+    # both upstream steps ride through GenBlaze's `input_from`.
+    step = result.plan.step_for_node("sync")
+    assert step.input_from == [0, 1]
+
+
+def test_llm_node_writes_the_prompt_of_the_node_it_feeds(catalog):
+    """An LLM edge is words, not an asset: it must not land in `input_from`,
+    and it must satisfy the downstream node's prompt requirement."""
+    graph = build(
+        [
+            gen("llm", model="mock-llm-v1", modality="text", prompt="a lighthouse", y=0),
+            # No prompt of its own — the LLM node writes it.
+            gen("img", model="mock-image-v1", modality="image", prompt=None, y=100),
+        ],
+        [edge("e1", "llm", "img", "prompt")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    step = result.plan.step_for_node("img")
+    assert step.prompt_from == 0
+    assert step.input_from == []
+    assert step.prompt is None
+    # Valid, but the run path cannot honor it yet, so the canvas is told.
+    assert WarningCode.PROMPT_CHAIN_PENDING in {w.code for w in result.warnings}
+
+
+def test_llm_step_is_ordered_before_the_node_it_writes_for(catalog):
+    """Position alone would put the image node first; the prompt edge is a
+    dependency and has to win."""
+    graph = build(
+        [
+            gen("img", model="mock-image-v1", modality="image", prompt=None, y=0),
+            gen("llm", model="mock-llm-v1", modality="text", prompt="a lighthouse", y=500),
+        ],
+        [edge("e1", "llm", "img", "prompt")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    assert [s.node_id for s in result.plan.steps] == ["llm", "img"]
+    assert result.plan.step_for_node("img").prompt_from == 0
+
+
+def test_a_prompt_chained_plan_is_refused_by_the_builder(catalog):
+    """The compiler allows it; the thing that would spend money must not."""
+    from app.engine.builder import BuildContext, build_pipeline
+
+    graph = build(
+        [
+            gen("llm", model="mock-llm-v1", modality="text", prompt="a lighthouse", y=0),
+            gen("img", model="mock-image-v1", modality="image", prompt=None, y=100),
+        ],
+        [edge("e1", "llm", "img", "prompt")],
+    )
+    plan = plan_graph(graph, catalog=catalog).plan
+    assert plan.prompt_chained_node_ids == ["img"]
+    ctx = BuildContext(tenant_id="t", workflow_id=None, run_id="r", assets={})
+    with pytest.raises(ValueError, match="prompt"):
+        build_pipeline(plan, ctx)
+
+
+def test_llm_node_still_needs_something_to_rewrite(catalog):
+    graph = build([gen("llm", model="mock-llm-v1", modality="text", prompt=None)])
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.NO_PROMPT in codes(result)
+
+
+def test_two_sources_through_one_port_is_still_a_fanin(catalog):
+    """Relaxing fan-in for distinct declared ports must not relax it for a
+    model asked to reconcile several inputs it cannot tell apart."""
+    graph = build(
+        [
+            gen("a", model="mock-image-v1", modality="image", y=0),
+            gen("b", model="mock-image-v1", modality="image", y=10),
+            gen("v", modality="video", y=100),
+        ],
+        # image_ref is `multi`, so arity lets both through — fan-in is what stops it.
+        [edge("e1", "a", "v", "image_ref"), edge("e2", "b", "v", "image_ref")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.FANIN_UNSUPPORTED in codes(result)
+
+
+def test_lipsync_speech_port_takes_an_uploaded_track(catalog):
+    """An upload carries no role, so it is not the compiler's place to guess
+    that the file is not a voice."""
+    graph = build(
+        [
+            node("up", "input.upload", asset_id="asset-1", y=0),
+            gen("face", model="mock-image-v1", modality="image", y=100),
+            gen("sync", model="mock-lipsync-v1", modality="video", prompt=None, y=200),
+        ],
+        [
+            edge("e1", "face", "sync", "avatar"),
+            edge("e2", "up", "sync", "speech"),
+        ],
+    )
+    assets = {
+        "asset-1": AssetRef(
+            asset_id="asset-1", url="https://b2/x.mp3", media_type="audio/mpeg",
+            modality="audio", sha256="cd" * 32,
+        )
+    }
+    result = plan_graph(graph, catalog=catalog, assets=assets)
+    assert ErrorCode.ROLE_MISMATCH not in codes(result)
+
+
+def test_composition_orders_clips_by_track_then_time(catalog):
+    """Clip order is the contract with the compositor: `input_from` and the
+    edit are read together, positionally."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            gen("vo", model="mock-speech-v1", modality="audio", prompt="hello", y=20),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    video=track("video", ("vid", 0.0, 5.0)),
+                    # `vo` sits earlier on the lane than `music`, so it plays —
+                    # and is fed to the compositor — first, whatever order the
+                    # edges happen to be in.
+                    tracks=[track("a1", ("music", 4.0, 8.0), ("vo", 1.0, 3.0))],
+                ),
+            ),
+        ],
+        [
+            edge("e1", "vid", "mux", "video"),
+            edge("e2", "music", "mux", AUDIO_LANE),
+            edge("e3", "vo", "mux", AUDIO_LANE),
+        ],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    mux = result.plan.step_for_node("mux")
+    idx = {s.node_id: s.index for s in result.plan.steps}
+    assert mux.input_from == [idx["vid"], idx["vo"], idx["music"]]
+    audio = mux.params["edit"]["tracks"][1]["clips"]
+    assert [c["start_sec"] for c in audio] == [1.0, 4.0]
+
+
+def test_composition_carries_several_clips_on_the_video_track(catalog):
+    """Two shots on the picture track, cut one after the other."""
+    graph = build(
+        [
+            gen("a", modality="video", y=0),
+            gen("b", modality="video", y=10),
+            gen("music", model="mock-audio-v1", modality="audio", y=20),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    video=track("video", ("a", 0.0, 5.0), ("b", 5.0, 5.0)),
+                    tracks=[track("a1", ("music", 0.0, 8.0))],
+                ),
+            ),
+        ],
+        [
+            edge("e1", "a", "mux", "video"),
+            edge("e2", "b", "mux", "video"),
+            edge("e3", "music", "mux", AUDIO_LANE),
+        ],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    video = result.plan.step_for_node("mux").params["edit"]["tracks"][0]
+    assert video["kind"] == "video"
+    assert [c["start_sec"] for c in video["clips"]] == [0.0, 5.0]
+
+
+def test_composition_timeline_grows_to_reach_the_last_clip(catalog):
+    """A clip past the end of the stored timeline would be cut off, so the
+    timeline follows the edit rather than the other way round."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    timeline_sec=10.0,
+                    video=track("video", ("vid", 0.0, 5.0)),
+                    tracks=[track("a1", ("music", 40.0, 8.0))],
+                ),
+            ),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "music", "mux", AUDIO_LANE)],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    assert result.plan.step_for_node("mux").params["edit"]["timeline_sec"] == 48.0
+
+
+def test_composition_mute_and_gain_reach_the_edit(catalog):
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    video=track("video", ("vid", 0.0, 5.0), muted=True),
+                    tracks=[
+                        track("a1", ("music", 0.0, 8.0), gain=0.35, label="Score")
+                    ],
+                ),
+            ),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "music", "mux", AUDIO_LANE)],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    tracks = result.plan.step_for_node("mux").params["edit"]["tracks"]
+    # Muting is expressed to the compositor as a gain, so it needs no second
+    # concept — but the fader position itself survives on the node.
+    assert tracks[0]["gain"] == 0.0
+    assert tracks[1]["gain"] == 0.35
+    assert tracks[1]["clips"][0]["label"] == "Score"
+
+
+def test_composition_takes_an_uploaded_clip_alongside_a_generated_video(catalog):
+    """GenBlaze refuses `external_inputs` with `input_from`, so an uploaded clip
+    travels as a URL inside the edit instead — and this graph stays legal."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            node("up", "input.upload", asset_id="asset-1", y=10),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    video=track("video", ("vid", 0.0, 5.0)),
+                    tracks=[track("a1", ("up", 2.0, 6.0))],
+                ),
+            ),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "up", "mux", AUDIO_LANE)],
+    )
+    assets = {
+        "asset-1": AssetRef(
+            asset_id="asset-1", url="https://b2/track.mp3", media_type="audio/mpeg",
+            modality="audio", sha256="ab" * 32,
+        )
+    }
+    result = plan_graph(graph, catalog=catalog, assets=assets)
+    assert result.valid, result.errors
+    mux = result.plan.step_for_node("mux")
+    assert ErrorCode.MIXED_INPUTS not in codes(result)
+    clip = mux.params["edit"]["tracks"][1]["clips"][0]
+    assert clip["url"] == "https://b2/track.mp3"
+    assert clip["start_sec"] == 2.0
+    # The upload rides the edit, so it must not also be claimed as a chain input.
+    assert mux.input_from == [0]
+    assert mux.external_input_asset_ids == []
+
+
+def test_composition_needs_at_least_one_connected_lane(catalog):
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            node("mux", "transform.composite", y=200, **lanes("a1", "a2")),
+        ],
+        [edge("e1", "vid", "mux", "video")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.MISSING_REQUIRED_INPUT in codes(result)
+
+
+def test_composition_empty_lane_is_not_an_error(catalog):
+    """A half-wired node is a node being worked on, not a broken one."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node("mux", "transform.composite", y=200, **lanes("a1", "a2", "a3")),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "music", "mux", AUDIO_LANE)],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    tracks = result.plan.step_for_node("mux").params["edit"]["tracks"]
+    assert [len(t["clips"]) for t in tracks] == [1, 1, 0, 0]
+
+
+def test_composition_clip_for_a_source_that_is_no_longer_wired_is_ignored(catalog):
+    """Disconnecting a clip leaves its stored position behind; it must not
+    resurrect the source as an input."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node(
+                "mux", "transform.composite", y=200,
+                **comp(
+                    video=track("video", ("vid", 0.0, 5.0)),
+                    tracks=[track("a1", ("music", 0.0, 8.0), ("ghost", 3.0, 2.0))],
+                ),
+            ),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "music", "mux", AUDIO_LANE)],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    assert len(result.plan.step_for_node("mux").params["edit"]["tracks"][1]["clips"]) == 1
+
+
+def test_composition_rejects_a_handle_for_a_lane_that_does_not_exist(catalog):
+    """Deleting a lane has to invalidate its edge — otherwise a fader the user
+    removed would still be mixing."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node("mux", "transform.composite", y=200, **lanes("a1")),
+        ],
+        [
+            edge("e1", "vid", "mux", "video"),
+            edge("e2", "music", "mux", audio_port_id("a9")),
+        ],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.UNKNOWN_HANDLE in codes(result)
+
+
+def test_composition_template_port_is_not_connectable(catalog):
+    """`audio` describes the family of lane handles; it is never one itself."""
+    graph = build(
+        [
+            gen("vid", modality="video", y=0),
+            gen("music", model="mock-audio-v1", modality="audio", y=10),
+            node("mux", "transform.composite", y=200),
+        ],
+        [edge("e1", "vid", "mux", "video"), edge("e2", "music", "mux", "audio")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert ErrorCode.UNKNOWN_HANDLE in codes(result)
+
+
+def test_port_arity_rejects_two_edges_into_single_port(catalog):
+    """`init_image` is one frame, not a set — unlike a composition track, which
+    is a timeline and takes as many clips as fit on it."""
+    graph = build(
+        [
+            gen("i1", model="mock-image-v1", modality="image", y=0),
+            gen("i2", model="mock-image-v1", modality="image", y=1),
+            gen("v", modality="video", y=99),
+        ],
+        [edge("e1", "i1", "v", "init_image"), edge("e2", "i2", "v", "init_image")],
     )
     result = plan_graph(graph, catalog=catalog)
     assert ErrorCode.PORT_ARITY in codes(result)
@@ -334,7 +740,7 @@ def test_ordering_respects_dependencies_over_position(catalog):
             gen("producer_a", model="mock-audio-v1", modality="audio", y=600),
             node("mux", "transform.composite", y=10),
         ],
-        [edge("e1", "producer_v", "mux", "video"), edge("e2", "producer_a", "mux", "audio")],
+        [edge("e1", "producer_v", "mux", "video"), edge("e2", "producer_a", "mux", AUDIO_LANE)],
     )
     result = plan_graph(graph, catalog=catalog)
     assert result.valid, result.errors
@@ -363,7 +769,7 @@ def test_critical_path_adds_along_a_chain(catalog):
             gen("a", model="mock-audio-v1", modality="audio", y=1),
             node("mux", "transform.composite", y=99),
         ],
-        [edge("e1", "v", "mux", "video"), edge("e2", "a", "mux", "audio")],
+        [edge("e1", "v", "mux", "video"), edge("e2", "a", "mux", AUDIO_LANE)],
     )
     plan = plan_graph(graph, catalog=catalog).plan
     # max(video 5s, audio 3s) + mux 10s

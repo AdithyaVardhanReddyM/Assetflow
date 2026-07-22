@@ -44,9 +44,12 @@ def build_provider(provider_key: str, model_id: str) -> Any:
     environment by default, so no key is ever passed through the request path.
     """
     if provider_key == FFMPEG_PROVIDER:
-        from genblaze_core import FFmpegCompositor
+        # Ours, not GenBlaze's: `FFmpegCompositor` muxes exactly one video with
+        # one audio and ignores params, so it can express neither the extra
+        # lanes nor the faders a Composition node carries.
+        from app.engine.compositor import TrackCompositor
 
-        return FFmpegCompositor()
+        return TrackCompositor()
 
     try:
         adapter = _adapter_for(provider_key, model_id)

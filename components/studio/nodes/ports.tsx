@@ -53,7 +53,22 @@ export function sortPorts(ports: PortSpec[]): PortSpec[] {
   });
 }
 
+/**
+ * The second line of a port's tooltip, for ports that take less than their
+ * modality would suggest. Naming both legal sources is the point: the rule is
+ * "a voice", and the canvas has two ways to produce one.
+ */
+export function portHint(port: PortSpec): string | null {
+  if (!port.roles?.length) return null;
+  const sources = port.roles.map((r) => ROLE_LABEL[r] ?? r).join(" or ");
+  return `From a ${sources} node, or an uploaded ${port.modality} file`;
+}
+
 export function portLabel(portId: string, nodeModality?: string): string {
+  // A composition node names its handles per lane (`audio_<track id>`), so
+  // there is no fixed case to match — the lane's own name is shown on the node
+  // itself, and the port only has to say what class of thing it takes.
+  if (portId.startsWith("audio_")) return "Audio track";
   switch (portId) {
     case "init_image":
       // The same conditioning image reads differently per modality: it is the
@@ -94,6 +109,7 @@ function PortGlyph({
   nodeModality?: string;
   className?: string;
 }) {
+  if (portId.startsWith("audio_")) return <MusicGenIcon className={className} />;
   switch (portId) {
     case "init_image":
       return nodeModality === "video" ? (
@@ -140,7 +156,30 @@ const ISLAND =
  * How far the rails sit outside the card. The island is 30px, so this leaves a
  * ~10px gap of canvas between it and the card edge.
  */
-const PORT_OFFSET = "-40px";
+export const PORT_OFFSET = "-40px";
+
+/**
+ * A single connector, positioned by its caller rather than by a rail.
+ *
+ * The composition node needs this: its ports belong to individual track rows,
+ * so they cannot come from one evenly-spaced column the way a generate node's
+ * do — each has to sit level with the lane it fills.
+ */
+export function LanePort({
+  port,
+  connected,
+  className,
+}: {
+  port: PortSpec;
+  connected: boolean;
+  className?: string;
+}) {
+  return (
+    <div style={{ left: PORT_OFFSET }} className={cn("absolute z-10", className)}>
+      <PortDot port={port} connected={connected} />
+    </div>
+  );
+}
 
 function PortDot({
   port,
@@ -151,8 +190,16 @@ function PortDot({
   nodeModality?: string;
   connected: boolean;
 }) {
-  const accent = accentFor(port.modality);
+  // A port that names the roles it takes wears the first one's accent and
+  // glyph, so it matches the connector that legally fills it — the `speech`
+  // input and a Speech node's output read as two ends of the same wire. Ports
+  // with no role constraint stay on their modality's colour, which is then the
+  // whole of what may connect.
+  const roleKey = port.roles?.[0];
+  const accent = accentFor(roleKey ?? port.modality);
+  const RoleGlyph = roleKey ? ROLE_ICON[roleKey] : undefined;
   const label = portLabel(port.id, nodeModality);
+  const hint = portHint(port);
 
   return (
     <Tooltip>
@@ -175,19 +222,34 @@ function PortDot({
                 className={cn(ISLAND, !port.multi && connected && "ring-2 ring-white")}
                 style={{ background: accent.soft, color: accent.ink }}
               >
-                <PortGlyph
-                  portId={port.id}
-                  nodeModality={nodeModality}
-                  className="size-[15px]"
-                />
+                {RoleGlyph ? (
+                  <RoleGlyph className="size-[15px]" />
+                ) : (
+                  <PortGlyph
+                    portId={port.id}
+                    nodeModality={nodeModality}
+                    className="size-[15px]"
+                  />
+                )}
               </span>
             </Handle>
           </span>
         }
       />
-      <TooltipContent side="left" sideOffset={8} className="bg-[#1f211c] text-[#f7f4ee]">
-        {label}
-        {port.multi ? <span className="text-[#f7f4ee]/50">multiple</span> : null}
+      <TooltipContent
+        side="left"
+        sideOffset={8}
+        className={cn(
+          "bg-[#1f211c] text-[#f7f4ee]",
+          // The hint is a second line, and the popup is an inline row by default.
+          hint && "flex-col items-start gap-0.5",
+        )}
+      >
+        <span className="flex items-center gap-1.5">
+          {label}
+          {port.multi ? <span className="text-[#f7f4ee]/50">multiple</span> : null}
+        </span>
+        {hint ? <span className="text-[11px] text-[#f7f4ee]/55">{hint}</span> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -245,18 +307,27 @@ export function OutputPort({
   modality,
   role,
   className,
+  style,
 }: {
   modality?: string;
   role?: string | null;
   className?: string;
+  /** Merged over the rail offset, for nodes that place their output by pixel. */
+  style?: React.CSSProperties;
 }) {
   const accent = accentFor(role || modality);
   const RoleGlyph = role ? ROLE_ICON[role] : undefined;
   const glyphPort =
-    modality === "video" ? "video" : modality === "audio" ? "audio" : "image_ref";
+    modality === "video"
+      ? "video"
+      : modality === "audio"
+        ? "audio"
+        : modality === "text"
+          ? "prompt"
+          : "image_ref";
 
   return (
-    <div style={{ right: PORT_OFFSET }} className={cn("absolute z-10", className)}>
+    <div style={{ right: PORT_OFFSET, ...style }} className={cn("absolute z-10", className)}>
       <Tooltip>
         <TooltipTrigger
           render={

@@ -25,7 +25,7 @@ def test_mock_provider_is_always_ready(catalog):
     mock = catalog.provider("mock")
     assert mock is not None
     assert mock.status is ProviderStatus.READY
-    assert {m.modality.value for m in mock.models} == {"video", "image", "audio"}
+    assert {m.modality.value for m in mock.models} == {"video", "image", "audio", "text"}
 
 
 def test_every_model_has_a_wellformed_adapter_reference(catalog):
@@ -123,7 +123,14 @@ def test_node_types_declare_ports(catalog):
 
     composite = catalog.node_type("transform.composite")
     assert {p.id for p in composite.inputs} == {"video", "audio"}
-    assert all(p.required for p in composite.inputs)
+    video = next(p for p in composite.inputs if p.id == "video")
+    audio = next(p for p in composite.inputs if p.id == "audio")
+    assert video.required
+    # `audio` is a template the node expands into one handle per lane, so it is
+    # never a handle itself and no single lane is individually required — the
+    # compiler insists on one being *connected* instead.
+    assert audio.per_track
+    assert not audio.required
 
     generate = catalog.node_type("generate")
     init_image = next(p for p in generate.inputs if p.id == "init_image")
@@ -166,6 +173,43 @@ def test_lipsync_model_is_port_driven(catalog):
     assert model.output_aspect_ratio == "1:1"
     # Nothing to describe — the compiler must not demand a prompt.
     assert model.requires_prompt is False
+
+
+def test_speech_port_accepts_only_a_voice(catalog):
+    """The `speech` input is narrower than its modality: music and sound
+    effects are audio too, and neither drives a mouth."""
+    speech = next(p for p in catalog.node_type("generate").inputs if p.id == "speech")
+    assert speech.roles == ["speech"]
+    # Every other port takes anything of its modality, or the gate would be
+    # silently blocking wires nobody meant to block.
+    others = [p for p in catalog.node_type("generate").inputs if p.id != "speech"]
+    assert all(not p.roles for p in others)
+
+
+def test_a_keyless_source_exists_for_every_role_gated_port(catalog):
+    """A port that only a `speech` node can fill is unreachable on a canvas with
+    no credentials unless the always-available provider offers one."""
+    gated = {r for p in catalog.node_type("generate").inputs for r in p.roles}
+    keyless = {
+        m.role
+        for p in catalog.providers
+        if p.always_available
+        for m in p.models
+    }
+    assert gated <= keyless, f"no keyless model for {sorted(gated - keyless)}"
+
+
+def test_llm_model_is_text_to_text(catalog):
+    """The prompt writer takes words and returns words — no media ports, and
+    nothing to chain into it but a prompt."""
+    model = catalog.model("mock", "mock-llm-v1")
+    assert model is not None
+    assert model.modality.value == "text"
+    assert model.role == "llm"
+    assert model.accepts == []
+    # It rewrites what you give it, so it does need a prompt.
+    assert model.requires_prompt is True
+    assert model.output_media_type == "text/plain"
 
 
 def test_model_payload_carries_every_descriptor_field(catalog):

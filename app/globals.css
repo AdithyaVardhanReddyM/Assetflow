@@ -211,6 +211,40 @@ body {
   }
 }
 
+/* A hairline scrollbar for the boxes inside nodes, where the platform default
+   is wide enough to crowd a 300px card and its grey fights the warm paper.
+   Track stays transparent so the thumb reads as a mark on the surface rather
+   than as a gutter cut into it; the thumb only darkens on hover, so a long
+   prompt at rest is still just text.
+
+   `scrollbar-width: thin` covers Firefox, which has no ::-webkit pseudo, and
+   the WebKit block covers Safari and Chrome. Both are set: neither alone is
+   enough, and `thin` is the only width Firefox offers. */
+@utility thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 33, 28, 0.22) transparent;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background-color: rgba(31, 33, 28, 0.2);
+    border-radius: 0;
+  }
+  &:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(31, 33, 28, 0.34);
+  }
+  /* The corner only shows when both axes scroll; left unstyled it paints an
+     opaque platform-grey square against the cream. */
+  &::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -218,7 +252,8 @@ body {
   body {
     @apply bg-background text-foreground;
   }
-  button:not(:disabled), [role="button"]:not(:disabled) {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
     cursor: pointer;
   }
   html {
@@ -246,15 +281,47 @@ body {
 .beam-colour-only[data-beam][data-fading]::after {
   background:
     radial-gradient(ellipse 150px 46px at 12% 0%, var(--primary), transparent),
-    radial-gradient(ellipse 170px 46px at 38% 0%, oklch(0.9 0.16 96), transparent),
+    radial-gradient(
+      ellipse 170px 46px at 38% 0%,
+      oklch(0.9 0.16 96),
+      transparent
+    ),
     radial-gradient(ellipse 170px 46px at 62% 0%, var(--primary), transparent),
-    radial-gradient(ellipse 150px 46px at 88% 0%, oklch(0.82 0.19 78), transparent),
-    radial-gradient(ellipse 150px 46px at 12% 100%, oklch(0.82 0.19 78), transparent),
-    radial-gradient(ellipse 170px 46px at 38% 100%, var(--primary), transparent),
-    radial-gradient(ellipse 170px 46px at 62% 100%, oklch(0.9 0.16 96), transparent),
-    radial-gradient(ellipse 150px 46px at 88% 100%, var(--primary), transparent),
-    radial-gradient(ellipse 44px 90px at 0% 50%, oklch(0.88 0.17 88), transparent),
-    radial-gradient(ellipse 44px 90px at 100% 50%, oklch(0.88 0.17 88), transparent);
+    radial-gradient(
+      ellipse 150px 46px at 88% 0%,
+      oklch(0.82 0.19 78),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 150px 46px at 12% 100%,
+      oklch(0.82 0.19 78),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 170px 46px at 38% 100%,
+      var(--primary),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 170px 46px at 62% 100%,
+      oklch(0.9 0.16 96),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 150px 46px at 88% 100%,
+      var(--primary),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 44px 90px at 0% 50%,
+      oklch(0.88 0.17 88),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 44px 90px at 100% 50%,
+      oklch(0.88 0.17 88),
+      transparent
+    );
 }
 
 /* The inner glow is already colour-only, but it inherits the sunset reds and
@@ -264,12 +331,36 @@ body {
 .beam-colour-only[data-beam][data-fading]::before {
   box-shadow: none;
   background:
-    radial-gradient(ellipse 190px 64px at 25% 0%, oklch(0.88 0.17 88 / 0.5), transparent),
-    radial-gradient(ellipse 190px 64px at 75% 0%, oklch(0.88 0.17 88 / 0.5), transparent),
-    radial-gradient(ellipse 190px 64px at 25% 100%, oklch(0.88 0.17 88 / 0.5), transparent),
-    radial-gradient(ellipse 190px 64px at 75% 100%, oklch(0.88 0.17 88 / 0.5), transparent),
-    radial-gradient(ellipse 60px 110px at 0% 50%, oklch(0.88 0.17 88 / 0.5), transparent),
-    radial-gradient(ellipse 60px 110px at 100% 50%, oklch(0.88 0.17 88 / 0.5), transparent);
+    radial-gradient(
+      ellipse 190px 64px at 25% 0%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 190px 64px at 75% 0%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 190px 64px at 25% 100%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 190px 64px at 75% 100%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 60px 110px at 0% 50%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 60px 110px at 100% 50%,
+      oklch(0.88 0.17 88 / 0.5),
+      transparent
+    );
 }
 
 /* The studio morph fades the graph, not the whole canvas.
