@@ -16,7 +16,6 @@ import {
 } from "@xyflow/react";
 import {
   CaretDownIcon,
-  CheckIcon,
   CopyIcon,
   DownloadSimpleIcon,
   LightningIcon,
@@ -38,6 +37,8 @@ import type { GenerateNodeData, StudioNode } from "@/lib/studio/graph";
 import { accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
+import { ModelLogo } from "../model-logos";
+import { ModelMenuList } from "../model-menu";
 import { OutputPort, PortRail } from "./ports";
 import { ROLE_COPY, ROLE_ICON, ROLE_LABEL } from "./roles";
 import {
@@ -45,6 +46,7 @@ import {
   BarDivider,
   FloatingBar,
   MoreMenu,
+  NodeBodyControls,
   NodeCaption,
   NodeCard,
   ParamControl,
@@ -153,8 +155,16 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
 
   const model = findModel(catalog, wire.provider, wire.model);
   const modality = model?.modality ?? wire.modality;
+  // The model's role wins over its modality where it has one, so the three
+  // audio tools do not all render as an identical "Audio" node.
+  const role = model?.role ?? "";
   const ports = visiblePorts(catalog, "generate", model);
-  const options = modelsForModality(catalog, modality);
+  // Same role only: a lip-sync node offers the lip-sync models and nothing
+  // else, and they never appear on a plain video node — modality alone would
+  // mix the two, since both are `video`.
+  const options = modelsForModality(catalog, modality).filter(
+    (m) => (m.role ?? "") === role,
+  );
 
   const incoming = useNodeConnections({ handleType: "target" });
   const connected = React.useMemo(
@@ -170,9 +180,6 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     updateNodeInternals(id);
   }, [id, portKey, updateNodeInternals]);
 
-  // The model's role wins over its modality where it has one, so the three
-  // audio tools do not all render as an identical "Audio" node.
-  const role = model?.role ?? "";
   const Icon = ROLE_ICON[role] ?? MODALITY_ICON[modality] ?? ImageGenIcon;
   const kindLabel = ROLE_LABEL[role] ?? MODALITY_LABEL[modality] ?? "Generate";
   const accent = accentFor(role || modality);
@@ -213,6 +220,9 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
 
   const basicParams = (model?.params ?? []).filter((p) => (p.group ?? "basic") === "basic");
   const advancedParams = (model?.params ?? []).filter((p) => p.group === "advanced");
+  // Full-width controls that sit in the node body (the lyrics box, the voice
+  // picker) rather than shrinking into a bar chip.
+  const bodyParams = (model?.params ?? []).filter((p) => p.group === "body");
   const unavailable = model ? statusReason(model) : null;
 
   return (
@@ -225,6 +235,14 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             <DropdownMenuTrigger
               render={
                 <button type="button" className={cn(barChip, "font-semibold text-[#1f211c]")}>
+                  {model ? (
+                    <ModelLogo
+                      provider={model.provider}
+                      modelId={model.id}
+                      label={model.label}
+                      size="sm"
+                    />
+                  ) : null}
                   <span className="max-w-28 truncate">{model?.label ?? "Pick a model"}</span>
                   <CaretDownIcon className="size-3 text-[#a09a88]" />
                 </button>
@@ -236,34 +254,12 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
               sideOffset={8}
               className={cn(menuSurface, "w-72 p-1.5")}
             >
-              {options.length ? (
-                options.map((m) => (
-                  <DropdownMenuItem
-                    key={`${m.provider}/${m.id}`}
-                    onClick={() => selectModel(m)}
-                    className="px-2.5 py-2 focus:bg-[#f7f4ee]"
-                  >
-                    <span className="flex min-w-0 flex-col">
-                      <span className="flex items-center gap-1.5 text-[13px] font-semibold text-[#1f211c]">
-                        {m.label}
-                        {m.status !== "ready" ? (
-                          <WarningIcon className="size-3 text-[#a9743f]" weight="fill" />
-                        ) : null}
-                      </span>
-                      <span className="truncate text-[11px] text-[#8a8271]">
-                        {m.provider_label}
-                      </span>
-                    </span>
-                    {wire.model === m.id && wire.provider === m.provider ? (
-                      <CheckIcon className="ml-auto size-3.5 text-[#1f211c]" weight="bold" />
-                    ) : null}
-                  </DropdownMenuItem>
-                ))
-              ) : (
-                <p className="px-2.5 py-2 text-[11px] leading-4 text-[#a09a88]">
-                  No {modality} models in the catalog yet.
-                </p>
-              )}
+              <ModelMenuList
+                models={options}
+                selected={{ provider: wire.provider, id: wire.model }}
+                onSelect={selectModel}
+                emptyLabel={`No ${modality} models in the catalog yet.`}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -342,6 +338,18 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
         </div>
       </NodeCard>
 
+      {/* Body controls — the model's central choices (a voice, a lyrics box)
+          at full width, catalog-driven off `group: "body"`. */}
+      {bodyParams.length ? (
+        <NodeCard selected={selected} className="mt-1.5 p-2.5">
+          <NodeBodyControls
+            params={bodyParams}
+            values={wire.params ?? {}}
+            onChange={setParam}
+          />
+        </NodeCard>
+      ) : null}
+
       {/* Prompt — its own surface, detached from the preview card. Its footer
           carries the node's whole identity (name and model), so what will run
           sits with the text that drives it. */}
@@ -392,6 +400,15 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             {/* Both truncate, so a long name and a long model id share the row
                 instead of one pushing Run off the edge on a narrow ratio. */}
             <span className="shrink-0 text-[#cfc8b7]">·</span>
+            {model ? (
+              <ModelLogo
+                provider={model.provider}
+                modelId={model.id}
+                label={model.label}
+                size="sm"
+                className="text-[#8a8271]"
+              />
+            ) : null}
             <span className="max-w-[45%] shrink-0 truncate">
               {model?.label ?? "No model"}
             </span>

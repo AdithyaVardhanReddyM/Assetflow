@@ -30,13 +30,17 @@ export type ParamDescriptor = {
   label?: string;
   help?: string;
   unit?: string;
-  group?: "basic" | "advanced";
+  // "basic" is a bar chip, "advanced" hides in the overflow menu, "body" is a
+  // full-width control in the node body (lyrics box, voice picker).
+  group?: "basic" | "advanced" | "body";
   required?: boolean;
   default?: unknown;
   min?: number;
   max?: number;
   step?: number;
   max_length?: number;
+  /** A string param rendered as a multi-line box. Only meaningful in "body". */
+  multiline?: boolean;
   options?: ParamOption[];
 };
 
@@ -112,138 +116,12 @@ export type Catalog = {
 
 // --- fallback -------------------------------------------------------------
 
-const MOCK_MODELS: CatalogModel[] = [
-  {
-    id: "mock-video-v1",
-    label: "Mock Video",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "video",
-    status: "ready",
-    expected_duration_sec: 5,
-    est_cost_usd: 0,
-    output_media_type: "video/mp4",
-    accepts: [
-      { port: "init_image", via: "external_inputs", modality: "image" },
-      { port: "end_frame", via: "external_inputs", modality: "image" },
-      { port: "image_ref", via: "external_inputs", modality: "image" },
-    ],
-    params: [
-      { name: "duration", type: "integer", label: "Duration", unit: "s", default: 5, min: 1, max: 10, step: 1 },
-      {
-        name: "aspect_ratio",
-        type: "enum",
-        label: "Aspect ratio",
-        default: "16:9",
-        options: [
-          { value: "16:9" },
-          { value: "9:16" },
-          { value: "1:1" },
-        ],
-      },
-    ],
-  },
-  {
-    id: "mock-image-v1",
-    label: "Mock Image",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "image",
-    status: "ready",
-    expected_duration_sec: 2,
-    est_cost_usd: 0,
-    output_media_type: "image/png",
-    // Text-to-image only — `init_image` is a video-model port. Mirrors providers.yaml.
-    accepts: [{ port: "image_ref", via: "external_inputs", modality: "image" }],
-    params: [
-      {
-        name: "aspect_ratio",
-        type: "enum",
-        label: "Aspect ratio",
-        default: "16:9",
-        options: [
-          { value: "16:9" },
-          { value: "9:16" },
-          { value: "1:1" },
-        ],
-      },
-    ],
-  },
-  {
-    id: "mock-lipsync-v1",
-    label: "Mock Lip Sync",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "video",
-    role: "lipsync",
-    status: "ready",
-    expected_duration_sec: 6,
-    est_cost_usd: 0,
-    output_media_type: "video/mp4",
-    // Output follows the avatar, so there is no ratio to offer. Mirrors providers.yaml.
-    output_aspect_ratio: "1:1",
-    requires_prompt: false,
-    accepts: [
-      { port: "avatar", via: "external_inputs", modality: "image" },
-      { port: "speech", via: "external_inputs", modality: "audio" },
-    ],
-    params: [],
-  },
-  {
-    id: "mock-audio-v1",
-    label: "Mock Audio",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "audio",
-    role: "music",
-    status: "ready",
-    expected_duration_sec: 3,
-    est_cost_usd: 0,
-    output_media_type: "audio/mpeg",
-    accepts: [],
-    params: [
-      { name: "duration", type: "integer", label: "Duration", unit: "s", default: 8, min: 1, max: 60, step: 1 },
-    ],
-  },
-  {
-    id: "mock-llm-v1",
-    label: "Mock Prompt Writer",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "text",
-    role: "llm",
-    status: "ready",
-    expected_duration_sec: 2,
-    est_cost_usd: 0,
-    output_media_type: "text/plain",
-    accepts: [],
-    params: [
-      {
-        name: "target",
-        type: "enum",
-        label: "Write for",
-        default: "image",
-        options: [{ value: "image" }, { value: "video" }, { value: "audio" }],
-      },
-      { name: "temperature", type: "number", label: "Temperature", default: 0.7, min: 0, max: 1, step: 0.1, group: "advanced" },
-    ],
-  },
-  {
-    id: "mock-speech-v1",
-    label: "Mock Speech",
-    provider: "mock",
-    provider_label: "Mock (no API key)",
-    modality: "audio",
-    // The keyless source for a lipsync `speech` port. Mirrors providers.yaml.
-    role: "speech",
-    status: "ready",
-    expected_duration_sec: 3,
-    est_cost_usd: 0,
-    output_media_type: "audio/mpeg",
-    accepts: [],
-    params: [],
-  },
-];
+// Empty on purpose: providers.yaml marks every mock model `hidden` (the real
+// lineup owns the pickers; the mocks survive server-side as the compiler
+// suite's substrate), and the API never serves hidden models — the fallback
+// mirrors that absence. A backend-down canvas offers no models at all rather
+// than mocks the live palette would not show.
+const MOCK_MODELS: CatalogModel[] = [];
 
 const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
   {
@@ -271,10 +149,14 @@ const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
       { id: "init_image", modality: "image", required: false, multi: false, model_gated: true },
       { id: "end_frame", modality: "image", required: false, multi: false, model_gated: true },
       { id: "avatar", modality: "image", required: false, multi: false, model_gated: true },
-      // Only a text-to-speech node or an upload may drive a mouth — see the
-      // note on `roles` in node_types.yaml.
-      { id: "speech", modality: "audio", required: false, multi: false, model_gated: true, roles: ["speech"] },
+      // Speech or music (an avatar can sing) or an upload may drive a mouth —
+      // see the note on `roles` in node_types.yaml.
+      { id: "speech", modality: "audio", required: false, multi: false, model_gated: true, roles: ["speech", "music"] },
+      // The track a music model covers — mirrors node_types.yaml.
+      { id: "source_audio", modality: "audio", required: false, multi: false, model_gated: true, roles: ["music"] },
       { id: "image_ref", modality: "image", required: false, multi: true, model_gated: true },
+      // The video a v2v model edits — mirrors node_types.yaml.
+      { id: "source_video", modality: "video", required: false, multi: false, model_gated: true },
     ],
     outputs: [{ id: "out", modality: "any", required: false, multi: false, model_gated: false }],
     default_data: {
@@ -446,8 +328,8 @@ export function defaultParams(model: CatalogModel): Record<string, unknown> {
 /**
  * Re-seed a node's params when its model changes.
  *
- * Params are per-provider by design — Veo takes `duration_seconds` where Runway
- * takes `duration` — so carrying the old map across wholesale earns a
+ * Params are per-provider by design — ElevenLabs takes `duration_seconds` where
+ * Runway takes `duration` — so carrying the old map across wholesale earns a
  * PARAM_UNKNOWN from the compiler. Start from the new model's defaults and keep
  * only values it also declares *and* would accept, so a deliberate "16:9"
  * survives the switch but a stale key does not.

@@ -5,17 +5,21 @@
 # tests/unit/test_catalog.py asserts every adapter path is well-formed so this
 # file cannot silently drift.
 #
-# Param names are per-provider on purpose (Veo takes `duration_seconds`, GMI and
-# Runway take `duration`) — GenBlaze normalizes per connector, not globally.
+# Param names are per-provider on purpose (ElevenLabs takes `duration_seconds`,
+# GMI and Runway take `duration`) — GenBlaze normalizes per connector, not globally.
 
 providers:
   - key: mock
     label: Mock (no API key)
     always_available: true
     models:
+      # Hidden like mock-image below: with a real video lineup wired up the
+      # mock has no business in the picker, but the compiler suite builds on
+      # it (`gen()` defaults to this model), so it stays in the catalog.
       - id: mock-video-v1
         label: Mock Video
         modality: video
+        hidden: true
         adapter: app.engine.mock_providers:video_provider
         expected_duration_sec: 5
         est_cost_usd: 0
@@ -38,10 +42,26 @@ providers:
               - {value: "16:9"}
               - {value: "9:16"}
               - {value: "1:1"}
+          # The mock's own ladder, not a claim about any real provider: video
+          # models name their output in scanlines (Lucy below is 480p/720p), so
+          # the mock offers the same vocabulary for the canvas to render.
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "720p"
+            options:
+              - {value: "480p"}
+              - {value: "720p"}
+              - {value: "1080p"}
 
+      # Hidden from the canvas since real image providers landed — with ten
+      # live image models a mock in the picker is noise. It stays in the
+      # catalog because the compiler suite builds on it: a keyless,
+      # always-ready image step no credential can take away.
       - id: mock-image-v1
         label: Mock Image
         modality: image
+        hidden: true
         adapter: app.engine.mock_providers:image_provider
         expected_duration_sec: 2
         est_cost_usd: 0
@@ -60,11 +80,26 @@ providers:
               - {value: "16:9"}
               - {value: "9:16"}
               - {value: "1:1"}
+          # Image models size by the long edge rather than by scanlines, so this
+          # ladder reads 1K/2K/4K where the video one reads 720p/1080p. Same
+          # param name, deliberately different vocabulary.
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "1K"
+            options:
+              - {value: "1K"}
+              - {value: "2K"}
+              - {value: "4K"}
 
+      # Hidden like the other media mocks — the lipsync tool has no real
+      # provider yet, and a mock in the picker reads as product surface.
+      # Compile tests for the avatar/speech ports still build on it.
       - id: mock-lipsync-v1
         label: Mock Lip Sync
         modality: video
         role: lipsync
+        hidden: true
         adapter: app.engine.mock_providers:video_provider
         expected_duration_sec: 6
         est_cost_usd: 0
@@ -80,10 +115,17 @@ providers:
           - {port: speech, via: external_inputs, modality: audio}
         params: []
 
+      # The audio and text mocks below are hidden like the media mocks above:
+      # with the real ElevenLabs lineup wired up, a mock in any picker reads
+      # as product surface. They stay in the catalog because the compiler
+      # suite builds on them — keyless, always-ready steps of every role
+      # (`speech`/`music` also keep the role-gated ports keyless-reachable
+      # for the compile tests).
       - id: mock-audio-v1
         label: Mock Audio
         modality: audio
         role: music
+        hidden: true
         adapter: app.engine.mock_providers:audio_provider
         expected_duration_sec: 3
         est_cost_usd: 0
@@ -91,18 +133,17 @@ providers:
         params:
           - {name: duration, type: integer, label: Duration, unit: s, default: 8, min: 1, max: 60, step: 1}
 
-      # The keyless other end of the lipsync chain. Without it the `speech` port
-      # is only reachable from ElevenLabs or an upload, so the flow the mock
-      # provider exists to demonstrate — speak, then drive a face with it —
-      # would need a credential to draw at all.
       # Text in, text out: the node that rewrites a rough idea into a prompt
       # worth spending a generation on. Mock-only for now — genblaze-google and
       # genblaze-openai ship LLM-capable packages, but neither is installed
       # here, and this file does not claim a provider class it has not seen.
+      # Hidden with the rest of the mocks, which leaves the LLM tool with no
+      # model to place until a real text provider lands.
       - id: mock-llm-v1
         label: Mock Prompt Writer
         modality: text
         role: llm
+        hidden: true
         adapter: app.engine.mock_providers:text_provider
         expected_duration_sec: 2
         est_cost_usd: 0
@@ -120,48 +161,823 @@ providers:
         label: Mock Speech
         modality: audio
         role: speech
+        hidden: true
         adapter: app.engine.mock_providers:audio_provider
         expected_duration_sec: 3
         est_cost_usd: 0
         output_media_type: audio/mpeg
         params: []
 
-  - key: google
-    label: Google
-    package: genblaze_google
-    extra: google
-    env_var: GEMINI_API_KEY
-    signup_url: https://aistudio.google.com/apikey
-    models:
-      - id: veo-3.0-generate-001
-        label: Veo 3
-        modality: video
-        adapter: genblaze_google:VeoProvider
-        expected_duration_sec: 120
-        output_media_type: video/mp4
-        accepts:
-          - {port: init_image, via: external_inputs, modality: image}
+      - id: mock-sfx-v1
+        label: Mock Sound Effects
+        modality: audio
+        role: sfx
+        hidden: true
+        adapter: app.engine.mock_providers:audio_provider
+        expected_duration_sec: 3
+        est_cost_usd: 0
+        output_media_type: audio/mpeg
         params:
-          - {name: duration_seconds, type: integer, label: Duration, unit: s, default: 8, min: 4, max: 8, step: 1}
+          - {name: duration_seconds, type: number, label: Duration, unit: s, default: 5, min: 0.5, max: 22, step: 0.5}
+
+  - key: replicate
+    label: Replicate
+    package: genblaze_replicate
+    extra: replicate
+    env_var: REPLICATE_API_TOKEN
+    signup_url: https://replicate.com/account/api-tokens
+    models:
+      # The lab flagships below run through our replicate_image_provider factory
+      # rather than the bare ReplicateProvider: params still pass through
+      # verbatim (Replicate's fallback carries no allowlist), but the stock
+      # chain routing hands *one* image to a singular `image` key, and these
+      # four take arrays (`image_input` / `input_images`). The factory registers
+      # per-slug specs with the right slot so every wired reference arrives.
+      # Param names/values below are the models' own schemas (replicate.com,
+      # 2026-07) — do not "normalize" them across models.
+      - id: google/nano-banana-pro
+        label: Nano Banana Pro
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 25
+        est_cost_usd: 0.15
+        output_media_type: image/jpeg
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            # Upstream defaults to match_input_image; the canvas seeds a
+            # concrete ratio instead so the card previews the shape it will
+            # produce before any reference is wired. "Match input" stays
+            # available for editing flows.
+            default: "16:9"
+            options:
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "5:4"}
+              - {value: "4:5"}
+              - {value: "21:9"}
+              - {value: match_input_image, label: Match input}
+          # 1K over the model's own 2K default: the house default is the
+          # cheap-iteration tier, and 1K and 2K bill the same here anyway.
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "1K"
+            options: [{value: "1K"}, {value: "2K"}, {value: "4K"}]
+          - name: output_format
+            type: enum
+            label: Format
+            default: jpg
+            group: advanced
+            options: [{value: jpg}, {value: png}]
+
+      - id: google/nano-banana-2
+        label: Nano Banana 2
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 25
+        est_cost_usd: 0.067
+        output_media_type: image/jpeg
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
             default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}]
+            options:
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "5:4"}
+              - {value: "4:5"}
+              - {value: "21:9"}
+              - {value: match_input_image, label: Match input}
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "1K"
+            options: [{value: "1K"}, {value: "2K"}, {value: "4K"}]
+          - {name: google_search, type: boolean, label: Web grounding, default: false, group: advanced}
+          - {name: image_search, type: boolean, label: Image grounding, default: false, group: advanced}
+          - name: output_format
+            type: enum
+            label: Format
+            default: jpg
+            group: advanced
+            options: [{value: jpg}, {value: png}]
+
+      # GPT Image 1.5 sizes by `quality` alone — there deliberately is no
+      # `resolution` param on it, and the price moves with quality
+      # ($0.013 low → $0.136 high/auto).
+      - id: openai/gpt-image-1.5
+        label: GPT Image 1.5
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 30
+        est_cost_usd: 0.136
+        output_media_type: image/webp
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: "1:1"
+            # The model's whole ratio surface — three values, no more.
+            options: [{value: "1:1"}, {value: "3:2"}, {value: "2:3"}]
+          - name: quality
+            type: enum
+            label: Quality
+            default: auto
+            options: [{value: auto}, {value: low}, {value: medium}, {value: high}]
+          - name: background
+            type: enum
+            label: Background
+            default: auto
+            group: advanced
+            options: [{value: auto}, {value: transparent}, {value: opaque}]
+          # How closely an edit clings to the wired reference — 1.5-only knob.
+          - name: input_fidelity
+            type: enum
+            label: Input fidelity
+            default: low
+            group: advanced
+            options: [{value: low}, {value: high}]
+          - name: output_format
+            type: enum
+            label: Format
+            default: webp
+            group: advanced
+            options: [{value: webp}, {value: png}, {value: jpeg}]
+
+      - id: openai/gpt-image-2
+        label: GPT Image 2
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 30
+        est_cost_usd: 0.128
+        output_media_type: image/webp
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          # GPT Image 2's upstream enum mixes ratio words with raw pixel sizes
+          # up to 3840x2160. The bar keeps the two axes separate — ratio here,
+          # resolution below — and the replicate_image_provider factory folds
+          # the pair back into the exact upstream size value; pairs with no
+          # pixel size of their own fall back to the plain ratio word.
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: "16:9"
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "1K"
+            options: [{value: "1K"}, {value: "2K"}, {value: "4K"}]
+          - name: quality
+            type: enum
+            label: Quality
+            default: auto
+            options: [{value: auto}, {value: low}, {value: medium}, {value: high}]
+          - name: background
+            type: enum
+            label: Background
+            default: auto
+            group: advanced
+            options: [{value: auto}, {value: transparent}, {value: opaque}]
+          - name: output_format
+            type: enum
+            label: Format
+            default: webp
+            group: advanced
+            options: [{value: webp}, {value: png}, {value: jpeg}]
+
+      # Sora 2 pairs synced audio with the clip. Duration is a fixed enum
+      # upstream (4/8/12s); `aspect_ratio` travels as the canvas's ratio pair
+      # and the factory folds it into Sora's landscape/portrait vocabulary.
+      # An optional wired image becomes the literal first frame
+      # (`input_reference`) — it must match the chosen aspect ratio.
+      - id: openai/sora-2
+        label: Sora 2
+        modality: video
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 240
+        est_cost_usd: 0.4
+        output_media_type: video/mp4
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            # Upstream default is portrait; the canvas's video lineup defaults
+            # to landscape everywhere, so this deviates deliberately.
+            default: "16:9"
+            options:
+              - {value: "16:9", label: "16:9 · 1280×720"}
+              - {value: "9:16", label: "9:16 · 720×1280"}
+          - {name: seconds, type: integer, label: Duration, unit: s, default: 4, min: 4, max: 12, step: 4}
+
+      # PixVerse's lip sync: re-drive the mouth in a wired video with a wired
+      # voice or music track. Two required media inputs, nothing else — no
+      # prompt, no ratio (the output follows the source video), no params.
+      - id: pixverse/lipsync
+        label: PixVerse Lipsync
+        modality: video
+        role: lipsync
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 120
+        output_media_type: video/mp4
+        # Follows the source video; preview only.
+        output_aspect_ratio: "16:9"
+        requires_prompt: false
+        accepts:
+          - {port: source_video, via: external_inputs, modality: video}
+          - {port: speech, via: external_inputs, modality: audio}
+        params: []
+
+  - key: runway
+    label: Runway
+    package: genblaze_runway
+    extra: runway
+    env_var: RUNWAYML_API_SECRET
+    signup_url: https://dev.runwayml.com/
+    # Video only. Populates preview_url during generation — live node thumbnails.
+    models:
+      # Both models below exist on Runway's text_to_video *and* image_to_video
+      # endpoints, which the stock RunwayProvider cannot express (it only ever
+      # calls image_to_video) — so they run through our RunwayVideoProvider,
+      # which picks the endpoint from the wiring: wire a start frame and it is
+      # image-to-video, wire nothing and it is pure text-to-video.
+      - id: "gen4.5"
+        label: Gen-4.5
+        modality: video
+        adapter: app.engine.genblaze_adapters:RunwayVideoProvider
+        expected_duration_sec: 120
+        # 12 credits/second — quoted at the 5s default.
+        est_cost_usd: 0.6
+        output_media_type: video/mp4
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+        params:
+          # The four non-HD sizes need a start frame — pure text-to-video only
+          # speaks 1280:720/720:1280, and the adapter says so if asked.
+          - name: aspect_ratio
+            type: enum
+            label: Size
+            default: "1280:720"
+            options:
+              - {value: "1280:720", label: "1280×720 · 16:9"}
+              - {value: "720:1280", label: "720×1280 · 9:16"}
+              - {value: "1104:832", label: "1104×832 · 4:3"}
+              - {value: "832:1104", label: "832×1104 · 3:4"}
+              - {value: "960:960", label: "960×960 · 1:1"}
+              - {value: "1584:672", label: "1584×672 · 21:9"}
+          # Any whole number of seconds, not a 5/10 pair — Gen-4.5 loosened it.
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 2, max: 10, step: 1}
+
+      # Image-to-video only — there is no text path for Turbo, and the
+      # adapter says what to wire instead of relaying Runway's 400.
+      - id: gen4_turbo
+        label: Gen-4 Turbo
+        modality: video
+        adapter: app.engine.genblaze_adapters:RunwayVideoProvider
+        expected_duration_sec: 90
+        # 5 credits/second at the 5s default.
+        est_cost_usd: 0.25
+        output_media_type: video/mp4
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Size
+            default: "1280:720"
+            options:
+              - {value: "1280:720", label: "1280×720 · 16:9"}
+              - {value: "720:1280", label: "720×1280 · 9:16"}
+              - {value: "1104:832", label: "1104×832 · 4:3"}
+              - {value: "832:1104", label: "832×1104 · 3:4"}
+              - {value: "960:960", label: "960×960 · 1:1"}
+              - {value: "1584:672", label: "1584×672 · 21:9"}
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 2, max: 10, step: 1}
+
+      # Gemini's video model, served through Runway's API. Three modes, picked
+      # by the wiring: nothing wired is text-to-video, a wired image becomes
+      # the first frame, and a wired *video* flips it into editing mode with
+      # any wired images as references (size/duration then follow the input
+      # video and are ignored).
+      - id: gemini_omni_flash
+        label: Gemini Omni Flash
+        modality: video
+        adapter: app.engine.genblaze_adapters:RunwayVideoProvider
+        expected_duration_sec: 90
+        # 10 credits/second at the 5s default; editing bills 11/s of input.
+        est_cost_usd: 0.5
+        output_media_type: video/mp4
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: image_ref, via: external_inputs, modality: image}
+          - {port: source_video, via: external_inputs, modality: video}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Size
+            default: "1280:720"
+            options:
+              - {value: "1280:720", label: "1280×720 · 16:9"}
+              - {value: "720:1280", label: "720×1280 · 9:16"}
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 3, max: 10, step: 1}
+
+      # The image siblings cannot ride genblaze_runway's RunwayProvider — its
+      # submit() always calls image_to_video — so they run through our
+      # RunwayImageProvider (same RUNWAYML_API_SECRET auth and task polling,
+      # text_to_image endpoint). Runway sizes images by exact pixel pair, not a
+      # ratio word; the values are the API's own vocabulary and keep the ":"
+      # form so the canvas card still takes the right shape.
+      - id: gen4_image
+        label: Gen-4 Image
+        modality: image
+        adapter: app.engine.genblaze_adapters:RunwayImageProvider
+        expected_duration_sec: 15
+        # 720p-class ratios bill $0.05, 1080p-class $0.08 — quoted at the default.
+        est_cost_usd: 0.08
+        output_media_type: image/png
+        # Up to three optional style/subject references.
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Size
+            default: "1920:1080"
+            options:
+              - {value: "1920:1080", label: "1920×1080 · 16:9"}
+              - {value: "1280:720", label: "1280×720 · 16:9"}
+              - {value: "1080:1920", label: "1080×1920 · 9:16"}
+              - {value: "720:1280", label: "720×1280 · 9:16"}
+              - {value: "1080:1080", label: "1080×1080 · 1:1"}
+              - {value: "1024:1024", label: "1024×1024 · 1:1"}
+              - {value: "720:720", label: "720×720 · 1:1"}
+              - {value: "1440:1080", label: "1440×1080 · 4:3"}
+              - {value: "1080:1440", label: "1080×1440 · 3:4"}
+              - {value: "960:720", label: "960×720 · 4:3"}
+              - {value: "720:960", label: "720×960 · 3:4"}
+              - {value: "2112:912", label: "2112×912 · 21:9"}
+              - {value: "1680:720", label: "1680×720 · 21:9"}
+              - {value: "1808:768", label: "1808×768 · ≈21:9"}
+              - {value: "1360:768", label: "1360×768 · ≈16:9"}
+              - {value: "1168:880", label: "1168×880 · ≈4:3"}
+
+      # Turbo *requires* 1–3 reference images — pure text-to-image is the one
+      # thing it cannot do. The adapter refuses a referenceless submit with a
+      # message that says what to wire, instead of relaying Runway's 400.
+      - id: gen4_image_turbo
+        label: Gen-4 Image Turbo
+        modality: image
+        adapter: app.engine.genblaze_adapters:RunwayImageProvider
+        expected_duration_sec: 10
+        est_cost_usd: 0.02
+        output_media_type: image/png
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Size
+            default: "1920:1080"
+            options:
+              - {value: "1920:1080", label: "1920×1080 · 16:9"}
+              - {value: "1280:720", label: "1280×720 · 16:9"}
+              - {value: "1080:1920", label: "1080×1920 · 9:16"}
+              - {value: "720:1280", label: "720×1280 · 9:16"}
+              - {value: "1080:1080", label: "1080×1080 · 1:1"}
+              - {value: "1024:1024", label: "1024×1024 · 1:1"}
+              - {value: "720:720", label: "720×720 · 1:1"}
+              - {value: "1440:1080", label: "1440×1080 · 4:3"}
+              - {value: "1080:1440", label: "1080×1440 · 3:4"}
+              - {value: "960:720", label: "960×720 · 4:3"}
+              - {value: "720:960", label: "720×960 · 3:4"}
+              - {value: "2112:912", label: "2112×912 · 21:9"}
+              - {value: "1680:720", label: "1680×720 · 21:9"}
+              - {value: "1808:768", label: "1808×768 · ≈21:9"}
+              - {value: "1360:768", label: "1360×768 · ≈16:9"}
+              - {value: "1168:880", label: "1168×880 · ≈4:3"}
+
+  - key: luma
+    label: Luma
+    package: genblaze_luma
+    extra: luma
+    env_var: LUMAAI_API_KEY
+    signup_url: https://platform.lumalabs.ai/
+    # Ray 3.2 and Uni-1 live on Luma's *Agents* API (agents.lumalabs.ai), not
+    # the legacy Dream Machine API the stock genblaze_luma adapter drives — so
+    # both run through our LumaAgentsProvider (plain httpx against the Agents
+    # endpoints). It reads LUMA_AGENTS_API_KEY first and falls back to
+    # LUMAAI_API_KEY; if generations 401, the key is a Dream Machine key and a
+    # platform.lumalabs.ai key is needed.
+    models:
+      - id: "ray-3.2"
+        label: Ray 3.2
+        modality: video
+        adapter: app.engine.genblaze_adapters:LumaAgentsProvider
+        expected_duration_sec: 120
+        # 720p SDR, 5s. 1080p is $1.20; HDR doubles it.
+        est_cost_usd: 0.3
+        output_media_type: video/mp4
+        # First wired image anchors the clip, a second one ends it.
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: end_frame, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: "16:9"
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "1:1"}
+              - {value: "21:9"}
+          # 360p is the draft tier; there is no 4k on Ray 3.2.
           - name: resolution
             type: enum
             label: Resolution
             default: "720p"
-            options: [{value: "720p"}, {value: "1080p"}]
-          - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
-          - {name: negative_prompt, type: string, label: Negative prompt, group: advanced, max_length: 500}
+            options:
+              - {value: "360p"}
+              - {value: "540p"}
+              - {value: "720p"}
+              - {value: "1080p"}
+          # Upstream takes the value with its unit baked in. 10s is
+          # incompatible with an end frame or loop — the API enforces it.
+          - name: duration
+            type: enum
+            label: Duration
+            default: "5s"
+            options: [{value: "5s", label: "5s"}, {value: "10s", label: "10s"}]
+          - {name: loop, type: boolean, label: Loop, default: false, group: advanced}
 
-      - id: imagen-4.0-generate-001
-        label: Imagen 4
+      # Luma's current image model, same Agents API. No resolution knob —
+      # output is 2048px-class for whichever ratio is picked.
+      - id: uni-1
+        label: Uni-1
         modality: image
-        adapter: genblaze_google:ImagenProvider
+        adapter: app.engine.genblaze_adapters:LumaAgentsProvider
         expected_duration_sec: 15
+        est_cost_usd: 0.04
         output_media_type: image/png
+        # Up to 9 references, all through one array.
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            # Upstream auto-selects when omitted; the canvas pins a shape so
+            # the card can preview it.
+            default: "16:9"
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "2:1"}
+              - {value: "1:2"}
+              - {value: "3:1"}
+              - {value: "1:3"}
+          # `manga` demands a portrait ratio — the API 422s otherwise.
+          - name: style
+            type: enum
+            label: Style
+            default: auto
+            group: advanced
+            options: [{value: auto}, {value: manga}]
+          - name: output_format
+            type: enum
+            label: Format
+            default: png
+            group: advanced
+            options: [{value: png}, {value: jpeg}]
+          - {name: web_search, type: boolean, label: Web grounding, default: false, group: advanced}
+
+  - key: elevenlabs
+    label: ElevenLabs
+    package: genblaze_elevenlabs
+    extra: elevenlabs
+    env_var: ELEVENLABS_API_KEY
+    signup_url: https://elevenlabs.io/app/settings/api-keys
+    models:
+      # --- text to speech ------------------------------------------------
+      # Both ride the stock TTS provider (its `^eleven_` family covers every
+      # tier). The voice list is ElevenLabs' premade set — IDs are global and
+      # stable, so a curated enum beats a raw "Voice ID" string box. The
+      # anchor YAML alias keeps the two models' lists identical.
+      - id: eleven_v3
+        label: Eleven v3
+        modality: audio
+        role: speech
+        adapter: genblaze_elevenlabs:ElevenLabsTTSProvider
+        expected_duration_sec: 20
+        output_media_type: audio/mpeg
+        params:
+          - &eleven_voices
+            name: voice_id
+            type: enum
+            label: Voice
+            required: true
+            # A body picker, not a bar chip: the voice is the node's main
+            # choice, so it sits full-width under the preview.
+            group: body
+            default: 21m00Tcm4TlvDq8ikWAM
+            options:
+              - {value: 21m00Tcm4TlvDq8ikWAM, label: Rachel}
+              - {value: EXAVITQu4vr4xnSDxMaL, label: Sarah}
+              - {value: Xb7hH8MSUJpSbSDYk0k2, label: Alice}
+              - {value: XrExE9yKIg1WjnnlVkGX, label: Matilda}
+              - {value: cgSgspJ2msm6clMCkdW9, label: Jessica}
+              - {value: pFZP5JQG7iQjIQuC4Bku, label: Lily}
+              - {value: pNInz6obpgDQGcFmaJgB, label: Adam}
+              - {value: JBFqnCBsd6RMkjVDRZzb, label: George}
+              - {value: IKne3meq5aSn9XLyUdCD, label: Charlie}
+              - {value: nPczCjzI2devNBz1zQrb, label: Brian}
+              - {value: onwK4e9ZLuTAKqWW03F9, label: Daniel}
+              - {value: bIHbv24MWmeRgasZH58o, label: Will}
+          - &eleven_format
+            name: output_format
+            type: enum
+            label: Format
+            default: mp3_44100_128
+            group: advanced
+            options: [{value: mp3_44100_128}, {value: mp3_44100_192}, {value: mp3_22050_32}]
+
+      # The low-latency tier — same interface, ~75ms model. The cheap take
+      # when the delivery matters less than the words.
+      - id: eleven_flash_v2_5
+        label: Eleven Flash v2.5
+        modality: audio
+        role: speech
+        adapter: genblaze_elevenlabs:ElevenLabsTTSProvider
+        expected_duration_sec: 8
+        output_media_type: audio/mpeg
+        params:
+          - *eleven_voices
+          - *eleven_format
+
+      # --- music ---------------------------------------------------------
+      # First-party adapter: genblaze_elevenlabs ships no music provider.
+      # The prompt box describes the track; wiring a source track (a music
+      # node or an upload) switches to cover mode — the source's extracted
+      # composition plan drives the generation and the prompt folds in as a
+      # style. Duration is the model's choice unless set.
+      - id: music_v2
+        label: Eleven Music v2
+        modality: audio
+        role: music
+        adapter: app.engine.genblaze_adapters:elevenlabs_music_provider
+        expected_duration_sec: 60
+        output_media_type: audio/mpeg
+        accepts:
+          - {port: source_audio, via: external_inputs, modality: audio}
+        params:
+          # The lyrics box and its enable toggle both live in the node body.
+          # `vocals` off = a purely instrumental track (the box greys out).
+          - {name: vocals, type: boolean, label: Vocals, default: true, group: body}
+          - name: lyrics
+            type: string
+            label: Lyrics
+            help: Add your lyrics here, or leave blank to infer from the prompt.
+            group: body
+            multiline: true
+            max_length: 2000
+          # Basic (a bar chip) with no default, so it reads "Auto" until set.
+          - name: duration_seconds
+            type: number
+            label: Duration
+            unit: s
+            help: Auto unless set.
+            min: 3
+            max: 600
+            step: 1
+
+      # --- sound effects -------------------------------------------------
+      # First-party adapter for the same reason in miniature: the stock SFX
+      # provider predates the API's `loop` flag and drops it.
+      - id: eleven_text_to_sound_v2
+        label: Sound Effects
+        modality: audio
+        role: sfx
+        adapter: app.engine.genblaze_adapters:elevenlabs_sfx_provider
+        expected_duration_sec: 15
+        output_media_type: audio/mpeg
+        params:
+          - {name: loop, type: boolean, label: Loop, default: false}
+          - name: prompt_influence
+            type: number
+            label: Prompt influence
+            help: Higher follows the prompt more literally, lower explores.
+            default: 0.3
+            min: 0
+            max: 1
+            step: 0.05
+          - name: duration_seconds
+            type: number
+            label: Duration
+            unit: s
+            help: Auto unless set.
+            min: 0.5
+            max: 30
+            step: 0.5
+            group: advanced
+
+  - key: gmicloud
+    label: GMI Cloud
+    package: genblaze_gmicloud
+    extra: gmicloud
+    env_var: GMI_API_KEY
+    signup_url: https://console.gmicloud.ai/
+    models:
+      # All three run through gmicloud_video_provider — the stock video
+      # provider carrying registry specs that alias the canvas's
+      # `aspect_ratio` onto GMI's `ratio` and route wired images into each
+      # model's own slots.
+      - id: seedance-2-0-260128
+        label: Seedance 2.0
+        modality: video
+        adapter: app.engine.genblaze_adapters:gmicloud_video_provider
+        expected_duration_sec: 180
+        # $0.152/s at the 720p default, 5s.
+        est_cost_usd: 0.76
+        output_media_type: video/mp4
+        # Positional: the first wired image is the first frame, a second one
+        # is the last frame, everything after rides as references (up to 9).
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: end_frame, via: external_inputs, modality: image}
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 4, max: 15, step: 1}
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            # Upstream defaults to adaptive (follow the inputs); the canvas
+            # pins landscape so the card previews a shape. Adaptive stays.
+            default: "16:9"
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "21:9"}
+              - {value: adaptive, label: Adaptive}
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "720p"
+            options: [{value: "480p"}, {value: "720p"}, {value: "1080p"}]
+          - {name: generate_audio, type: boolean, label: Audio, default: true}
+          - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
+
+      - id: seedance-2-0-fast-260128
+        label: Seedance 2.0 Fast
+        modality: video
+        adapter: app.engine.genblaze_adapters:gmicloud_video_provider
+        expected_duration_sec: 90
+        est_cost_usd: 0.45
+        output_media_type: video/mp4
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: end_frame, via: external_inputs, modality: image}
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 4, max: 15, step: 1}
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: "16:9"
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "21:9"}
+              - {value: adaptive, label: Adaptive}
+          # Fast stops at 720p — no 1080p tier exists on it.
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "720p"
+            options: [{value: "480p"}, {value: "720p"}]
+          - {name: generate_audio, type: boolean, label: Audio, default: true}
+          - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
+
+      # Image-to-video only: the start image is required (the registry spec
+      # enforces it in-process), the optional second image guides the ending.
+      # No aspect ratio — the output follows the start image's framing —
+      # and resolution is chosen through `mode` (std 720p / pro 1080p / 4k).
+      - id: kling-v3-image-to-video
+        label: Kling v3 (image to video)
+        modality: video
+        adapter: app.engine.genblaze_adapters:gmicloud_video_provider
+        expected_duration_sec: 180
+        # std mode without audio, 5s.
+        est_cost_usd: 0.42
+        output_media_type: video/mp4
+        output_aspect_ratio: "16:9"
+        accepts:
+          - {port: init_image, via: external_inputs, modality: image}
+          - {port: end_frame, via: external_inputs, modality: image}
+        params:
+          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 3, max: 15, step: 1}
+          - name: mode
+            type: enum
+            label: Mode
+            default: std
+            options:
+              - {value: std, label: "Standard · 720p"}
+              - {value: pro, label: "Pro · 1080p"}
+              - {value: "4k", label: "4K"}
+          - name: sound
+            type: enum
+            label: Audio
+            default: "off"
+            group: advanced
+            options: [{value: "on"}, {value: "off"}]
+          - {name: negative_prompt, type: string, label: Negative prompt, group: advanced, max_length: 2500}
+
+      # --- lip sync ------------------------------------------------------
+      # NOT HeyGen: GMI also lists heygen-avatar-4, but that endpoint is
+      # script-driven (input_text + HeyGen library voice_id/avatar_id —
+      # verified against docs.gmicloud.ai 2026-07) with no audio input and no
+      # image-URL input, so it cannot be a lipsync node driven by wires. The
+      # lipsync lineup is PixVerse (under replicate above, the default) and
+      # Kling here.
+
+      # The video/audio lip-sync path: identify the face in a wired
+      # video, then sync its mouth to the wired voice or music track. Driven
+      # entirely by its ports — a prompt has nothing to steer.
+      - id: kling-lip-sync
+        label: Kling Lip Sync
+        modality: video
+        role: lipsync
+        adapter: app.engine.genblaze_adapters:gmi_kling_lipsync_provider
+        expected_duration_sec: 180
+        output_media_type: video/mp4
+        # Follows the source video; preview only.
+        output_aspect_ratio: "16:9"
+        requires_prompt: false
+        accepts:
+          - {port: source_video, via: external_inputs, modality: video}
+          - {port: speech, via: external_inputs, modality: audio}
+        params:
+          - {name: sound_volume, type: number, label: Voice volume, default: 1.0, min: 0, max: 2, step: 0.1, group: advanced}
+          # 0 replaces the original track entirely — the lip-sync default.
+          - {name: original_audio_volume, type: number, label: Original audio, default: 0.0, min: 0, max: 2, step: 0.1, group: advanced}
+
+      # GMI's image queue. All three go through gmicloud_image_provider — the
+      # stock GMICloudImageProvider carrying extra registry specs for Seedream,
+      # whose API takes a single `size` ("2K"/"3K" preset or explicit "WxH")
+      # rather than the aspect_ratio + resolution pair the bar offers. A
+      # param_transformer folds the pair into the exact pixel size GMI accepts,
+      # so the node UI stays consistent across providers without lying about
+      # the wire format.
+      - id: seedream-5.0-pro
+        label: Seedream 5.0 Pro
+        modality: image
+        adapter: app.engine.genblaze_adapters:gmicloud_image_provider
+        expected_duration_sec: 25
+        est_cost_usd: 0.085
+        output_media_type: image/jpeg
+        # Up to 14 reference images; the factory routes them all through as an
+        # array instead of the stock single-image slot.
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
         params:
           - name: aspect_ratio
             type: enum
@@ -173,165 +989,165 @@ providers:
               - {value: "1:1"}
               - {value: "4:3"}
               - {value: "3:4"}
-
-  - key: replicate
-    label: Replicate
-    package: genblaze_replicate
-    extra: replicate
-    env_var: REPLICATE_API_TOKEN
-    signup_url: https://replicate.com/account/api-tokens
-    # Image only in GenBlaze — the Replicate adapter has no video path.
-    models:
-      - id: black-forest-labs/flux-schnell
-        label: FLUX Schnell
-        modality: image
-        adapter: genblaze_replicate:ReplicateProvider
-        expected_duration_sec: 10
-        output_media_type: image/webp
-        params:
-          - name: aspect_ratio
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "21:9"}
+          # Seedream 5 tops out at 3K on GMI — no 1K or 4K tier exists there.
+          - name: resolution
             type: enum
-            label: Aspect ratio
-            default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}, {value: "4:3"}, {value: "3:4"}]
-          - {name: num_outputs, type: integer, label: Outputs, default: 1, min: 1, max: 4, step: 1, group: advanced}
-
-      - id: black-forest-labs/flux-dev
-        label: FLUX Dev
-        modality: image
-        adapter: genblaze_replicate:ReplicateProvider
-        expected_duration_sec: 25
-        output_media_type: image/webp
-        params:
-          - name: aspect_ratio
-            type: enum
-            label: Aspect ratio
-            default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}]
-
-  - key: runway
-    label: Runway
-    package: genblaze_runway
-    extra: runway
-    env_var: RUNWAYML_API_SECRET
-    signup_url: https://dev.runwayml.com/
-    # Video only. Populates preview_url during generation — live node thumbnails.
-    models:
-      - id: gen4_turbo
-        label: Gen-4 Turbo
-        modality: video
-        adapter: genblaze_runway:RunwayProvider
-        expected_duration_sec: 90
-        output_media_type: video/mp4
-        accepts:
-          - {port: init_image, via: external_inputs, modality: image}
-        params:
-          - name: duration
-            type: enum
-            label: Duration
-            unit: s
-            default: "5"
-            options: [{value: "5"}, {value: "10"}]
-          - name: aspect_ratio
-            type: enum
-            label: Aspect ratio
-            default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}]
-
-  - key: luma
-    label: Luma
-    package: genblaze_luma
-    extra: luma
-    env_var: LUMAAI_API_KEY
-    signup_url: https://lumalabs.ai/dream-machine/api
-    models:
-      - id: ray-2
-        label: Dream Machine Ray 2
-        modality: video
-        adapter: genblaze_luma:LumaProvider
-        expected_duration_sec: 120
-        output_media_type: video/mp4
-        params:
-          - name: aspect_ratio
-            type: enum
-            label: Aspect ratio
-            default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}]
-
-      - id: ray-flash-2
-        label: Dream Machine Ray Flash 2
-        modality: video
-        adapter: genblaze_luma:LumaProvider
-        expected_duration_sec: 60
-        output_media_type: video/mp4
-        params:
-          - name: aspect_ratio
-            type: enum
-            label: Aspect ratio
-            default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}]
-
-  - key: elevenlabs
-    label: ElevenLabs
-    package: genblaze_elevenlabs
-    extra: elevenlabs
-    env_var: ELEVENLABS_API_KEY
-    signup_url: https://elevenlabs.io/app/settings/api-keys
-    models:
-      - id: eleven_multilingual_v2
-        label: Multilingual v2 (TTS)
-        modality: audio
-        role: speech
-        adapter: genblaze_elevenlabs:ElevenLabsTTSProvider
-        expected_duration_sec: 15
-        output_media_type: audio/mpeg
-        params:
-          - {name: voice_id, type: string, label: Voice ID, default: JBFqnCBsd6RMkjVDRZzb, required: true}
+            label: Resolution
+            default: "2K"
+            options: [{value: "2K"}, {value: "3K"}]
           - name: output_format
             type: enum
             label: Format
-            default: mp3_44100_128
+            default: jpeg
             group: advanced
-            options: [{value: mp3_44100_128}, {value: mp3_22050_32}]
+            options: [{value: jpeg}, {value: png}]
+          - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
 
-      - id: eleven_text_to_sound_v2
-        label: Sound Effects
-        modality: audio
-        role: sfx
-        adapter: genblaze_elevenlabs:ElevenLabsSFXProvider
+      - id: seedream-5.0-lite
+        label: Seedream 5.0 Lite
+        modality: image
+        adapter: app.engine.genblaze_adapters:gmicloud_image_provider
         expected_duration_sec: 15
-        output_media_type: audio/mpeg
+        est_cost_usd: 0.035
+        output_media_type: image/jpeg
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
         params:
-          - {name: duration_seconds, type: number, label: Duration, unit: s, default: 5, min: 0.5, max: 22, step: 0.5}
-
-  - key: gmicloud
-    label: GMI Cloud
-    package: genblaze_gmicloud
-    extra: gmicloud
-    env_var: GMI_API_KEY
-    signup_url: https://console.gmicloud.ai/
-    models:
-      - id: Kling-Text2Video-V2.1-Master
-        label: Kling 2.1 (text to video)
-        modality: video
-        adapter: genblaze_gmicloud:GMICloudVideoProvider
-        expected_duration_sec: 180
-        output_media_type: video/mp4
-        params:
-          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 5, max: 10, step: 5}
           - name: aspect_ratio
             type: enum
             label: Aspect ratio
             default: "16:9"
-            options: [{value: "16:9"}, {value: "9:16"}, {value: "1:1"}]
+            options:
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "1:1"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "21:9"}
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "2K"
+            options: [{value: "2K"}, {value: "3K"}]
+          - name: output_format
+            type: enum
+            label: Format
+            default: jpeg
+            group: advanced
+            options: [{value: jpeg}, {value: png}]
+          - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
 
-      - id: Kling-Image2Video-V2.1-Master
-        label: Kling 2.1 (image to video)
-        modality: video
-        adapter: genblaze_gmicloud:GMICloudVideoProvider
-        expected_duration_sec: 180
-        output_media_type: video/mp4
-        accepts:
-          - {port: init_image, via: external_inputs, modality: image}
+      # Kontext outputs a fixed ~1MP for whichever ratio is picked — there is
+      # genuinely no resolution knob, so none is offered. GMI's endpoint also
+      # documents no input-image param for this model (unlike BFL's own API),
+      # so it lists no reference port rather than drawing a handle whose
+      # payload would be dropped.
+      - id: flux-kontext-pro
+        label: FLUX.1 Kontext Pro
+        modality: image
+        adapter: app.engine.genblaze_adapters:gmicloud_image_provider
+        expected_duration_sec: 10
+        est_cost_usd: 0.05
+        output_media_type: image/jpeg
         params:
-          - {name: duration, type: integer, label: Duration, unit: s, default: 5, min: 5, max: 10, step: 5}
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: "1:1"
+            # GMI accepts any ratio between 3:7 and 7:3; these are the named
+            # stops it documents, plus 3:4 inside that range.
+            options:
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "7:3"}
+              - {value: "3:7"}
+          - {name: prompt_upsampling, type: boolean, label: Enhance prompt, default: false, group: advanced}
+          - name: output_format
+            type: enum
+            label: Format
+            default: jpeg
+            group: advanced
+            options: [{value: jpeg}, {value: png}]
+          - {name: safety_tolerance, type: integer, label: Safety tolerance, default: 2, min: 0, max: 6, step: 1, group: advanced}
+
+  - key: decart
+    label: Decart
+    package: genblaze_decart
+    extra: decart
+    env_var: DECART_API_KEY
+    signup_url: https://platform.decart.ai/
+    # Decart's platform is edit-only in 2026: every model takes the thing
+    # being changed as an input. The lucy-pro t2v/i2v/t2i slugs 404 upstream
+    # (verified against the platform's openapi.json) and are gone from here.
+    # No aspect_ratio or duration params anywhere — output framing and length
+    # follow the input — and video resolution is fixed at 720p server-side,
+    # so these nodes carry almost nothing in the bar.
+    models:
+      # Video editing: restyle or alter an existing clip from a prompt, with
+      # an optional style-reference image. Our adapter routes the wired video
+      # to `data` and a wired image to `reference_image` — the stock one
+      # blindly sends whatever input comes first.
+      - id: "lucy-2.5"
+        label: Lucy 2.5 (video edit)
+        modality: video
+        adapter: app.engine.genblaze_adapters:DecartLucyVideoProvider
+        expected_duration_sec: 90
+        output_media_type: video/mp4
+        # Preview only — the real framing follows the wired video.
+        output_aspect_ratio: "16:9"
+        accepts:
+          - {port: source_video, via: external_inputs, modality: video}
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
+          # Re-anchor generation on the model's own latent — lucy-2.5 only.
+          - {name: self_anchor, type: boolean, label: Self anchor, default: true, group: advanced}
+
+      # Virtual try-on: the wired video is the person, the wired image is the
+      # garment. Driven by its ports — a prompt is optional upstream and the
+      # canonical use is garment-only, so the prompt box is dropped.
+      - id: lucy-vton-3
+        label: Lucy Virtual Try-On 3
+        modality: video
+        adapter: app.engine.genblaze_adapters:DecartLucyVideoProvider
+        expected_duration_sec: 90
+        output_media_type: video/mp4
+        output_aspect_ratio: "9:16"
+        requires_prompt: false
+        accepts:
+          - {port: source_video, via: external_inputs, modality: video}
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
+
+      # Decart's current image model is an *editor*: lucy-image-2 requires the
+      # image to change (its `data` field), which DecartImageProvider above has
+      # no way to send — so this one runs through our DecartLucyImageProvider,
+      # which downloads the first wired reference as the edit source and an
+      # optional second as a style reference. No aspect_ratio and no
+      # output_aspect_ratio: the output follows the input image's framing.
+      - id: lucy-image-2
+        label: Lucy Image 2 (image edit)
+        modality: image
+        adapter: app.engine.genblaze_adapters:DecartLucyImageProvider
+        expected_duration_sec: 15
+        output_media_type: image/png
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          # Lucy names image sizes in scanlines like its video siblings, and
+          # stops at 720p — that is the API's whole ladder.
+          - name: resolution
+            type: enum
+            label: Resolution
+            default: "720p"
+            options: [{value: "480p"}, {value: "720p"}]
+          - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}

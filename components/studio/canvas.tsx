@@ -25,7 +25,7 @@ import {
 import "@xyflow/react/dist/base.css";
 
 import { cn } from "@/lib/utils";
-import type { Catalog } from "@/lib/studio/catalog";
+import type { Catalog, CatalogModel } from "@/lib/studio/catalog";
 import { findModel, visiblePorts } from "@/lib/studio/catalog";
 import {
   type AssetPreview,
@@ -53,7 +53,16 @@ import { NODE_TYPES } from "./nodes";
 
 export type CanvasApi = {
   /** Places a node for a toolbar tool. Returns its id, or null when full. */
-  addNode: (tool: CreateToolId, opts?: { prompt?: string; at?: { x: number; y: number } }) => string | null;
+  addNode: (
+    tool: CreateToolId,
+    opts?: {
+      prompt?: string;
+      at?: { x: number; y: number };
+      /** Pre-decided by the prompt bar; overrides the blueprint's pick. */
+      model?: CatalogModel;
+      params?: Record<string, unknown>;
+    },
+  ) => string | null;
   uploadFiles: (files: File[], at?: { x: number; y: number }) => void;
   /** Opens the file picker; chosen files each land as a new upload node. */
   openFilePicker: () => void;
@@ -230,7 +239,12 @@ function CanvasInner({
   const placeNode = React.useCallback(
     (
       tool: CreateToolId,
-      opts: { prompt?: string; at?: { x: number; y: number } } = {},
+      opts: {
+        prompt?: string;
+        at?: { x: number; y: number };
+        model?: CatalogModel;
+        params?: Record<string, unknown>;
+      } = {},
     ): string | null => {
       const blueprint = NODE_BLUEPRINTS[tool];
       if (!blueprint) return null;
@@ -258,7 +272,11 @@ function CanvasInner({
         selected: true,
         data: {
           kind: blueprint.kind,
-          wire: blueprintData(catalog, blueprint, { prompt: opts.prompt }),
+          wire: blueprintData(catalog, blueprint, {
+            prompt: opts.prompt,
+            model: opts.model,
+            params: opts.params,
+          }),
         },
       };
 

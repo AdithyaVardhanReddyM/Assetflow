@@ -39,14 +39,22 @@ node_types:
       # Lipsync pair: the face to drive, and the speech that drives it. Both
       # model_gated, so they surface only on models that declare them.
       - {id: avatar, modality: image, required: false, multi: false, model_gated: true}
-      # `roles` narrows this past its modality: music and sound effects are
-      # audio too and neither is a voice, so only a text-to-speech node may
-      # feed it. An upload still passes — it carries no role, and an uploaded
-      # voice recording is the other half of how this port is meant to be filled.
-      - {id: speech, modality: audio, required: false, multi: false, model_gated: true, roles: [speech]}
+      # `roles` narrows this past its modality: sound effects are audio too
+      # and don't drive a mouth or a performance, but speech and music both
+      # do (an avatar can sing). An upload still passes — it carries no role,
+      # and an uploaded voice recording is the other half of how this port is
+      # meant to be filled.
+      - {id: speech, modality: audio, required: false, multi: false, model_gated: true, roles: [speech, music]}
+      # The track a music model covers or continues. Role-gated for the same
+      # reason as `speech`: narration or a sound effect is not source music,
+      # but an upload (roleless) always passes.
+      - {id: source_audio, modality: audio, required: false, multi: false, model_gated: true, roles: [music]}
       # Reference images (style, subject, wardrobe). Multi because the canonical
       # case is several references conditioning one generation.
       - {id: image_ref, modality: image, required: false, multi: true, model_gated: true}
+      # The video being edited, for video-to-video models (Decart's Lucy line
+      # is edit-only: the output's framing and length follow this input).
+      - {id: source_video, modality: video, required: false, multi: false, model_gated: true}
     outputs:
       - {id: out, modality: any}
     default_data:

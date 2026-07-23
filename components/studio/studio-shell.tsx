@@ -36,7 +36,7 @@ import {
 import { StudioCanvas, type CanvasApi } from "./canvas";
 import { Toolbar, type ToolId } from "./toolbar";
 import { TopBar, type SaveState } from "./top-bar";
-import { PromptBar } from "./prompt-bar";
+import { PromptBar, type PromptSpec } from "./prompt-bar";
 import { WorkflowCards, type WorkflowCard } from "./workflow-cards";
 
 const EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
@@ -307,16 +307,24 @@ export function StudioShell({
     [enterCanvas],
   );
 
-  const onGenerate = React.useCallback(() => {
-    const text = prompt.trim();
-    if (modeRef.current === "home") enterCanvas();
-    setTouched(true);
-    requestAnimationFrame(() => {
-      const created = canvas.current?.addNode("image", { prompt: text || undefined });
-      if (!created) toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
-      else setPrompt("");
-    });
-  }, [prompt, enterCanvas]);
+  const onGenerate = React.useCallback(
+    (spec: PromptSpec) => {
+      const text = prompt.trim();
+      if (modeRef.current === "home") enterCanvas();
+      setTouched(true);
+      requestAnimationFrame(() => {
+        // The bar already decided model and params; the node carries them.
+        const created = canvas.current?.addNode(spec.modality, {
+          prompt: text || undefined,
+          model: spec.model,
+          params: spec.params,
+        });
+        if (!created) toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
+        else setPrompt("");
+      });
+    },
+    [prompt, enterCanvas],
+  );
 
   const onUpload = React.useCallback(
     async (file: File) => {
@@ -484,6 +492,7 @@ export function StudioShell({
         >
           <div className="pointer-events-auto w-[min(760px,100%)]">
             <PromptBar
+              catalog={catalog}
               value={prompt}
               onChange={(v) => {
                 setPrompt(v);

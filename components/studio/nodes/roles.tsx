@@ -44,4 +44,18 @@ export const ROLE_COPY: Record<string, { placeholder: string; well: string }> = 
     placeholder: "Paste a rough prompt to rewrite…",
     well: "Your rewritten prompt will appear here",
   },
+  // "Describe the music" fits generation; with a source track wired the same
+  // words read as restyle directions, which is exactly what they become.
+  music: {
+    placeholder: "Describe the music to generate…",
+    well: "Your music will appear here",
+  },
+  speech: {
+    placeholder: "Enter text to generate speech…",
+    well: "Your audio will appear here",
+  },
+  sfx: {
+    placeholder: "Describe the sound effect…",
+    well: "Your audio will appear here",
+  },
 };

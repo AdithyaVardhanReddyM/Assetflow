@@ -8,6 +8,7 @@ Reads, in increasing order of precedence: the monorepo-root `.env` and
 from __future__ import annotations
 
 import base64
+import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -141,6 +142,32 @@ class Settings(BaseSettings):
         return dsn
 
 
+def _export_env_files() -> None:
+    """Copy the env-file chain into the process environment.
+
+    `Settings` materializes only its own fields and ignores the rest, but two
+    consumers read `os.environ` directly: the catalog's availability probe
+    (`resolve_status` checks `provider.env_var`) and the GenBlaze adapters,
+    which pick up their API keys at construction. Without this export, a
+    GMI_API_KEY sitting in `backend/.env` leaves GMI Cloud greyed out as
+    "missing key" forever.
+
+    The real environment always wins (`override` never happens), and among
+    files the first hit wins — so they are walked from most to least specific,
+    matching the precedence documented on `Settings.model_config`.
+    """
+    from dotenv import dotenv_values
+
+    for path in (BACKEND_DIR / ".env", REPO_ROOT / ".env.local", REPO_ROOT / ".env"):
+        if not path.is_file():
+            continue
+        for key, value in dotenv_values(path).items():
+            if value is not None and key not in os.environ:
+                os.environ[key] = value
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    # Before Settings() so both read one consistent view of the files.
+    _export_env_files()
     return Settings()

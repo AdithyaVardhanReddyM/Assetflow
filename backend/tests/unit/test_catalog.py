@@ -32,11 +32,13 @@ def test_every_model_has_a_wellformed_adapter_reference(catalog):
     for model in catalog.models:
         module, sep, attr = model.adapter.partition(":")
         assert sep and module and attr, f"{model.id} has a malformed adapter: {model.adapter!r}"
-        # Real providers come from genblaze_*; the mock slot is our own
-        # sample-backed shim (see app/engine/mock_providers.py).
-        assert module.startswith(("genblaze", "app.engine.mock_providers")), (
-            f"{model.id} adapter is not a recognized module: {module}"
-        )
+        # Real providers come from genblaze_* or from our own adapter shims:
+        # mock_providers (the sample-backed mock) and genblaze_adapters (the
+        # first-party providers/factories for models the stock connectors
+        # cannot express — see that module's docstring).
+        assert module.startswith(
+            ("genblaze", "app.engine.mock_providers", "app.engine.genblaze_adapters")
+        ), f"{model.id} adapter is not a recognized module: {module}"
 
 
 def test_mock_adapters_resolve_and_emit_transferable_assets():
@@ -90,29 +92,44 @@ def test_serving_the_catalog_imports_no_provider_package():
     assert after == before, f"catalog load imported provider packages: {after - before}"
 
 
-def test_uninstalled_provider_reports_actionable_reason(catalog):
-    google = catalog.provider("google")
-    assert google.status is not ProviderStatus.READY
-    reason = google.unavailable_reason()
-    # Must tell the user what to actually do about it.
-    assert "genblaze[google]" in reason or "GEMINI_API_KEY" in reason
-
-
-def test_missing_key_is_distinct_from_not_installed(monkeypatch, catalog):
-    google = catalog.provider("google")
-    assert resolve_status(google) is ProviderStatus.NOT_INSTALLED
-
-    # Pretend the package is installed but the key is absent.
+def test_uninstalled_provider_reports_actionable_reason(monkeypatch, catalog):
+    # Luma is the specimen (google was, until that provider was dropped); the
+    # state is forced rather than read from the venv so a dev's shell env
+    # cannot decide the suite's fate.
+    luma = catalog.provider("luma")
     import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    luma.status = resolve_status(luma)
+    # Must tell the user what to actually do about it.
+    assert "genblaze[luma]" in luma.unavailable_reason()
 
     monkeypatch.setattr(
         importlib.util, "find_spec", lambda name: object() if "genblaze" in name else None
     )
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    assert resolve_status(google) is ProviderStatus.MISSING_KEY
+    monkeypatch.delenv("LUMAAI_API_KEY", raising=False)
+    luma.status = resolve_status(luma)
+    assert "LUMAAI_API_KEY" in luma.unavailable_reason()
 
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    assert resolve_status(google) is ProviderStatus.READY
+
+def test_missing_key_is_distinct_from_not_installed(monkeypatch, catalog):
+    luma = catalog.provider("luma")
+    import importlib.util
+
+    # Pretend the package is absent — whether the optional provider extras
+    # happen to be installed in this venv must not decide the suite's fate.
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert resolve_status(luma) is ProviderStatus.NOT_INSTALLED
+
+    # Pretend the package is installed but the key is absent.
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if "genblaze" in name else None
+    )
+    monkeypatch.delenv("LUMAAI_API_KEY", raising=False)
+    assert resolve_status(luma) is ProviderStatus.MISSING_KEY
+
+    monkeypatch.setenv("LUMAAI_API_KEY", "test-key")
+    assert resolve_status(luma) is ProviderStatus.READY
 
 
 def test_node_types_declare_ports(catalog):
@@ -139,7 +156,7 @@ def test_node_types_declare_ports(catalog):
 
 
 def test_image_to_video_models_accept_an_init_image(catalog):
-    model = catalog.model("gmicloud", "Kling-Image2Video-V2.1-Master")
+    model = catalog.model("gmicloud", "kling-v3-image-to-video")
     assert model is not None
     handoff = model.accepts_port("init_image")
     assert handoff is not None
@@ -175,15 +192,32 @@ def test_lipsync_model_is_port_driven(catalog):
     assert model.requires_prompt is False
 
 
-def test_speech_port_accepts_only_a_voice(catalog):
-    """The `speech` input is narrower than its modality: music and sound
-    effects are audio too, and neither drives a mouth."""
+def test_speech_port_accepts_a_voice_or_music(catalog):
+    """The `speech` input is narrower than its modality: sound effects are
+    audio too and drive no mouth, but a voice or a song both do."""
     speech = next(p for p in catalog.node_type("generate").inputs if p.id == "speech")
-    assert speech.roles == ["speech"]
+    assert speech.roles == ["speech", "music"]
+    # Same shape for the track a music model covers: narration or a sound
+    # effect is not source music.
+    source_audio = next(
+        p for p in catalog.node_type("generate").inputs if p.id == "source_audio"
+    )
+    assert source_audio.roles == ["music"]
     # Every other port takes anything of its modality, or the gate would be
     # silently blocking wires nobody meant to block.
-    others = [p for p in catalog.node_type("generate").inputs if p.id != "speech"]
+    others = [
+        p
+        for p in catalog.node_type("generate").inputs
+        if p.id not in ("speech", "source_audio")
+    ]
     assert all(not p.roles for p in others)
+
+
+def test_every_mock_model_is_hidden(catalog):
+    """The mocks are the compiler suite's substrate, not product surface —
+    none of them may reach a picker."""
+    mock = catalog.provider("mock")
+    assert mock.models and all(m.hidden for m in mock.models)
 
 
 def test_a_keyless_source_exists_for_every_role_gated_port(catalog):
@@ -222,6 +256,7 @@ def test_model_payload_carries_every_descriptor_field(catalog):
         "provider_key",  # sent as "provider"
         "provider_label",  # sent verbatim under its own key
         "adapter",  # deliberately server-side: an import path is not the canvas's business
+        "hidden",  # server-side by definition: a hidden model is never serialized at all
     }
     payload = _model_payload(catalog.model("mock", "mock-lipsync-v1"))
     missing = set(ModelDescriptor.model_fields) - internal - set(payload)

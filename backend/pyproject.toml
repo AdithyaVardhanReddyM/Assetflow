@@ -24,12 +24,12 @@ dependencies = [
 [project.optional-dependencies]
 # Provider adapters are opt-in; the app runs in mock mode without any of them.
 providers = [
-    "genblaze-google>=0.3.2,<0.4",
     "genblaze-elevenlabs>=0.3.1,<0.4",
     "genblaze-replicate>=0.3.3,<0.4",
     "genblaze-runway>=0.3.1,<0.4",
     "genblaze-luma>=0.3.1,<0.4",
     "genblaze-gmicloud>=0.3.3,<0.4",
+    "genblaze-decart>=0.3.2,<0.4",
 ]
 
 [dependency-groups]

@@ -40,13 +40,19 @@ class ParamDescriptor(BaseModel):
     label: str | None = None
     help: str | None = None
     unit: str | None = None
-    group: Literal["basic", "advanced"] = "basic"
+    # "basic" is a chip in the node's action bar, "advanced" hides in its
+    # overflow menu, and "body" is a full-width control in the node body (the
+    # lyrics box, the voice picker) — too central to shrink into a chip.
+    group: Literal["basic", "advanced", "body"] = "basic"
     required: bool = False
     default: Any = None
     min: float | None = None
     max: float | None = None
     step: float | None = None
     max_length: int | None = None
+    # A string param the canvas renders as a multi-line box rather than a
+    # one-line field. Only meaningful with group "body".
+    multiline: bool = False
     options: list[ParamOption] = Field(default_factory=list)
 
     def display_label(self) -> str:
@@ -89,6 +95,12 @@ class ModelDescriptor(BaseModel):
     # False for models driven entirely by their input ports. The compiler skips
     # its NO_PROMPT check and the canvas drops the prompt box for these.
     requires_prompt: bool = True
+    # True keeps the model out of the /catalog/models response — and so out of
+    # every canvas picker — while it stays compilable and runnable. The mock
+    # image model lives this way: the compiler suite builds on it (a keyless,
+    # always-ready image step), but with real image providers wired up it has
+    # no business in the palette.
+    hidden: bool = False
     params: list[ParamDescriptor] = Field(default_factory=list)
     accepts: list[PortHandoff] = Field(default_factory=list)
 

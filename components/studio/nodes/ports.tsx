@@ -38,6 +38,8 @@ const PORT_ORDER = [
   "init_image",
   "end_frame",
   "image_ref",
+  "source_video",
+  "source_audio",
   "video",
   "audio",
   "speech",
@@ -78,6 +80,10 @@ export function portLabel(portId: string, nodeModality?: string): string {
       return "End frame";
     case "image_ref":
       return "Reference";
+    case "source_video":
+      return "Source video";
+    case "source_audio":
+      return "Source music";
     case "avatar":
       return "Avatar";
     case "speech":
@@ -121,6 +127,10 @@ function PortGlyph({
       return <AlignRightSimpleIcon className={className} weight="fill" />;
     case "image_ref":
       return <ImageGenIcon className={className} />;
+    case "source_video":
+      return <VideoGenIcon className={className} />;
+    case "source_audio":
+      return <MusicGenIcon className={className} />;
     case "avatar":
       return <UserIcon className={className} weight="fill" />;
     case "speech":

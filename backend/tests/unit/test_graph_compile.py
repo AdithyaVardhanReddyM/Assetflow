@@ -169,7 +169,7 @@ def test_upload_node_becomes_external_input(catalog):
         [
             node("up", "input.upload", asset_id="asset-1"),
             gen(
-                "v", provider="gmicloud", model="Kling-Image2Video-V2.1-Master",
+                "v", provider="gmicloud", model="kling-v3-image-to-video",
                 modality="video",
             ),
         ],
@@ -264,17 +264,18 @@ def test_modality_mismatch(catalog):
     assert ErrorCode.MODALITY_MISMATCH in codes(result)
 
 
-def test_lipsync_speech_port_refuses_audio_that_is_not_a_voice(catalog):
-    """`speech` is audio, but so is music — and music drives no mouth."""
+def test_lipsync_speech_port_refuses_audio_that_is_not_a_performance(catalog):
+    """`speech` takes a voice or music (an avatar can sing) — sound effects
+    drive no mouth, so sfx stays the rejected role."""
     graph = build(
         [
-            gen("music", model="mock-audio-v1", modality="audio", y=0),
+            gen("boom", model="mock-sfx-v1", modality="audio", y=0),
             gen("face", model="mock-image-v1", modality="image", y=100),
             gen("sync", model="mock-lipsync-v1", modality="video", prompt=None, y=200),
         ],
         [
             edge("e1", "face", "sync", "avatar"),
-            edge("e2", "music", "sync", "speech"),
+            edge("e2", "boom", "sync", "speech"),
         ],
     )
     result = plan_graph(graph, catalog=catalog)
@@ -284,16 +285,17 @@ def test_lipsync_speech_port_refuses_audio_that_is_not_a_voice(catalog):
     assert "speech" in diagnostic.hint
 
 
-def test_lipsync_speech_port_takes_a_text_to_speech_node(catalog):
+@pytest.mark.parametrize("source_model", ["mock-speech-v1", "mock-audio-v1"])
+def test_lipsync_speech_port_takes_a_voice_or_music(catalog, source_model):
     graph = build(
         [
-            gen("tts", model="mock-speech-v1", modality="audio", y=0),
+            gen("track", model=source_model, modality="audio", y=0),
             gen("face", model="mock-image-v1", modality="image", y=100),
             gen("sync", model="mock-lipsync-v1", modality="video", prompt=None, y=200),
         ],
         [
             edge("e1", "face", "sync", "avatar"),
-            edge("e2", "tts", "sync", "speech"),
+            edge("e2", "track", "sync", "speech"),
         ],
     )
     result = plan_graph(graph, catalog=catalog)
@@ -667,22 +669,30 @@ def test_node_modality_must_match_model(catalog):
 
 
 def test_unavailable_provider_without_fallback(catalog):
+    # Force the unavailable state on a copy rather than trusting the venv:
+    # whether luma's extra/key happen to be present must not decide this test.
+    # (google/veo was the specimen until that provider was dropped.)
+    from app.catalog.models import ProviderStatus
+
+    unavailable = catalog.model_copy(deep=True)
+    luma = unavailable.provider("luma")
+    luma.status = ProviderStatus.MISSING_KEY
+    for m in luma.models:
+        m.status = ProviderStatus.MISSING_KEY
+
     result = plan_graph(
-        build(
-            [gen("a", provider="google", model="veo-3.0-generate-001", modality="video")]
-        ),
-        catalog=catalog,
+        build([gen("a", provider="luma", model="ray-3.2", modality="video")]),
+        catalog=unavailable,
     )
-    # google is not installed in the test env
     assert ErrorCode.PROVIDER_UNAVAILABLE in codes(result)
     hint = result.errors[0].hint or ""
     # the hint must tell the user how to fix it, not just that it is broken
-    assert "GEMINI_API_KEY" in hint or "genblaze[google]" in hint
+    assert "LUMAAI_API_KEY" in hint
 
 
 def test_upload_without_asset(catalog):
     graph = build(
-        [node("up", "input.upload"), gen("v", model="Kling-Image2Video-V2.1-Master")],
+        [node("up", "input.upload"), gen("v", model="kling-v3-image-to-video")],
         [edge("e1", "up", "v", "init_image")],
     )
     result = plan_graph(graph, catalog=catalog)
@@ -712,7 +722,11 @@ def test_param_validation(catalog, params, expected):
 def test_param_defaults_are_filled(catalog):
     result = plan_graph(build([gen("a", params={"duration": 7})]), catalog=catalog)
     assert result.valid, result.errors
-    assert result.plan.steps[0].params == {"duration": 7, "aspect_ratio": "16:9"}
+    assert result.plan.steps[0].params == {
+        "duration": 7,
+        "aspect_ratio": "16:9",
+        "resolution": "720p",
+    }
 
 
 # --------------------------------------------------------------------------- #

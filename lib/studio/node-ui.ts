@@ -42,47 +42,77 @@ export type NodeBlueprint = {
   /** Only meaningful for `generate`. */
   modality?: Modality;
   /**
+   * The specialized role this tool places, where modality is too coarse — three
+   * of the audio tools and two of the video ones share a modality and differ
+   * only here. Absent means plain generation for the modality: a model carrying
+   * *any* role is then the wrong answer, since a role exists precisely to say
+   * this model is not the general case.
+   */
+  role?: string;
+  /**
    * Model ids to prefer when this tool creates a node, best first. The first
    * one the catalog actually has wins; otherwise any model of the right
-   * modality does. Named rather than pinned so a tool keeps working when the
-   * catalog gains or loses a provider.
+   * modality *and role* does. Named rather than pinned so a tool keeps working
+   * when the catalog gains or loses a provider.
    */
   prefer?: string[];
   label: string;
 };
 
 export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
-  image: { kind: "generate", modality: "image", label: "Image" },
-  video: { kind: "generate", modality: "video", label: "Video" },
+  // Seedream 5.0 Lite is the house default for image work: cheapest of the
+  // real image models and fast. `prefer` only wins when its key is present,
+  // so a keyless canvas still falls back gracefully.
+  image: {
+    kind: "generate",
+    modality: "image",
+    prefer: ["seedream-5.0-lite"],
+    label: "Image",
+  },
+  // Seedance 2.0 Fast is the house default for video: cheap, quick, and the
+  // full port rail (frames + references). Same ready-only rule as image.
+  video: {
+    kind: "generate",
+    modality: "video",
+    prefer: ["seedance-2-0-fast-260128"],
+    label: "Video",
+  },
+  // Both lip-sync models re-drive the mouth in an existing video from a wired
+  // track; PixVerse (Replicate) is the house default, Kling the alternative.
   lipsync: {
     kind: "generate",
     modality: "video",
-    prefer: ["mock-lipsync-v1"],
+    role: "lipsync",
+    prefer: ["pixverse/lipsync"],
     label: "Lip sync",
   },
-  music: { kind: "generate", modality: "audio", label: "Music" },
+  music: {
+    kind: "generate",
+    modality: "audio",
+    role: "music",
+    prefer: ["music_v2"],
+    label: "Music",
+  },
   speech: {
     kind: "generate",
     modality: "audio",
-    // The mock is named second so a keyless canvas still places a *speech*
-    // node: falling through to "any audio model" would hand back Mock Audio,
-    // which is music, and music is not something a lipsync node will take.
-    prefer: ["eleven_multilingual_v2", "mock-speech-v1"],
+    role: "speech",
+    // Eleven v3 is the expressive flagship; Flash v2.5 stays the pick for
+    // whoever wants latency over delivery.
+    prefer: ["eleven_v3"],
     label: "Speech",
   },
-  sfx: {
+  sfx: { kind: "generate", modality: "audio", role: "sfx", label: "Sound effects" },
+  // No role: a character sheet is an ordinary image generation with a
+  // particular prompt, not a model class of its own — so it opens on the same
+  // default image model.
+  character: {
     kind: "generate",
-    modality: "audio",
-    prefer: ["eleven_text_to_sound_v2"],
-    label: "Sound effects",
+    modality: "image",
+    prefer: ["seedream-5.0-lite"],
+    label: "Character sheet",
   },
-  character: { kind: "generate", modality: "image", label: "Character sheet" },
-  llm: {
-    kind: "generate",
-    modality: "text",
-    prefer: ["mock-llm-v1"],
-    label: "LLM",
-  },
+  llm: { kind: "generate", modality: "text", role: "llm", label: "LLM" },
   text: { kind: "input.text", label: "Text" },
   composition: { kind: "transform.composite", label: "Composition" },
   upload: { kind: "input.upload", label: "Upload" },
@@ -92,17 +122,35 @@ export function isCreateTool(id: string): id is CreateToolId {
   return id in NODE_BLUEPRINTS;
 }
 
-/** The model a freshly placed node of this kind should start on. */
+/**
+ * The model a freshly placed node of this kind should start on.
+ *
+ * Role is a filter rather than a preference: `modelsForModality` orders by
+ * readiness then label, so without it the Video tool lands on whichever video
+ * model happens to sort first — "Mock Lip Sync" before "Mock Video" — and
+ * places a node the user did not ask for. A tool that names no role wants the
+ * models that claim none.
+ */
 export function pickModel(
   catalog: Catalog,
   blueprint: NodeBlueprint,
 ): CatalogModel | undefined {
   if (blueprint.kind !== "generate" || !blueprint.modality) return undefined;
-  const candidates = modelsForModality(catalog, blueprint.modality);
+  const wanted = blueprint.role ?? "";
+  const candidates = modelsForModality(catalog, blueprint.modality).filter(
+    (m) => (m.role ?? "") === wanted,
+  );
   for (const id of blueprint.prefer ?? []) {
-    const hit = candidates.find((m) => m.id === id);
+    // Only a *usable* preference wins. An unavailable model is still listed in
+    // the catalog (with the key that would unlock it), so preferring it by id
+    // alone would open a keyless canvas on a node that cannot run when a mock
+    // of the same role is sitting right there.
+    const hit = candidates.find((m) => m.id === id && m.status === "ready");
     if (hit) return hit;
   }
+  // Nothing of this role in the catalog: leave the node on "Pick a model"
+  // rather than seeding it with a model of the wrong kind, which the user would
+  // have to notice and undo.
   return candidates[0];
 }
 
@@ -110,7 +158,14 @@ export function pickModel(
 export function blueprintData(
   catalog: Catalog,
   blueprint: NodeBlueprint,
-  overrides: { prompt?: string; title?: string } = {},
+  overrides: {
+    prompt?: string;
+    title?: string;
+    /** A model already chosen (the prompt bar) — wins over the blueprint's pick. */
+    model?: CatalogModel;
+    /** Params to seed with; the model's catalog defaults otherwise. */
+    params?: Record<string, unknown>;
+  } = {},
 ): Record<string, unknown> {
   switch (blueprint.kind) {
     case "input.text":
@@ -134,7 +189,7 @@ export function blueprintData(
       return { label: overrides.title ?? null };
 
     case "generate": {
-      const model = pickModel(catalog, blueprint);
+      const model = overrides.model ?? pickModel(catalog, blueprint);
       const data: GenerateNodeData = {
         provider: model?.provider ?? "mock",
         model: model?.id ?? "",
@@ -142,7 +197,7 @@ export function blueprintData(
         // model's, so follow the model when there is one.
         modality: (model?.modality ?? blueprint.modality ?? "image") as WireModality,
         prompt: overrides.prompt ?? null,
-        params: model ? defaultParams(model) : {},
+        params: overrides.params ?? (model ? defaultParams(model) : {}),
         fallback_models: [],
         title: overrides.title ?? null,
       };

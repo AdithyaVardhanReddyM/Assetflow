@@ -1,10 +1,12 @@
 "use client";
 
+import CommentAdd01Icon from "@hugeicons/core-free-icons/CommentAdd01Icon";
+import Cursor02Icon from "@hugeicons/core-free-icons/Cursor02Icon";
+import HandIcon from "@hugeicons/core-free-icons/HandIcon";
+import type { IconSvgElement } from "@hugeicons/react";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { IconWeight } from "@phosphor-icons/react";
 import {
-  ChatCircleTextIcon,
-  CursorIcon,
-  HandIcon,
   SpeakerHifiIcon,
   TextTIcon,
   UploadSimpleIcon,
@@ -51,10 +53,39 @@ type ToolIcon = React.ComponentType<{
 
 type ToolDef = { id: ToolId; label: string; icon: ToolIcon; shortcut?: string };
 
+/**
+ * Hugeicons ships icon *data* rather than components, so wrap it to land in the
+ * same slot as a Phosphor `Icon`. The free set is stroke-only, and `weight` is
+ * accepted and ignored: the active tool is already marked by the filled chip
+ * behind it, so the glyph itself holds still.
+ */
+function hugeIcon(icon: IconSvgElement, name: string): ToolIcon {
+  function HugeToolIcon({ className }: { className?: string }) {
+    return <HugeiconsIcon icon={icon} className={className} />;
+  }
+  HugeToolIcon.displayName = name;
+  return HugeToolIcon;
+}
+
 export const POINTER_TOOLS: ToolDef[] = [
-  { id: "move", label: "Move", icon: CursorIcon, shortcut: "V" },
-  { id: "hand", label: "Hand", icon: HandIcon, shortcut: "H" },
-  { id: "comment", label: "Comment", icon: ChatCircleTextIcon, shortcut: "C" },
+  {
+    id: "move",
+    label: "Move",
+    icon: hugeIcon(Cursor02Icon, "Cursor02Icon"),
+    shortcut: "V",
+  },
+  {
+    id: "hand",
+    label: "Hand",
+    icon: hugeIcon(HandIcon, "HandIcon"),
+    shortcut: "H",
+  },
+  {
+    id: "comment",
+    label: "Comment",
+    icon: hugeIcon(CommentAdd01Icon, "CommentAdd01Icon"),
+    shortcut: "C",
+  },
 ];
 
 export const CREATE_TOOLS: ToolDef[] = [

@@ -62,7 +62,9 @@ async def list_models(
     modality: str | None = Query(default=None),
     status: ProviderStatus | None = Query(default=None),
 ) -> dict[str, Any]:
-    models = get_catalog().models
+    # Hidden models stay compilable (the mock image model is the compiler
+    # suite's substrate) but are not the canvas's business.
+    models = [m for m in get_catalog().models if not m.hidden]
     if provider:
         models = [m for m in models if m.provider_key == provider]
     if modality:
