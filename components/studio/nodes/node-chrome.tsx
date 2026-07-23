@@ -249,13 +249,23 @@ export function ParamControl({
           on ? "bg-[#1f211c]/6 text-[#1f211c]" : audio && "text-[#a09a88]",
         )}
       >
-        {audio ? <AudioIcon className="size-3.5" weight="fill" /> : null}
-        {label}
-        {!audio ? (
-          <span
-            className={cn("size-1.5 rounded-full", on ? "bg-[#5d9468]" : "bg-[#1f211c]/20")}
-          />
-        ) : null}
+        {/* An audio switch is the glyph alone: a speaker already says "audio",
+            and the word beside it is the same fact twice. Every other boolean
+            keeps its label, since nothing else names itself. `aria-label` and
+            `title` above carry it for anyone the glyph does not reach. */}
+        {audio ? (
+          <AudioIcon className="size-3.5" weight="fill" />
+        ) : (
+          <>
+            {label}
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                on ? "bg-[#5d9468]" : "bg-[#1f211c]/20",
+              )}
+            />
+          </>
+        )}
       </button>
     );
   }

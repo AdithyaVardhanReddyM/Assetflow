@@ -28,9 +28,11 @@ class PlannedStep(BaseModel):
     #: Index of the LLM step whose text becomes this step's prompt. Unlike
     #: `input_from` this is *not* an asset chain — the words replace `prompt`.
     #: It has no GenBlaze equivalent: a Pipeline fixes its prompts when it is
-    #: built, so honoring this needs the run split into a text stage and a
-    #: media stage. Until that lands, `build_pipeline` refuses such a plan
-    #: rather than quietly generating from the un-rewritten prompt.
+    #: built, so the worker honors it by splitting the run into a text stage
+    #: and a media stage (`_execute_staged` in workers/runner.py), substituting
+    #: the words before the media pipeline is constructed. `build_pipeline`
+    #: still refuses a plan that carries an unresolved `prompt_from`, as the
+    #: backstop that keeps an un-rewritten prompt from reaching a provider.
     prompt_from: int | None = None
     #: Ingested upload asset ids feeding this step (GenBlaze `external_inputs`).
     external_input_asset_ids: list[str] = Field(default_factory=list)

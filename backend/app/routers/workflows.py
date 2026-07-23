@@ -15,7 +15,7 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
-from app.db.models import Workflow
+from app.db.models import Asset, AssetKind, Run, Workflow
 from app.deps import CatalogDep, CurrentUser, Session
 from app.errors import NotFound
 from app.graph.compile import plan_graph
@@ -108,6 +108,48 @@ async def get_workflow(
     workflow_id: uuid.UUID, session: Session, user: CurrentUser
 ) -> dict[str, Any]:
     return _serialize(await _get_owned(session, workflow_id, user))
+
+
+@router.get("/{workflow_id}/results")
+async def workflow_results(
+    workflow_id: uuid.UUID, session: Session, user: CurrentUser
+) -> dict[str, Any]:
+    """The latest generated asset per canvas node, across all of this
+    workflow's runs. This is what re-hydrates result previews when a canvas is
+    reopened — the graph itself stores no run output."""
+    from app.engine.manifests import preview_url
+
+    await _get_owned(session, workflow_id, user)
+
+    stmt = (
+        select(Asset)
+        .join(Run, Asset.run_id == Run.id)
+        .where(
+            Run.workflow_id == workflow_id,
+            Asset.tenant_id == user.tenant_id,
+            Asset.kind == AssetKind.GENERATED,
+            Asset.node_id.is_not(None),
+        )
+        .order_by(Asset.node_id, Asset.created_at.desc())
+        # Postgres DISTINCT ON: the newest row per node wins.
+        .distinct(Asset.node_id)
+    )
+    rows = (await session.execute(stmt)).scalars()
+    return {
+        "results": [
+            {
+                "node_id": a.node_id,
+                "asset_id": str(a.id),
+                # From the URL, not b2_key: in local mode the key is a bare
+                # relative path while the URL is fetchable as-is.
+                "url": preview_url(a.url),
+                "media_type": a.media_type,
+                "modality": a.modality,
+                "text": (a.asset_metadata or {}).get("text"),
+            }
+            for a in rows
+        ]
+    }
 
 
 @router.patch("/{workflow_id}")

@@ -30,6 +30,7 @@ import { findModel, visiblePorts } from "@/lib/studio/catalog";
 import {
   type AssetPreview,
   type Graph,
+  type NodeRunState,
   type StudioEdge,
   type StudioNode,
   MAX_NODES,
@@ -88,12 +89,16 @@ export type CanvasProps = {
    * and the presigned URLs behind them are minted after mount.
    */
   assets: Record<string, AssetPreview>;
+  /** Per-node state of the run in flight, merged onto nodes as it changes. */
+  runStates: Record<string, NodeRunState>;
   apiRef: React.RefObject<CanvasApi | null>;
   onGraphChange: (graph: Graph) => void;
   onZoomChange: (zoom: number) => void;
   onInteract: () => void;
   onUpload: (file: File) => Promise<AssetPreview | null>;
   onRun: (nodeId: string, scope: RunScope) => void;
+  /** Save a node's generated result to disk. */
+  onDownload: (nodeId: string) => void;
   panMode: boolean;
   /** Frame the whole document on open, for a canvas that already has one. */
   fitOnMount: boolean;
@@ -109,12 +114,14 @@ function CanvasInner({
   catalog,
   initialGraph,
   assets,
+  runStates,
   apiRef,
   onGraphChange,
   onZoomChange,
   onInteract,
   onUpload,
   onRun,
+  onDownload,
   panMode,
   fitOnMount,
   comments,
@@ -185,6 +192,18 @@ function CanvasInner({
       }),
     );
   }, [assetMap, setNodes]);
+
+  // Paint run progress onto nodes the same way upload previews arrive: state
+  // lives with the shell (which owns the event stream), nodes read `data.run`.
+  React.useEffect(() => {
+    setNodes((current) =>
+      current.map((n) => {
+        const run = runStates[n.id];
+        if (n.data.run === run) return n;
+        return { ...n, data: { ...n.data, run } };
+      }),
+    );
+  }, [runStates, setNodes]);
 
   // Report the document upward on every change. React Flow mutates position
   // during a drag, so this fires often — the shell debounces before saving.
@@ -557,6 +576,7 @@ function CanvasInner({
       duplicateNode,
       pickFileFor,
       runFrom: onRun,
+      downloadNode: onDownload,
     }),
     [
       catalog,
@@ -567,6 +587,7 @@ function CanvasInner({
       duplicateNode,
       pickFileFor,
       onRun,
+      onDownload,
     ],
   );
 

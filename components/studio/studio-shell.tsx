@@ -21,9 +21,26 @@ import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Catalog } from "@/lib/studio/catalog";
-import { type AssetPreview, type Graph, MAX_NODES } from "@/lib/studio/graph";
+import {
+  type AssetPreview,
+  type Graph,
+  type NodeRunState,
+  MAX_NODES,
+} from "@/lib/studio/graph";
 import { isCreateTool } from "@/lib/studio/node-ui";
 import { fetchAssetPreviews, uploadAsset } from "@/lib/studio/assets-client";
+import {
+  type NodeResult,
+  type RunEvent,
+  type RunEventAsset,
+  buildRunGraph,
+  downloadResult,
+  fetchRunAssets,
+  fetchWorkflowResults,
+  startRun,
+  stepNodes,
+  streamRun,
+} from "@/lib/studio/runs-client";
 import { saveWorkflow } from "@/app/workflow/actions";
 import {
   addComment,
@@ -323,12 +340,254 @@ export function StudioShell({
     [commentItems, workflowId, userId],
   );
 
-  const onRun = React.useCallback((_nodeId: string, scope: "node" | "chain") => {
-    toast(
-      scope === "chain" ? "Run from here isn't wired up yet" : "Run isn't wired up yet",
-      { description: "The canvas and its graph are saved — execution comes next." },
-    );
-  }, []);
+  // --- runs ---------------------------------------------------------------
+
+  const [runStates, setRunStates] = React.useState<Record<string, NodeRunState>>({});
+  /**
+   * Latest known result per node, across every run of this workflow. Feeds
+   * two things: substitute inputs for scoped runs (Run-this-node uses the
+   * upstream node's *result*, never re-runs it), and the Download button.
+   */
+  const nodeResults = React.useRef<Record<string, NodeResult>>({});
+  /** Abort for the event stream in flight; a new run replaces the old feed. */
+  const activeStream = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => activeStream.current?.(), []);
+
+  // Re-hydrate results when the canvas opens: the graph stores no run output,
+  // so yesterday's image comes back from the workflow's run history.
+  const hydratedFor = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (hydratedFor.current === workflowId) return;
+    hydratedFor.current = workflowId;
+    let live = true;
+    void (async () => {
+      const results = await fetchWorkflowResults(workflowId, await authFor());
+      if (!live || !Object.keys(results).length) return;
+      nodeResults.current = { ...results, ...nodeResults.current };
+      setRunStates((current) => {
+        const next = { ...current };
+        for (const [nodeId, r] of Object.entries(results)) {
+          if (next[nodeId]) continue; // a live run outranks history
+          next[nodeId] = {
+            status: "succeeded",
+            progress: 1,
+            output: { url: r.url, mediaType: r.mediaType, text: r.text },
+          };
+        }
+        return next;
+      });
+    })();
+    return () => {
+      live = false;
+    };
+  }, [workflowId, authFor]);
+
+  const patchRunState = React.useCallback(
+    (nodeId: string, patch: Partial<NodeRunState>) => {
+      setRunStates((current) => {
+        const existing: NodeRunState = current[nodeId] ?? { status: "pending" };
+        return { ...current, [nodeId]: { ...existing, ...patch } };
+      });
+    },
+    [],
+  );
+
+  /**
+   * When the run settles, swap ephemeral event URLs for ones the browser can
+   * hold on to: `GET /v1/runs/{id}` lists the persisted asset rows, and the
+   * assets endpoint mints presigned URLs for them (B2 is a private bucket —
+   * the durable URLs on the rows themselves do not resolve from a browser).
+   */
+  const resolveRunOutputs = React.useCallback(
+    async (runId: string) => {
+      const auth = await authFor();
+      const rows = await fetchRunAssets(runId, auth);
+      if (!rows.length) return;
+      const previews = await fetchAssetPreviews(
+        rows.map((r) => r.id),
+        auth,
+      );
+      setRunStates((current) => {
+        const next = { ...current };
+        for (const row of rows) {
+          if (!row.node_id) continue;
+          const url = previews[row.id]?.url ?? row.url;
+          const existing = next[row.node_id];
+          const text = existing?.output?.text ?? null;
+          nodeResults.current[row.node_id] = {
+            assetId: row.id,
+            url,
+            mediaType: row.media_type,
+            text,
+          };
+          next[row.node_id] = {
+            status: existing?.status ?? "succeeded",
+            progress: 1,
+            output: { url, mediaType: row.media_type, text },
+          };
+        }
+        return next;
+      });
+    },
+    [authFor],
+  );
+
+  const onRunEvent = React.useCallback(
+    (runId: string, event: RunEvent) => {
+      const nodeId = typeof event.node_id === "string" ? event.node_id : null;
+      switch (event.type) {
+        case "node.queued":
+          if (nodeId) patchRunState(nodeId, { status: "pending" });
+          break;
+        case "node.started":
+          if (nodeId) patchRunState(nodeId, { status: "running", progress: 0 });
+          break;
+        case "node.progress":
+          if (nodeId)
+            patchRunState(nodeId, {
+              status: "running",
+              progress:
+                typeof event.progress_pct === "number" ? event.progress_pct : undefined,
+            });
+          break;
+        case "node.completed": {
+          if (!nodeId) break;
+          const asset = (event.assets as RunEventAsset[] | undefined)?.[0];
+          // Mid-run URLs may point at a provider CDN (usable) or at a file on
+          // the worker (not); only hand the node something fetchable.
+          const url = asset?.url?.startsWith("http") ? asset.url : null;
+          patchRunState(nodeId, {
+            status: "succeeded",
+            progress: 1,
+            output: { url, mediaType: asset?.media_type ?? null, text: asset?.text ?? null },
+          });
+          break;
+        }
+        case "node.failed":
+          if (nodeId)
+            patchRunState(nodeId, {
+              status: "failed",
+              error: typeof event.error === "string" ? event.error : "Generation failed",
+            });
+          break;
+        case "node.skipped":
+          if (nodeId) patchRunState(nodeId, { status: "skipped" });
+          break;
+        case "run.completed": {
+          // The terminal event carries every persisted asset, already
+          // presigned by the worker — no post-run fetches needed. The
+          // round-trip resolver stays as the fallback for older events.
+          const assets = event.assets as RunEventAsset[] | undefined;
+          if (!assets?.length) {
+            void resolveRunOutputs(runId);
+            break;
+          }
+          setRunStates((current) => {
+            const next = { ...current };
+            for (const asset of assets) {
+              if (!asset.node_id) continue;
+              const url =
+                asset.preview_url ??
+                (asset.url?.startsWith("http") ? asset.url : null);
+              const text = asset.text ?? next[asset.node_id]?.output?.text ?? null;
+              nodeResults.current[asset.node_id] = {
+                assetId: asset.asset_id ?? null,
+                url,
+                mediaType: asset.media_type ?? null,
+                text,
+              };
+              next[asset.node_id] = {
+                status: "succeeded",
+                progress: 1,
+                output: { url, mediaType: asset.media_type ?? null, text },
+              };
+            }
+            return next;
+          });
+          break;
+        }
+        case "run.failed":
+          toast.error(
+            typeof event.message === "string" && event.message
+              ? event.message
+              : "The run failed.",
+          );
+          void resolveRunOutputs(runId);
+          break;
+      }
+    },
+    [patchRunState, resolveRunOutputs],
+  );
+
+  const onRun = React.useCallback(
+    async (nodeId: string, scope: "node" | "chain") => {
+      const built = buildRunGraph(graphRef.current, nodeId, scope, nodeResults.current);
+      if (!built.ok) {
+        toast.error(built.error);
+        return;
+      }
+      const steps = stepNodes(built.graph);
+      if (!steps.length) {
+        toast.error("Nothing to run here yet — connect a generate node.");
+        return;
+      }
+
+      // The graph travels inline with the request, so a pending debounce does
+      // not need to land first — but flush it anyway: what runs should be what
+      // a reload would reopen.
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+        void flushSave({ name: nameRef.current, graph: graphRef.current });
+      }
+
+      activeStream.current?.();
+      setRunStates((current) => {
+        const next = { ...current };
+        for (const step of steps) next[step.id] = { status: "pending" };
+        return next;
+      });
+
+      const auth = await authFor();
+      const started = await startRun(built.graph, workflowId, auth);
+      if (!started.ok) {
+        toast.error(started.error);
+        setRunStates((current) => {
+          const next = { ...current };
+          for (const step of steps) delete next[step.id];
+          return next;
+        });
+        return;
+      }
+
+      activeStream.current = streamRun(started.id, auth, (event) =>
+        onRunEvent(started.id, event),
+      );
+    },
+    [authFor, flushSave, onRunEvent, workflowId],
+  );
+
+  /** Save a node's result to disk — the Download button on result nodes. */
+  const onDownload = React.useCallback(
+    async (nodeId: string) => {
+      const result = nodeResults.current[nodeId];
+      const live = runStates[nodeId]?.output;
+      const source = result ?? { assetId: null, url: live?.url ?? null };
+      if (!source.assetId && !source.url) return;
+
+      const node = graphRef.current.nodes.find((n) => n.id === nodeId);
+      const title =
+        (typeof node?.data.title === "string" && node.data.title) || "assetflow-result";
+      const mediaType = result?.mediaType ?? live?.mediaType ?? "";
+      const ext =
+        { "video/mp4": ".mp4", "image/png": ".png", "image/jpeg": ".jpg",
+          "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/wav": ".wav",
+          "text/plain": ".txt" }[mediaType] ?? "";
+      const saved = await downloadResult(source, `${title}${ext}`, await authFor());
+      if (!saved && !source.url) toast.error("Nothing downloadable on this node yet.");
+    },
+    [authFor, runStates],
+  );
 
   return (
     <TooltipProvider>
@@ -339,6 +598,8 @@ export function StudioShell({
               catalog={catalog}
               initialGraph={initialGraph}
               assets={assets}
+              runStates={runStates}
+              onDownload={(id) => void onDownload(id)}
               apiRef={canvas}
               onGraphChange={onGraphChange}
               onZoomChange={setZoom}
@@ -419,7 +680,7 @@ export function StudioShell({
             under this name, which is what lets it glide down into the dock
             instead of one copy disappearing as another appears. */}
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
-          <div className="pointer-events-auto w-[min(760px,100%)]">
+          <div className="pointer-events-auto w-full max-w-[940px]">
             <ViewTransition name="studio-prompt-bar" share="morph">
               <div>
                 <PromptBar

@@ -35,6 +35,8 @@ export type StudioContextValue = {
   pickFileFor: (id: string) => void;
   /** "Run" vs "Run from here" — the latter walks the connected chain downstream. */
   runFrom: (id: string, scope: RunScope) => void;
+  /** Save the node's generated result to disk. */
+  downloadNode: (id: string) => void;
 };
 
 const StudioContext = React.createContext<StudioContextValue | null>(null);

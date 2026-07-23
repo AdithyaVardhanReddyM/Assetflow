@@ -457,3 +457,38 @@ body {
     opacity: 1;
   }
 }
+
+/* The "Generating" voice on a running node: ink text with a light band
+   sweeping through it. Kept in CSS rather than an animation library — the
+   shimmer is a background-position loop on text-clipped gradient. */
+.shimmer-text {
+  display: inline-block;
+  background: linear-gradient(
+    100deg,
+    #8a8271 40%,
+    #f2ede2 50%,
+    #8a8271 60%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 2.2s linear infinite;
+}
+
+@keyframes shimmer-sweep {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    animation: none;
+    color: #8a8271;
+    background: none;
+  }
+}

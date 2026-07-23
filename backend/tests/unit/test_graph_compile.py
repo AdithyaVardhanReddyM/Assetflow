@@ -323,8 +323,9 @@ def test_llm_node_writes_the_prompt_of_the_node_it_feeds(catalog):
     assert step.prompt_from == 0
     assert step.input_from == []
     assert step.prompt is None
-    # Valid, but the run path cannot honor it yet, so the canvas is told.
-    assert WarningCode.PROMPT_CHAIN_PENDING in {w.code for w in result.warnings}
+    # No warning: the worker honors prompt chaining by splitting the run into
+    # a text stage and a media stage.
+    assert WarningCode.PROMPT_CHAIN_PENDING not in {w.code for w in result.warnings}
 
 
 def test_llm_step_is_ordered_before_the_node_it_writes_for(catalog):

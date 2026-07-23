@@ -33,11 +33,17 @@ def test_every_model_has_a_wellformed_adapter_reference(catalog):
         module, sep, attr = model.adapter.partition(":")
         assert sep and module and attr, f"{model.id} has a malformed adapter: {model.adapter!r}"
         # Real providers come from genblaze_* or from our own adapter shims:
-        # mock_providers (the sample-backed mock) and genblaze_adapters (the
+        # mock_providers (the sample-backed mock), genblaze_adapters (the
         # first-party providers/factories for models the stock connectors
-        # cannot express — see that module's docstring).
+        # cannot express — see that module's docstring), and
+        # openrouter_provider (the in-app LLM adapter).
         assert module.startswith(
-            ("genblaze", "app.engine.mock_providers", "app.engine.genblaze_adapters")
+            (
+                "genblaze",
+                "app.engine.mock_providers",
+                "app.engine.genblaze_adapters",
+                "app.engine.openrouter_provider",
+            )
         ), f"{model.id} adapter is not a recognized module: {module}"
 
 

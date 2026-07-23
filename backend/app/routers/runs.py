@@ -14,7 +14,6 @@ from app.db.models import Asset, Run, RunStatus, RunStep, Workflow
 from app.deps import CatalogDep, CurrentUser, Session
 from app.errors import Conflict, NotFound, UnprocessableGraph
 from app.graph.compile import plan_graph
-from app.graph.errors import ErrorCode, error
 from app.graph.schema import Graph
 from app.services.workflows import load_asset_refs
 
@@ -22,13 +21,20 @@ router = APIRouter(prefix="/v1/runs", tags=["runs"])
 
 
 class RunCreate(BaseModel):
+    """`graph` is what runs; `workflow_id` is where it came from.
+
+    The canvas sends both: an inline subgraph (so Run-this-node bills only the
+    nodes the user pressed Run on) plus the workflow id, which is what lets a
+    reopened canvas find the results that belong to it. Either alone also
+    works — workflow_id alone runs the saved graph."""
+
     workflow_id: uuid.UUID | None = None
     graph: Graph | None = None
 
     @model_validator(mode="after")
-    def _one_of(self) -> RunCreate:
-        if (self.workflow_id is None) == (self.graph is None):
-            raise ValueError("Provide exactly one of workflow_id or graph.")
+    def _at_least_one(self) -> RunCreate:
+        if self.workflow_id is None and self.graph is None:
+            raise ValueError("Provide a graph, a workflow_id, or both.")
         return self
 
 
@@ -133,9 +139,7 @@ async def create_run(
         workflow = result.scalar_one_or_none()
         if workflow is None:
             raise NotFound(f"Workflow {body.workflow_id} was not found.")
-        graph = Graph.model_validate(workflow.graph)
-    else:
-        graph = body.graph  # type: ignore[assignment]
+    graph = body.graph if body.graph is not None else Graph.model_validate(workflow.graph)  # type: ignore[union-attr]
 
     assets = await load_asset_refs(session, tenant_id=user.tenant_id, graph=graph)
     plan_result = plan_graph(
@@ -145,27 +149,6 @@ async def create_run(
         raise UnprocessableGraph(
             "This workflow cannot run yet.",
             errors=[d.as_dict() for d in plan_result.errors],
-        )
-
-    # A prompt written by an upstream LLM step is not knowable when the GenBlaze
-    # pipeline is built, and a run that quietly used the un-rewritten prompt
-    # would spend real money producing the wrong thing. Refuse instead — the
-    # canvas already carries the same message as a warning.
-    chained = plan_result.plan.prompt_chained_node_ids
-    if chained:
-        raise UnprocessableGraph(
-            "Running a workflow whose prompt comes from an LLM node isn't "
-            "supported yet.",
-            errors=[
-                error(
-                    ErrorCode.PROMPT_CHAIN_UNSUPPORTED,
-                    "This node's prompt is written by an LLM node.",
-                    node_id=node_id,
-                    hint="Disconnect the LLM node and type the prompt, or run the "
-                    "LLM node on its own first.",
-                ).as_dict()
-                for node_id in chained
-            ],
         )
 
     run = Run(

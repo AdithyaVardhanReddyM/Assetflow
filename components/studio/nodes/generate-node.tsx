@@ -40,6 +40,7 @@ import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icon
 import { ModelLogo } from "../model-logos";
 import { ModelMenuList } from "../model-menu";
 import { OutputPort, PortRail } from "./ports";
+import { RunBeam, RunWell, isRunBusy } from "./run-well";
 import { ROLE_COPY, ROLE_ICON, ROLE_LABEL } from "./roles";
 import {
   BarButton,
@@ -150,7 +151,8 @@ function nodeShape(ratio: string, modality: string): { width: number; well: numb
 }
 
 export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
-  const { catalog, updateNode, deleteNode, duplicateNode, runFrom } = useStudio();
+  const { catalog, updateNode, deleteNode, duplicateNode, runFrom, downloadNode } =
+    useStudio();
   const wire = data.wire as unknown as GenerateNodeData;
 
   const model = findModel(catalog, wire.provider, wire.model);
@@ -274,7 +276,12 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           ))}
 
           <BarDivider />
-          <BarButton label="Download" icon={DownloadSimpleIcon} disabled />
+          <BarButton
+            label="Download"
+            icon={DownloadSimpleIcon}
+            disabled={!data.run?.output}
+            onClick={() => downloadNode(id)}
+          />
           <BarButton label="Delete" icon={TrashIcon} danger onClick={() => deleteNode(id)} />
           <MoreMenu>
             <DropdownMenuItem onClick={() => duplicateNode(id)} className={menuItem}>
@@ -319,23 +326,29 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           className="top-1/2 -translate-y-1/2"
         />
 
-        {/* Preview well — the card's own shape, not a frame matted inside one. */}
-        <div
-          className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
-          style={{ height: shape.well }}
-        >
-          <div className="flex flex-col items-center gap-2.5 px-3 text-center">
-            <span
-              className="grid size-10 place-items-center"
-              style={{ background: accent.soft, color: accent.ink }}
-            >
-              <Icon className="size-5" />
-            </span>
-            <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
-              {copy?.well ?? `Your ${kindLabel.toLowerCase()} will appear here`}
-            </p>
+        {/* Preview well — the card's own shape, not a frame matted inside one.
+            While generating it wears the prompt bar's border beam. */}
+        <RunBeam active={isRunBusy(data.run)}>
+          <div
+            className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
+            style={{ height: shape.well }}
+          >
+            <RunWell run={data.run} modality={modality} />
+            {data.run ? null : (
+              <div className="flex flex-col items-center gap-2.5 px-3 text-center">
+                <span
+                  className="grid size-10 place-items-center"
+                  style={{ background: accent.soft, color: accent.ink }}
+                >
+                  <Icon className="size-5" />
+                </span>
+                <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
+                  {copy?.well ?? `Your ${kindLabel.toLowerCase()} will appear here`}
+                </p>
+              </div>
+            )}
           </div>
-        </div>
+        </RunBeam>
       </NodeCard>
 
       {/* Body controls — the model's central choices (a voice, a lyrics box)

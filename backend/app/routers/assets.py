@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 
 from app.config import StorageMode
@@ -170,3 +171,61 @@ async def get_content(
     from app.engine.manifests import presign
 
     return RedirectResponse(presign(asset.b2_key or asset.url), status_code=307)
+
+
+_EXT_BY_MEDIA_TYPE = {
+    "video/mp4": ".mp4",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "text/plain": ".txt",
+}
+
+
+@router.get("/{asset_id}/download")
+async def download_content(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser, settings: SettingsDep
+) -> StreamingResponse:
+    """Stream the bytes through the API with an attachment disposition.
+
+    A redirect cannot serve the Save-As path: the canvas has to `fetch()` the
+    bytes to hand them to a download, and B2 sends no CORS headers — so the
+    redirect target is unreachable from the browser. Proxying through here
+    keeps the download inside the API's own CORS policy.
+    """
+    asset = await _get_owned(session, asset_id, user)
+
+    if settings.storage_mode is StorageMode.LOCAL:
+        target = asset.url
+    else:
+        from app.engine.manifests import presign
+
+        target = presign(asset.b2_key or asset.url)
+
+    client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
+    upstream = await client.send(
+        client.build_request("GET", target), stream=True
+    )
+    if upstream.status_code >= 400:
+        await upstream.aclose()
+        await client.aclose()
+        raise NotFound("The asset's bytes are not reachable in storage.")
+
+    stem = (asset.filename or asset.node_id or "asset").rsplit(".", 1)[0]
+    filename = f"{stem}{_EXT_BY_MEDIA_TYPE.get(asset.media_type, '')}" or "asset"
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        media_type=asset.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

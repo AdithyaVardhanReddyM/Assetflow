@@ -214,6 +214,27 @@ export type FlowNodeData = {
   asset?: AssetPreview;
   /** True while an upload node's file is still in flight to B2. */
   uploading?: boolean;
+  /** Live state from the run in flight (or the one just finished). */
+  run?: NodeRunState;
+};
+
+/** Mirrors the step statuses the run events carry. */
+export type NodeRunStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
+
+export type NodeRunOutput = {
+  /** A URL the browser can actually fetch — presigned B2 or local media. */
+  url: string | null;
+  mediaType: string | null;
+  /** An LLM step's words, shown directly rather than fetched from the file. */
+  text?: string | null;
+};
+
+export type NodeRunState = {
+  status: NodeRunStatus;
+  /** 0..1 while running. */
+  progress?: number | null;
+  error?: string | null;
+  output?: NodeRunOutput | null;
 };
 
 export type AssetPreview = {

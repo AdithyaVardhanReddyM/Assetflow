@@ -8,7 +8,9 @@ exactly-once-per-seq delivery, and a demoable event history for free.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -20,8 +22,9 @@ from app.config import get_settings
 from app.db.models import Asset, AssetKind, Run, RunEvent, RunStatus, RunStep, StepStatus
 from app.engine.builder import BuildContext, build_pipeline
 from app.engine.events import EventMapper, extract_result
+from app.engine.manifests import preview_url
 from app.engine.sinks import build_sink, collect_assets
-from app.graph.plan import ExecutionPlan
+from app.graph.plan import ExecutionPlan, PlanEstimates, PlannedStep
 from app.graph.schema import AssetRef
 from app.logging import get_logger, run_id_var
 from app.workers import queue
@@ -50,7 +53,17 @@ class _EventWriter:
         self._run_id = run_id
         self._seq = start_seq
 
-    async def append(self, type_: str, payload: dict[str, Any], node_id: str | None = None) -> int:
+    async def append(
+        self,
+        type_: str,
+        payload: dict[str, Any],
+        node_id: str | None = None,
+        *,
+        commit: bool = True,
+    ) -> int:
+        """Queue one event; `commit=False` lets the caller fold the event and
+        its step-row update into a single commit. The database is a ~300ms
+        round trip away, so every commit saved is user-visible latency."""
         self._seq += 1
         self._session.add(
             RunEvent(
@@ -61,7 +74,8 @@ class _EventWriter:
                 payload=payload,
             )
         )
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
         return self._seq
 
 
@@ -74,7 +88,8 @@ async def _next_seq(session: AsyncSession, run_id: uuid.UUID) -> int:
 
 async def _seed_steps(session: AsyncSession, run: Run, plan: ExecutionPlan) -> None:
     """Insert a row per planned step so the canvas can render the full graph as
-    pending before anything starts."""
+    pending before anything starts. Does not commit — the caller folds the
+    seeds and the `run.queued` event into one commit."""
     existing = await session.execute(select(RunStep.node_id).where(RunStep.run_id == run.id))
     known = {r[0] for r in existing.fetchall()}
     for step in plan.steps:
@@ -94,7 +109,6 @@ async def _seed_steps(session: AsyncSession, run: Run, plan: ExecutionPlan) -> N
                 params=step.params,
             )
         )
-    await session.commit()
 
 
 async def _apply_step_update(
@@ -140,48 +154,68 @@ async def _apply_step_update(
 
     if not values:
         return
+    # No commit here — the caller commits once for the event and this update
+    # together. Two commits per event doubled every round trip to the database.
     await session.execute(
         update(RunStep)
         .where(RunStep.run_id == run_id, RunStep.node_id == node_id)
         .values(**values)
     )
-    await session.commit()
 
 
 async def _persist_assets(
-    session: AsyncSession, run: Run, result: Any
-) -> list[Any]:
-    records = collect_assets(result, run_id=str(run.id))
-    for record in records:
-        session.add(
-            Asset(
-                tenant_id=run.tenant_id,
-                kind=AssetKind.GENERATED,
-                genblaze_asset_id=record.genblaze_asset_id,
-                run_id=run.id,
-                node_id=record.node_id,
-                b2_key=record.b2_key,
-                url=record.url,
-                media_type=record.media_type,
-                modality=record.modality,
-                sha256=record.sha256,
-                size_bytes=record.size_bytes,
-                width=record.width,
-                height=record.height,
-                duration_sec=record.duration_sec,
+    session: AsyncSession, run: Run, results: list[Any]
+) -> list[Asset]:
+    """Stage asset rows on the session and return them with ids populated
+    (flushed, not committed — `_finish` folds the rows and the terminal event
+    into one commit). The ids ride the terminal event so the canvas can name
+    an asset for download and lineage without re-fetching the run."""
+    rows: list[Asset] = []
+    for result in results:
+        for record in collect_assets(result, run_id=str(run.id)):
+            rows.append(
+                Asset(
+                    tenant_id=run.tenant_id,
+                    kind=AssetKind.GENERATED,
+                    genblaze_asset_id=record.genblaze_asset_id,
+                    run_id=run.id,
+                    node_id=record.node_id,
+                    b2_key=record.b2_key,
+                    url=record.url,
+                    media_type=record.media_type,
+                    modality=record.modality,
+                    sha256=record.sha256,
+                    size_bytes=record.size_bytes,
+                    width=record.width,
+                    height=record.height,
+                    duration_sec=record.duration_sec,
+                    asset_metadata={"text": record.text} if record.text else {},
+                )
             )
-        )
-    await session.commit()
-    return records
+    session.add_all(rows)
+    await session.flush()
+    return rows
 
 
-def _summarize(result: Any) -> dict[str, Any]:
-    run = getattr(result, "run", None)
-    manifest = getattr(result, "manifest", None)
+def _summarize(results: list[Any]) -> dict[str, Any]:
+    """Cost across every stage; identity and manifest from the last stage that
+    has one — for a staged run that is the media pipeline, whose manifest
+    covers the assets the user actually asked for."""
     settings = get_settings()
 
-    steps = list(getattr(run, "steps", []) or [])
-    costs = [s.cost_usd for s in steps if getattr(s, "cost_usd", None) is not None]
+    costs: list[float] = []
+    for result in results:
+        run = getattr(result, "run", None)
+        for s in getattr(run, "steps", []) or []:
+            if getattr(s, "cost_usd", None) is not None:
+                costs.append(s.cost_usd)
+
+    final = next(
+        (r for r in reversed(results) if getattr(r, "manifest", None) is not None),
+        results[-1],
+    )
+    run = getattr(final, "run", None)
+    manifest = getattr(final, "manifest", None)
 
     verified: str | None = None
     if manifest is not None and settings.storage_mode.value == "b2":
@@ -218,54 +252,36 @@ async def execute_run(session: AsyncSession, run_id: uuid.UUID, worker_id: str) 
     await _seed_steps(session, run, plan)
     await writer.append("run.queued", {"total_steps": len(plan.steps)})
 
-    mapper = EventMapper(plan=plan)
-    captured: Any = None
-    sink = None
-
     try:
         assets = await _load_asset_refs(session, run, plan)
-        pipeline = build_pipeline(
-            plan,
-            BuildContext(
-                tenant_id=run.tenant_id,
-                workflow_id=str(run.workflow_id) if run.workflow_id else None,
-                run_id=str(run.id),
-                assets=assets,
-                # Preflight validates model slugs before any paid call. Worth the
-                # latency: a typo'd model should cost nothing.
-                preflight=True,
-            ),
-        )
-        sink = build_sink(run_id=str(run.id))
-
-        stream = pipeline.astream(
-            sink=sink,
-            timeout=settings.step_timeout_seconds,
-            fail_fast=False,
-            raise_on_failure=False,
-            pipeline_timeout=_pipeline_timeout(plan),
+        ctx = BuildContext(
+            tenant_id=run.tenant_id,
+            workflow_id=str(run.workflow_id) if run.workflow_id else None,
+            run_id=str(run.id),
+            assets=assets,
+            # Preflight validates model slugs before any paid call. Worth the
+            # latency: a typo'd model should cost nothing.
+            preflight=True,
         )
 
-        async for event in stream:
-            captured = extract_result(event) or captured
-            wire = mapper.map(event)
-            if wire is None:
-                continue
-            # Heartbeats keep proxies warm but are not real progress; persisting
-            # them would bloat the event log for no UI benefit.
-            if wire.type == "node.progress" and wire.payload.get("is_heartbeat"):
-                continue
-            # GenBlaze's terminal event arrives before we have persisted assets
-            # or computed the final status. `_finish` emits the authoritative
-            # one; emitting both would put two terminal events in the log, and
-            # since consumers close the stream on the first one they would
-            # disconnect before ever seeing the assets.
-            if wire.type in ("run.completed", "run.failed"):
-                continue
-            await writer.append(wire.type, wire.payload, wire.node_id)
-            await _apply_step_update(session, run_id, wire.type, wire.payload)
+        if any(s.prompt_from is not None for s in plan.steps):
+            # A GenBlaze pipeline fixes every prompt at construction, so steps
+            # whose prompt an upstream LLM writes cannot share a pipeline with
+            # that LLM — the run is split into a text stage and a media stage.
+            results = await _execute_staged(session, run, plan, ctx, writer, settings)
+        else:
+            captured = await _stream_pipeline(
+                session,
+                run.id,
+                build_pipeline(plan, ctx),
+                build_sink(run_id=str(run.id)),
+                plan,
+                writer,
+                settings,
+            )
+            results = [captured] if captured is not None else []
 
-        await _finish(session, run, writer, captured)
+        await _finish(session, run, writer, results)
 
     except Exception as exc:
         log.exception("runner.failed", run_id=str(run_id), exc_type=type(exc).__name__)
@@ -285,25 +301,309 @@ async def execute_run(session: AsyncSession, run_id: uuid.UUID, worker_id: str) 
                 error=str(exc)[:2000],
                 error_code=type(exc).__name__,
             )
+
+
+def _pipeline_timeout(plan: ExecutionPlan, settings: Any) -> float:
+    """Wall-clock ceiling on the whole pipeline, not a per-step guard.
+
+    Floored at the per-step timeout plus margin: a provider's *queue* time
+    counts against this clock, so a ceiling tighter than what one step is
+    allowed kills runs that were merely waiting their turn (seen live with
+    GMI: a 15s-estimated image spent >120s queued and the old 120s floor
+    killed it)."""
+    estimated = plan.estimates.duration_sec or 120.0
+    floor = float(settings.step_timeout_seconds) + 60.0
+    return max(floor, min(estimated * 2.5, 1800.0))
+
+
+async def _stream_pipeline(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    pipeline: Any,
+    sink: Any | None,
+    plan: ExecutionPlan,
+    writer: _EventWriter,
+    settings: Any,
+    *,
+    suppress_run_started: bool = False,
+) -> Any:
+    """Stream one pipeline, appending events and step updates. Returns the
+    captured terminal result (or None).
+
+    The mapper is built on the plan *this pipeline* was built from — its step
+    indices, not the full run's — because GenBlaze events that carry only a
+    `step_index` are resolved against it.
+    """
+    mapper = EventMapper(plan=plan)
+    captured: Any = None
+    # Per-node timestamp of the last *persisted* progress event. Providers can
+    # emit progress every poll tick, and at ~1s of commit latency per event a
+    # chatty step would spend longer writing its progress than generating.
+    last_progress: dict[str, float] = {}
+
+    # Persistence is decoupled from consumption on purpose: the stream applies
+    # backpressure, so writing each event inline (~1s of database round trips
+    # apiece) throttles the *pipeline itself* — measured as 3-4s of added
+    # latency per event on a remote Postgres. The loop below drains events at
+    # full speed; this task drains the buffer, folding everything that has
+    # accumulated into a single commit.
+    buffer: asyncio.Queue[Any | None] = asyncio.Queue()
+
+    async def persist() -> None:
+        while True:
+            wire = await buffer.get()
+            if wire is None:
+                return
+            batch = [wire]
+            while not buffer.empty():
+                nxt = buffer.get_nowait()
+                if nxt is None:
+                    batch.append(None)
+                    break
+                batch.append(nxt)
+            done = batch[-1] is None
+            for item in batch:
+                if item is None:
+                    break
+                await writer.append(item.type, item.payload, item.node_id, commit=False)
+                await _apply_step_update(session, run_id, item.type, item.payload)
+            await session.commit()
+            if done:
+                return
+
+    persist_task = asyncio.create_task(persist())
+    try:
+        stream = pipeline.astream(
+            sink=sink,
+            timeout=settings.step_timeout_seconds,
+            fail_fast=False,
+            raise_on_failure=False,
+            pipeline_timeout=_pipeline_timeout(plan, settings),
+        )
+
+        async for event in stream:
+            captured = extract_result(event) or captured
+            wire = mapper.map(event)
+            if wire is None:
+                continue
+            # Heartbeats keep proxies warm but are not real progress; persisting
+            # them would bloat the event log for no UI benefit.
+            if wire.type == "node.progress" and wire.payload.get("is_heartbeat"):
+                continue
+            # GenBlaze's terminal event arrives before we have persisted assets
+            # or computed the final status. `_finish` emits the authoritative
+            # one; emitting both would put two terminal events in the log, and
+            # since consumers close the stream on the first one they would
+            # disconnect before ever seeing the assets.
+            if wire.type in ("run.completed", "run.failed"):
+                continue
+            # A staged run is several pipelines; only the first may announce.
+            if suppress_run_started and wire.type == "run.started":
+                continue
+            if wire.type == "node.progress" and not _worth_persisting(
+                wire.payload, last_progress
+            ):
+                continue
+            if wire.type == "node.completed":
+                _sign_event_assets(wire.payload)
+            buffer.put_nowait(wire)
     finally:
+        buffer.put_nowait(None)
+        # Every buffered event lands before the caller emits terminal state —
+        # and a writer crash surfaces here rather than being swallowed.
+        await persist_task
         if sink is not None:
-            # The pipeline normally closes the sink itself; this covers the paths
-            # where we never reached run(). Best-effort by design.
+            # The pipeline normally closes the sink itself; this covers the
+            # paths where we never reached run(). Best-effort by design.
             with contextlib.suppress(Exception):
                 sink.close()
+    return captured
 
 
-def _pipeline_timeout(plan: ExecutionPlan) -> float:
-    """Wall-clock ceiling. `pipeline_timeout` is checked between steps, so this
-    is a bound on the whole run, not a per-step guard."""
-    estimated = plan.estimates.duration_sec or 120.0
-    return max(120.0, min(estimated * 2.5, 1800.0))
+_PROGRESS_PERSIST_INTERVAL = 2.5
+
+
+def _worth_persisting(payload: dict[str, Any], last_progress: dict[str, float]) -> bool:
+    """Throttle progress events to one per node per interval.
+
+    Always keep the ones that carry something irreplaceable — a preview frame,
+    or the first sighting of the provider's job id (the checkpoint a retry
+    resumes from). The rest are a percentage the UI repaints anyway.
+    """
+    node_id = str(payload.get("node_id") or "")
+    request_key = f"req:{node_id}"
+    irreplaceable = bool(payload.get("preview_url")) or (
+        payload.get("request_id") is not None and request_key not in last_progress
+    )
+    if payload.get("request_id") is not None:
+        last_progress[request_key] = 1.0
+    now = time.monotonic()
+    if irreplaceable or now - last_progress.get(node_id, 0.0) >= _PROGRESS_PERSIST_INTERVAL:
+        last_progress[node_id] = now
+        return True
+    return False
+
+
+def _sign_event_assets(payload: dict[str, Any]) -> None:
+    """Swap any durable private-bucket URL in a completion event for a
+    presigned one, so the canvas can render the asset the moment the step
+    finishes. Signing is local crypto — no network call. URLs that are not
+    ours (a provider CDN) pass through untouched, and failures leave the
+    payload as it was."""
+    for asset in payload.get("assets") or []:
+        url = asset.get("url")
+        if not isinstance(url, str) or not url.startswith("http"):
+            continue
+        signed = preview_url(url)
+        if signed and signed != url:
+            asset["url"] = signed
+
+
+def _text_output(result: Any) -> str | None:
+    """The words an LLM stage produced, read off its result's assets."""
+    run = getattr(result, "run", None)
+    for step in getattr(run, "steps", []) or []:
+        for asset in getattr(step, "assets", None) or []:
+            metadata = getattr(asset, "metadata", None) or {}
+            text = metadata.get("text") if isinstance(metadata, dict) else None
+            if text:
+                return str(text)
+    return None
+
+
+async def _skip_step(
+    session: AsyncSession, run_id: uuid.UUID, writer: _EventWriter, step: PlannedStep
+) -> None:
+    payload = {"node_id": step.node_id, "reason": "upstream_failed"}
+    await writer.append("node.skipped", payload, step.node_id, commit=False)
+    await _apply_step_update(session, run_id, "node.skipped", payload)
+    await session.commit()
+
+
+async def _execute_staged(
+    session: AsyncSession,
+    run: Run,
+    plan: ExecutionPlan,
+    ctx: BuildContext,
+    writer: _EventWriter,
+    settings: Any,
+) -> list[Any]:
+    """Execute a prompt-chained plan: text steps first, then everything else.
+
+    Text steps run one pipeline each, in plan order, so an LLM chained off
+    another LLM sees its predecessor's words. The remaining steps then run as a
+    single pipeline with every `prompt_from` resolved to literal words and the
+    plan reindexed — `input_from` refers to *pipeline* positions, which shift
+    when the text steps drop out.
+    """
+    await writer.append("run.started", {"total_steps": len(plan.steps)})
+
+    results: list[Any] = []
+    words: dict[int, str] = {}
+    failed: set[int] = set()
+
+    def resolved_prompt(step: PlannedStep) -> str | None:
+        return words[step.prompt_from] if step.prompt_from is not None else step.prompt
+
+    for step in (s for s in plan.steps if s.modality == "text"):
+        if step.prompt_from is not None and step.prompt_from not in words:
+            failed.add(step.index)
+            await _skip_step(session, run.id, writer, step)
+            continue
+
+        stage_plan = ExecutionPlan(
+            name=f"{plan.name}:{step.node_id[:8]}",
+            steps=[
+                step.model_copy(
+                    update={"index": 0, "prompt": resolved_prompt(step), "prompt_from": None}
+                )
+            ],
+            max_concurrency=1,
+            estimates=PlanEstimates(duration_sec=step.expected_duration_sec),
+        )
+        captured = await _stream_pipeline(
+            session,
+            run.id,
+            build_pipeline(stage_plan, ctx),
+            build_sink(run_id=str(run.id)),
+            stage_plan,
+            writer,
+            settings,
+            suppress_run_started=True,
+        )
+        if captured is not None:
+            results.append(captured)
+
+        text = _text_output(captured)
+        if text:
+            words[step.index] = text
+        else:
+            # The step's own failure event has already been recorded by the
+            # stream; what remains is keeping its dependents from running.
+            failed.add(step.index)
+
+    media_steps = [s for s in plan.steps if s.modality != "text"]
+    runnable: list[PlannedStep] = []
+    for step in media_steps:
+        depends_on = [*step.input_from] + (
+            [step.prompt_from] if step.prompt_from is not None else []
+        )
+        if any(d in failed for d in depends_on):
+            failed.add(step.index)
+            await _skip_step(session, run.id, writer, step)
+            continue
+        runnable.append(step)
+
+    if runnable:
+        # The step rows were seeded with the un-rewritten prompts; record what
+        # will actually run, so the database shows the words the LLM wrote.
+        for step in runnable:
+            if step.prompt_from is not None:
+                await session.execute(
+                    update(RunStep)
+                    .where(RunStep.run_id == run.id, RunStep.node_id == step.node_id)
+                    .values(prompt=resolved_prompt(step))
+                )
+        await session.commit()
+
+        index_map = {s.index: position for position, s in enumerate(runnable)}
+        media_plan = ExecutionPlan(
+            name=plan.name,
+            steps=[
+                s.model_copy(
+                    update={
+                        "index": index_map[s.index],
+                        "prompt": resolved_prompt(s),
+                        "prompt_from": None,
+                        "input_from": sorted(index_map[i] for i in s.input_from),
+                    }
+                )
+                for s in runnable
+            ],
+            max_concurrency=plan.max_concurrency,
+            estimates=plan.estimates,
+            output_node_ids=plan.output_node_ids,
+        )
+        captured = await _stream_pipeline(
+            session,
+            run.id,
+            build_pipeline(media_plan, ctx),
+            build_sink(run_id=str(run.id)),
+            media_plan,
+            writer,
+            settings,
+            suppress_run_started=True,
+        )
+        if captured is not None:
+            results.append(captured)
+
+    return results
 
 
 async def _finish(
-    session: AsyncSession, run: Run, writer: _EventWriter, captured: Any
+    session: AsyncSession, run: Run, writer: _EventWriter, results: list[Any]
 ) -> None:
-    if captured is None:
+    if not results:
         await writer.append("run.failed", {"message": "The run produced no result."})
         await queue.finalize(
             session, run.id, status=RunStatus.FAILED,
@@ -311,8 +611,8 @@ async def _finish(
         )
         return
 
-    records = await _persist_assets(session, run, captured)
-    summary = _summarize(captured)
+    rows = await _persist_assets(session, run, results)
+    summary = _summarize(results)
 
     step_rows = await session.execute(select(RunStep).where(RunStep.run_id == run.id))
     steps = list(step_rows.scalars())
@@ -337,16 +637,23 @@ async def _finish(
             **summary,
             "assets": [
                 {
+                    "asset_id": str(r.id),
                     "node_id": r.node_id,
                     "url": r.url,
+                    # Signed here so the canvas can render final results off
+                    # this one event instead of a per-asset fetch round trip.
+                    # From the URL, not b2_key: in local mode the key is a bare
+                    # relative path while the URL is already fetchable as-is.
+                    "preview_url": preview_url(r.url),
                     "media_type": r.media_type,
                     "modality": r.modality,
                     "sha256": r.sha256,
                     "size_bytes": r.size_bytes,
+                    "text": (r.asset_metadata or {}).get("text"),
                     # Post-run URLs are durable, unlike the mid-run previews.
                     "ephemeral": False,
                 }
-                for r in records
+                for r in rows
             ],
         },
     )
@@ -359,7 +666,7 @@ async def _finish(
     )
     log.info(
         "runner.finished", run_id=str(run.id), status=status.value,
-        steps=len(steps), assets=len(records),
+        steps=len(steps), assets=len(rows),
     )
 
 

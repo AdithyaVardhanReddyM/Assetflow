@@ -382,18 +382,6 @@ def plan_graph(
                 node_id=node_id,
             )
 
-    # Drawable and valid, but not yet runnable — say so here rather than let the
-    # user find out from a failed run. See `PlannedStep.prompt_from`.
-    for step in steps:
-        if step.prompt_from is not None:
-            ctx.warn(
-                WarningCode.PROMPT_CHAIN_PENDING,
-                "This node's prompt is written by an LLM node. Running a workflow "
-                "that chains prompts isn't supported yet.",
-                node_id=step.node_id,
-                hint="Run the LLM node on its own and paste its result for now.",
-            )
-
     duration = _critical_path(steps)
     costs = [s.est_cost_usd for s in steps if s.est_cost_usd is not None]
     estimates = PlanEstimates(

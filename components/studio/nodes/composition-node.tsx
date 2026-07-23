@@ -30,6 +30,7 @@ import {
 import {
   CaretDownIcon,
   CopyIcon,
+  DownloadSimpleIcon,
   LightningIcon,
   PlayIcon,
   PlusIcon,
@@ -66,6 +67,7 @@ import { useStudio } from "../studio-context";
 import { CompositionIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { LanePort, OutputPort } from "./ports";
 import { ROLE_ICON, ROLE_LABEL } from "./roles";
+import { RunBeam, RunWell, isRunBusy } from "./run-well";
 import {
   BarButton,
   FloatingBar,
@@ -143,8 +145,15 @@ function tickStep(timeline: number): number {
 }
 
 export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
-  const { catalog, updateNode, disconnectPort, deleteNode, duplicateNode, runFrom } =
-    useStudio();
+  const {
+    catalog,
+    updateNode,
+    disconnectPort,
+    deleteNode,
+    duplicateNode,
+    runFrom,
+    downloadNode,
+  } = useStudio();
 
   const videoTrack = compositeVideoTrack(data.wire);
   const audioTracks = compositeTracks(data.wire);
@@ -288,26 +297,32 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
       <NodeCard selected={selected}>
         <OutputPort modality="video" style={{ top: WELL_HEIGHT / 2 }} />
 
-        {/* Preview well — the same 16:9 card a video node previews into. */}
-        <div
-          className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
-          style={{ height: WELL_HEIGHT }}
-        >
-          <div className="flex flex-col items-center gap-2.5 px-3 text-center">
-            <span
-              className="grid size-10 place-items-center"
-              style={{
-                background: accentFor("video").soft,
-                color: accentFor("video").ink,
-              }}
-            >
-              <CompositionIcon className="size-5" />
-            </span>
-            <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
-              Your composition will appear here
-            </p>
+        {/* Preview well — the same 16:9 card a video node previews into.
+            While rendering it wears the prompt bar's border beam. */}
+        <RunBeam active={isRunBusy(data.run)}>
+          <div
+            className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
+            style={{ height: WELL_HEIGHT }}
+          >
+            <RunWell run={data.run} modality="video" />
+            {data.run ? null : (
+              <div className="flex flex-col items-center gap-2.5 px-3 text-center">
+                <span
+                  className="grid size-10 place-items-center"
+                  style={{
+                    background: accentFor("video").soft,
+                    color: accentFor("video").ink,
+                  }}
+                >
+                  <CompositionIcon className="size-5" />
+                </span>
+                <p className="text-[11.5px] tracking-[0.01em] text-[#a09a88]">
+                  Your composition will appear here
+                </p>
+              </div>
+            )}
           </div>
-        </div>
+        </RunBeam>
 
         <Ruler timeline={timeline} />
 
@@ -401,6 +416,12 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
 
       <div className="flex justify-center">
         <FloatingBar>
+          <BarButton
+            label="Download"
+            icon={DownloadSimpleIcon}
+            disabled={!data.run?.output}
+            onClick={() => downloadNode(id)}
+          />
           <BarButton label="Delete" icon={TrashIcon} danger onClick={() => deleteNode(id)} />
           <MoreMenu>
             <DropdownMenuItem onClick={() => duplicateNode(id)} className={menuItem}>

@@ -225,6 +225,7 @@ function ParamChips({
               key={p.name}
               type="button"
               aria-pressed={on}
+              aria-label={p.label ?? p.name}
               title={p.label ?? p.name}
               onClick={() => onChange(p.name, !on)}
               className={cn(
@@ -232,8 +233,13 @@ function ParamChips({
                 on ? "border-[#1f211c]/30 bg-[#1f211c]/5 text-[#1f211c]" : "text-[#8a8271]",
               )}
             >
-              {audio ? <AudioIcon className="size-3.5" weight="fill" /> : null}
-              {p.label ?? p.name}
+              {/* Glyph only — same rule as the node's action bar: the speaker
+                  already says "audio", so the word is the fact twice. */}
+              {audio ? (
+                <AudioIcon className="size-3.5" weight="fill" />
+              ) : (
+                (p.label ?? p.name)
+              )}
             </button>
           );
         }
@@ -335,7 +341,14 @@ export function PromptBar({
       // doesn't divide it evenly makes every lap land on a different colour —
       // that's the drift. 4s = exactly three laps per hue cycle.
       duration={4}
-      className="beam-colour-only w-full"
+      // Video carries two controls image does not (duration, resolution), which
+      // is exactly enough to wrap the chip row onto a second line at the image
+      // width. The bar grows to hold them instead, animated so the toggle and
+      // the bar read as one movement rather than a snap.
+      className={cn(
+        "beam-colour-only mx-auto w-full transition-[max-width] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        isVideo ? "max-w-[940px]" : "max-w-[760px]",
+      )}
       style={
         {
           // The light preset's opacities (stroke 0.12, inner 0.26) are tuned to

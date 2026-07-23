@@ -66,10 +66,15 @@ class EventMapper:
 def _assets_payload(step: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for asset in getattr(step, "assets", None) or []:
+        metadata = getattr(asset, "metadata", None) or {}
         out.append(
             {
                 "asset_id": getattr(asset, "asset_id", None),
                 "url": asset.url,
+                # An LLM step's words. In the payload itself because a text
+                # asset's URL may be file:// or a private-bucket object — the
+                # canvas shows the words, not the file.
+                "text": metadata.get("text") if isinstance(metadata, dict) else None,
                 "media_type": getattr(asset, "media_type", None),
                 "sha256": getattr(asset, "sha256", None),
                 "size_bytes": getattr(asset, "size_bytes", None),

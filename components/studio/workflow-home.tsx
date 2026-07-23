@@ -224,7 +224,9 @@ export function WorkflowHome({
           className="fixed inset-x-0 top-[27vh] z-30 flex justify-center px-4"
           style={{ transitionTimingFunction: EASE }}
         >
-          <div className="w-[min(760px,100%)]">
+          {/* Room for the bar to grow into: it sets its own width per modality,
+              so this only has to stop being the thing that limits it. */}
+          <div className="w-full max-w-[940px]">
             {/* The morph that carries the screen: this same bar is docked at
                 the bottom of the canvas, so it glides down rather than one
                 copy vanishing while another appears. */}

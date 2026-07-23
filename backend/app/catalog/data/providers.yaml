@@ -1151,3 +1151,34 @@ providers:
             default: "720p"
             options: [{value: "480p"}, {value: "720p"}]
           - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
+
+  # OpenRouter — text in, text out, the LLM node's real provider. Not a
+  # GenBlaze connector package: the adapter ships in-app (a SyncProvider over
+  # the plain chat-completions API), so `package` points at the app itself —
+  # the availability probe only needs an importable module to prove the
+  # adapter's code is present; the key check is what actually gates it.
+  - key: openrouter
+    label: OpenRouter
+    package: app.engine
+    env_var: OPENROUTER_API_KEY
+    signup_url: https://openrouter.ai/settings/keys
+    models:
+      - id: moonshotai/kimi-k2.6
+        label: Kimi K2.6
+        modality: text
+        role: llm
+        adapter: app.engine.openrouter_provider:text_provider
+        expected_duration_sec: 12
+        est_cost_usd: 0.01
+        output_media_type: text/plain
+        params:
+          - name: system_prompt
+            type: string
+            label: System prompt
+            help: How the model should behave. Left empty, it writes clean
+              prompt-ready text with no chat framing.
+            group: body
+            multiline: true
+            max_length: 4000
+          - {name: temperature, type: number, label: Temperature, default: 0.6, min: 0, max: 2, step: 0.1, group: advanced}
+          - {name: max_tokens, type: integer, label: Max tokens, default: 1024, min: 16, max: 16384, step: 16, group: advanced}

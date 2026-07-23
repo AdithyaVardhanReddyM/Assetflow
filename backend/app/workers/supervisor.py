@@ -25,7 +25,10 @@ from app.workers.runner import execute_run
 
 log = get_logger(__name__)
 
-_IDLE_POLL_SECONDS = 2.0
+# How long a freshly queued run can sit before an idle worker notices it. The
+# claim is one SKIP LOCKED update — cheap enough to check every second, and a
+# second of queue latency is visible on a Run button in a way 2s clearly was.
+_IDLE_POLL_SECONDS = 1.0
 _HEARTBEAT_SECONDS = 30.0
 _SWEEP_SECONDS = 60.0
 

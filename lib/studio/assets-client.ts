@@ -34,13 +34,17 @@ function toPreview(payload: AssetPayload): AssetPreview {
   };
 }
 
+export type ApiAuth = { token: string | null; userId: string | null };
+
 /**
  * Both headers, always. When the backend runs with AUTH_DEV_BYPASS it reads
  * `X-Dev-User` and ignores the token; otherwise it verifies the token and
  * ignores the header. Sending both keeps the tenant id — which is also the B2
  * prefix — identical to the one the Next server actions derive, in either mode.
+ *
+ * Exported for the runs client, which authenticates the same way.
  */
-function authHeaders(token: string | null, userId: string | null): HeadersInit {
+export function authHeaders(token: string | null, userId: string | null): Record<string, string> {
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (userId) headers["X-Dev-User"] = userId;

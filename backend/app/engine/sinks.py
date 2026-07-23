@@ -16,6 +16,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import httpx
 
@@ -57,6 +59,9 @@ class MaterializedAsset:
     width: int | None = None
     height: int | None = None
     duration_sec: float | None = None
+    #: An LLM step's words, read off `Asset.metadata["text"]` — carried so the
+    #: canvas can show what was written without fetching and decoding the file.
+    text: str | None = None
 
 
 def build_sink(*, run_id: str, settings: Settings | None = None) -> Any | None:
@@ -83,6 +88,10 @@ def build_sink(*, run_id: str, settings: Settings | None = None) -> Any | None:
         # Bucket-wide config writes would be refused by a least-privilege,
         # bucket-scoped key. Lifecycle is declared in the B2 console instead.
         auto_lifecycle=False,
+        # No live bucket check per run — it costs ~1.5s of round trips before
+        # the first step can even start, and a bad credential still fails
+        # loudly (and marks the run) at transfer time.
+        preflight=False,
     )
     return ObjectStorageSink(
         backend,
@@ -90,9 +99,13 @@ def build_sink(*, run_id: str, settings: Settings | None = None) -> Any | None:
         # Explicit: the SDK default is CONTENT_ADDRESSABLE, but a run-grouped
         # layout keyed by tenant is what makes the bucket browsable per customer.
         key_strategy=KeyStrategy.HIERARCHICAL,
-        # Transfer during the run rather than only at write_run, so previews
-        # point at durable URLs sooner.
-        eager_transfer=True,
+        # Deliberately NOT eager: with eager transfer the user waits on the B2
+        # upload before `step.completed` even fires. Lazy transfer lets the
+        # completion event carry the provider's CDN URL — which the canvas can
+        # render immediately — and moves the upload + manifest to write_run,
+        # after the picture is already on screen. Durable URLs still land on
+        # the asset rows; only the *first look* stops paying for archival.
+        eager_transfer=False,
     )
 
 
@@ -115,7 +128,9 @@ def _modality_of(media_type: str | None) -> str:
     if not media_type:
         return "image"
     top = media_type.split("/")[0]
-    return {"video": "video", "audio": "audio", "image": "image"}.get(top, "image")
+    return {"video": "video", "audio": "audio", "image": "image", "text": "text"}.get(
+        top, "image"
+    )
 
 
 def _fetch(url: str, dest: Path) -> bool:
@@ -169,6 +184,7 @@ def collect_assets(result: Any, *, run_id: str, settings: Settings | None = None
         node_id = (getattr(step, "metadata", None) or {}).get("node_id")
         for asset in getattr(step, "assets", None) or []:
             media_type = getattr(asset, "media_type", None) or "application/octet-stream"
+            metadata = getattr(asset, "metadata", None) or {}
             record = MaterializedAsset(
                 node_id=node_id,
                 genblaze_asset_id=getattr(asset, "asset_id", None),
@@ -180,6 +196,7 @@ def collect_assets(result: Any, *, run_id: str, settings: Settings | None = None
                 width=getattr(asset, "width", None),
                 height=getattr(asset, "height", None),
                 duration_sec=getattr(asset, "duration", None),
+                text=metadata.get("text") if isinstance(metadata, dict) else None,
             )
 
             if local_mode:
@@ -203,6 +220,14 @@ def _materialize(
     dest = run_dir / f"{name}{_extension(record.media_type, record.url)}"
 
     fetched = record.url.startswith("http") and _fetch(record.url, dest)
+    if not fetched and record.url.startswith("file://"):
+        # A real local output (the OpenRouter adapter, or anything else that
+        # stages into temp). Copy the actual bytes — falling through to the
+        # sample would silently replace an LLM's words with placeholder text.
+        source = Path(url2pathname(urlparse(record.url).path))
+        if source.is_file():
+            shutil.copyfile(source, dest)
+            fetched = True
     if not fetched:
         sample = SAMPLES_DIR / _SAMPLE_BY_MODALITY.get(record.modality, "sample.png")
         if not sample.exists():

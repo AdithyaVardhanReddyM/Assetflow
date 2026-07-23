@@ -91,7 +91,16 @@ def create_app() -> FastAPI:
         # allowing them would force an origin echo we do not want.
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "Last-Event-ID"],
+        # X-Dev-User rides on every browser call next to the Bearer token (see
+        # authHeaders in lib/studio/assets-client.ts) — without it here, every
+        # preflight fails and the canvas reports the backend unreachable.
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "Last-Event-ID",
+            "X-Dev-User",
+        ],
         expose_headers=["X-Request-Id"],
     )
 

@@ -29,9 +29,16 @@ def get_engine() -> AsyncEngine:
         raise RuntimeError("DATABASE_URL is not set")
     return create_async_engine(
         settings.async_dsn(),
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=5,
+        # Recycle by age instead of pre-ping: with the database ~300ms away, a
+        # ping on every checkout taxed every request and worker operation with
+        # a full round trip before its first real query. Recycling well inside
+        # the pooler's idle timeout keeps connections fresh for free; a
+        # connection that still dies mid-life costs one failed request instead
+        # of 300ms on all of them.
+        pool_pre_ping=False,
+        pool_recycle=240,
+        pool_size=10,
+        max_overflow=10,
         connect_args={
             "statement_cache_size": 0,
             "prepared_statement_cache_size": 0,
