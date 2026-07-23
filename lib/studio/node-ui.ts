@@ -317,6 +317,17 @@ export function accentFor(key: string | undefined): Accent {
   return ROLE_ACCENT[key] ?? MODALITY_ACCENT[key] ?? MODALITY_ACCENT.any;
 }
 
+// --- canvas chrome --------------------------------------------------------
+
+/**
+ * The dot grid. Read by the canvas's React Flow `<Background>` and by the
+ * workflow home screen, which paints the same field in CSS rather than mount a
+ * flow it has no graph for — so the two routes share one grid instead of two
+ * that drift.
+ */
+export const DOT_GAP = 26;
+export const DOT_COLOR = "rgba(31,33,28,0.34)";
+
 // --- placement ------------------------------------------------------------
 
 /** Default footprint per kind, used to centre a node on the drop point. */

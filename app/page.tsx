@@ -19,12 +19,12 @@ export default function Home() {
         </Link>
         <nav className="flex w-full items-center gap-3 sm:w-auto">
           <Show when="signed-out">
-            <SignInButton mode="modal" forceRedirectUrl="/studio">
+            <SignInButton mode="modal" forceRedirectUrl="/workflow">
               <button className="h-10 flex-1 rounded-md border border-[#1f211c]/20 px-4 text-sm font-medium transition hover:border-[#1f211c]/45 hover:bg-white/70 sm:flex-none">
                 Sign in
               </button>
             </SignInButton>
-            <SignUpButton mode="modal" forceRedirectUrl="/studio">
+            <SignUpButton mode="modal" forceRedirectUrl="/workflow">
               <button className="h-10 flex-1 rounded-md bg-[#1f211c] px-4 text-sm font-medium text-white shadow-sm transition hover:bg-[#34362f] sm:flex-none">
                 Create account
               </button>
@@ -32,7 +32,7 @@ export default function Home() {
           </Show>
           <Show when="signed-in">
             <Link
-              href="/studio"
+              href="/workflow"
               className="inline-flex h-10 items-center rounded-md border border-[#1f211c]/20 px-4 text-sm font-medium transition hover:border-[#1f211c]/45 hover:bg-white/70"
             >
               Open studio
@@ -56,12 +56,12 @@ export default function Home() {
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Show when="signed-out">
-              <SignUpButton mode="modal" forceRedirectUrl="/studio">
+              <SignUpButton mode="modal" forceRedirectUrl="/workflow">
                 <button className="h-12 rounded-md bg-[#b24c2e] px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-[#963f26]">
                   Start workspace
                 </button>
               </SignUpButton>
-              <SignInButton mode="modal" forceRedirectUrl="/studio">
+              <SignInButton mode="modal" forceRedirectUrl="/workflow">
                 <button className="h-12 rounded-md border border-[#1f211c]/20 bg-white/60 px-6 text-sm font-semibold transition hover:border-[#1f211c]/45 hover:bg-white">
                   Sign in
                 </button>
@@ -69,7 +69,7 @@ export default function Home() {
             </Show>
             <Show when="signed-in">
               <Link
-                href="/studio"
+                href="/workflow"
                 className="inline-flex h-12 items-center justify-center rounded-md bg-[#b24c2e] px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-[#963f26]"
               >
                 Open studio

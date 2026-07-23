@@ -39,6 +39,8 @@ import {
 } from "@/lib/studio/graph";
 import {
   type CreateToolId,
+  DOT_COLOR,
+  DOT_GAP,
   NODE_BLUEPRINTS,
   NODE_SIZE,
   avoidOverlap,
@@ -76,8 +78,11 @@ export type CanvasApi = {
 export type CanvasProps = {
   catalog: Catalog;
   initialGraph: Graph;
-  initialAssets: Record<string, AssetPreview>;
-  /** Reset key — remounting on workflow change avoids stale graph state. */
+  /**
+   * Upload previews, merged as they arrive: the graph stores only `asset_id`,
+   * and the presigned URLs behind them are minted after mount.
+   */
+  assets: Record<string, AssetPreview>;
   apiRef: React.RefObject<CanvasApi | null>;
   onGraphChange: (graph: Graph) => void;
   onZoomChange: (zoom: number) => void;
@@ -85,23 +90,17 @@ export type CanvasProps = {
   onUpload: (file: File) => Promise<AssetPreview | null>;
   onRun: (nodeId: string, scope: RunScope) => void;
   panMode: boolean;
+  /** Frame the whole document on open, for a canvas that already has one. */
+  fitOnMount: boolean;
 };
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 
-/**
- * The dot grid, drawn once for both studio modes. Home fades the viewport
- * rather than the whole canvas, so this survives the morph at full strength
- * and reads identically either side of it.
- */
-export const DOT_GAP = 26;
-export const DOT_COLOR = "rgba(31,33,28,0.34)";
-
 function CanvasInner({
   catalog,
   initialGraph,
-  initialAssets,
+  assets,
   apiRef,
   onGraphChange,
   onZoomChange,
@@ -109,11 +108,22 @@ function CanvasInner({
   onUpload,
   onRun,
   panMode,
+  fitOnMount,
 }: CanvasProps) {
   const seed = React.useMemo(() => toFlow(initialGraph), [initialGraph]);
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>(seed.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<StudioEdge>(seed.edges);
-  const [assets, setAssets] = React.useState(initialAssets);
+  /**
+   * Previews for files uploaded from inside the canvas, merged over the ones
+   * the shell resolved. Kept apart rather than folded into a single store so
+   * the prop can keep arriving — presigned URLs are minted after mount — with
+   * nothing to synchronize.
+   */
+  const [uploaded, setUploaded] = React.useState<Record<string, AssetPreview>>({});
+  const assetMap = React.useMemo(
+    () => ({ ...assets, ...uploaded }),
+    [assets, uploaded],
+  );
   const rf = useReactFlow();
 
   const container = React.useRef<HTMLDivElement>(null);
@@ -128,12 +138,12 @@ function CanvasInner({
       current.map((n) => {
         if (n.data.kind !== "input.upload") return n;
         const assetId = n.data.wire.asset_id;
-        const asset = typeof assetId === "string" ? assets[assetId] : undefined;
+        const asset = typeof assetId === "string" ? assetMap[assetId] : undefined;
         if (n.data.asset === asset) return n;
         return { ...n, data: { ...n.data, asset } };
       }),
     );
-  }, [assets, setNodes]);
+  }, [assetMap, setNodes]);
 
   // Report the document upward on every change. React Flow mutates position
   // during a drag, so this fires often — the shell debounces before saving.
@@ -321,7 +331,7 @@ function CanvasInner({
           };
         }),
       );
-      if (asset) setAssets((current) => ({ ...current, [asset.id]: asset }));
+      if (asset) setUploaded((current) => ({ ...current, [asset.id]: asset }));
       onInteract();
     },
     [onUpload, setNodes, onInteract],
@@ -499,7 +509,7 @@ function CanvasInner({
   const studio = React.useMemo(
     () => ({
       catalog,
-      assets,
+      assets: assetMap,
       updateNode,
       disconnectPort,
       deleteNode,
@@ -509,7 +519,7 @@ function CanvasInner({
     }),
     [
       catalog,
-      assets,
+      assetMap,
       updateNode,
       disconnectPort,
       deleteNode,
@@ -550,6 +560,11 @@ function CanvasInner({
           proOptions={{ hideAttribution: true }}
           nodesDraggable={!panMode}
           connectionRadius={30}
+          // A document arrives from its own URL now, so nodes saved anywhere
+          // in flow space have to be found for the user rather than left off
+          // the edge of a fixed viewport. An empty canvas keeps the origin.
+          fitView={fitOnMount}
+          fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
           defaultViewport={{ x: 0, y: 0, zoom: 1 }}
           className={cn(panMode && "cursor-grab active:cursor-grabbing")}
         >

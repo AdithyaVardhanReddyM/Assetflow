@@ -13,28 +13,30 @@
  * trusting an id from the client.
  */
 
-import { auth } from "@clerk/nextjs/server";
 import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
 import { workflows } from "@/db/schema";
-import { type Graph, parseGraph } from "@/lib/studio/graph";
+import { fetchCatalog, findModel } from "@/lib/studio/catalog";
+import {
+  type Graph,
+  type GraphNode,
+  EMPTY_GRAPH,
+  newId,
+  parseGraph,
+} from "@/lib/studio/graph";
+import {
+  NODE_BLUEPRINTS,
+  NODE_SIZE,
+  blueprintData,
+  isCreateTool,
+} from "@/lib/studio/node-ui";
+import { requireTenant } from "@/lib/studio/tenant";
 
 export type ActionResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
 const MAX_NAME = 120;
-
-/**
- * Mirrors `tenant_for()` in `backend/app/auth/clerk.py` — one tenant per org,
- * else one per user. The two must agree exactly: it is the key both processes
- * scope every query by, and it is also the B2 object prefix.
- */
-async function requireTenant() {
-  const { userId, orgId } = await auth();
-  if (!userId) return null;
-  return { userId, tenantId: orgId ?? `user_${userId}` };
-}
 
 function cleanName(raw: unknown): string {
   const name = typeof raw === "string" ? raw.trim() : "";
@@ -73,13 +75,107 @@ export async function createWorkflow(input: {
         updatedAt: workflows.updatedAt,
       });
 
-    revalidatePath("/studio");
+    revalidatePath("/workflow");
     return {
       ok: true,
       data: { id: row.id, name: row.name, updatedAt: row.updatedAt.toISOString() },
     };
   } catch {
     return { ok: false, error: "Could not create the workflow." };
+  }
+}
+
+/**
+ * What the home screen asks for when it opens a canvas: a row to navigate to,
+ * optionally with the node the user's click already implied.
+ *
+ * The seed node is built here rather than carried to `/workflow/[id]` as
+ * client state, because the row is the handoff — the canvas route loads the
+ * document it finds and needs to know nothing about how it got there. A
+ * reload, a shared link and a back-button return all land on the same canvas.
+ */
+export type WorkflowSeed = {
+  /** A toolbar tool, or the prompt bar's modality. Anything else seeds nothing. */
+  tool?: string;
+  prompt?: string;
+  /** The model the prompt bar settled on; re-resolved against the catalog here. */
+  model?: { provider: string; id: string };
+  params?: Record<string, unknown>;
+  /** Falls back to the opening words of the prompt, then "Untitled workflow". */
+  name?: string;
+};
+
+/** First few words of the prompt, so a canvas born from one isn't "Untitled". */
+function nameFromPrompt(prompt: string | undefined): string | undefined {
+  const text = prompt?.trim().replace(/\s+/g, " ");
+  if (!text) return undefined;
+  const opening = text.split(" ").slice(0, 7).join(" ");
+  return opening.length > 60 ? `${opening.slice(0, 59)}…` : opening;
+}
+
+async function seedGraph(seed: WorkflowSeed): Promise<Graph> {
+  if (!seed.tool || !isCreateTool(seed.tool)) return EMPTY_GRAPH;
+
+  const blueprint = NODE_BLUEPRINTS[seed.tool];
+  const catalog = await fetchCatalog();
+  const size = NODE_SIZE[blueprint.kind];
+
+  const node: GraphNode = {
+    id: newId(),
+    kind: blueprint.kind,
+    // Centred on the origin: the canvas fits the view to the document on open,
+    // so what matters is that the node is *somewhere*, not where.
+    position: { x: -Math.round(size.width / 2), y: -Math.round(size.height / 2) },
+    data: blueprintData(catalog, blueprint, {
+      prompt: seed.prompt?.trim() || undefined,
+      // A model id off the wire is untrusted; only one the catalog actually
+      // has may seed a node, and `blueprintData` picks the default otherwise.
+      model: seed.model
+        ? findModel(catalog, seed.model.provider, seed.model.id)
+        : undefined,
+      params: seed.params,
+    }),
+  };
+
+  return { ...EMPTY_GRAPH, nodes: [node] };
+}
+
+/**
+ * Creates a canvas and reports where it lives, for the home screen to navigate
+ * to. Every way into the studio — a prompt, a toolbar tool, a template, "start
+ * from blank" — comes through here, so every canvas has a URL from its first
+ * frame.
+ */
+export async function startWorkflow(
+  seed: WorkflowSeed = {},
+): Promise<ActionResult<{ id: string }>> {
+  const who = await requireTenant();
+  if (!who) return { ok: false, error: "You are not signed in." };
+
+  let graph: Graph;
+  try {
+    graph = await seedGraph(seed);
+  } catch {
+    // The catalog lives behind FastAPI; an unreachable one is not a reason to
+    // refuse the canvas, only the node it would have been seeded with.
+    graph = EMPTY_GRAPH;
+  }
+
+  try {
+    const [row] = await db
+      .insert(workflows)
+      .values({
+        tenantId: who.tenantId,
+        ownerUserId: who.userId,
+        name: cleanName(seed.name ?? nameFromPrompt(seed.prompt)),
+        graph,
+      })
+      .returning({ id: workflows.id });
+
+    revalidatePath("/workflow");
+    return { ok: true, data: { id: row.id } };
+  } catch {
+    return { ok: false, error: "Could not start a new workflow." };
   }
 }
 
@@ -146,34 +242,9 @@ export async function deleteWorkflow(id: string): Promise<ActionResult<null>> {
       .returning({ id: workflows.id });
 
     if (!rows.length) return { ok: false, error: "That workflow was not found." };
-    revalidatePath("/studio");
+    revalidatePath("/workflow");
     return { ok: true, data: null };
   } catch {
     return { ok: false, error: "Could not delete the workflow." };
-  }
-}
-
-/** Loads one canvas, tenant-scoped. Used when opening a card from the home screen. */
-export async function loadWorkflow(
-  id: string,
-): Promise<ActionResult<{ id: string; name: string; graph: Graph }>> {
-  const who = await requireTenant();
-  if (!who) return { ok: false, error: "You are not signed in." };
-
-  try {
-    const row = await db.query.workflows.findFirst({
-      where: (w, { and: A, eq: E, isNull: N }) =>
-        A(E(w.id, id), E(w.tenantId, who.tenantId), N(w.deletedAt)),
-      columns: { id: true, name: true, graph: true },
-    });
-    if (!row) return { ok: false, error: "That workflow was not found." };
-
-    const graph = parseGraph(row.graph);
-    if (!graph) {
-      return { ok: false, error: "This workflow was saved in a format we can't open." };
-    }
-    return { ok: true, data: { id: row.id, name: row.name, graph } };
-  } catch {
-    return { ok: false, error: "Could not open the workflow." };
   }
 }

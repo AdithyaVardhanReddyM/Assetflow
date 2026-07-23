@@ -363,21 +363,22 @@ body {
     );
 }
 
-/* The studio morph fades the graph, not the whole canvas.
-
-   React Flow renders <Background> as a *sibling* of .react-flow__viewport, so
-   dimming the canvas wrapper dims the dot grid along with the nodes — and the
-   dots then visibly brighten again on the way into canvas mode. Fading only the
-   viewport leaves the grid at full strength either side of the morph.
+/* The graph fades in under its own chrome on open, rather than snapping in at
+   full strength the moment React Flow has measured and framed it.
 
    Written as plain CSS rather than a Tailwind arbitrary variant because `_` is
-   Tailwind's escape for a space: `[&_.react-flow__viewport]:opacity-35`
+   Tailwind's escape for a space: `[&_.react-flow__viewport]:opacity-100`
    compiles to `.react-flow viewport`, which matches nothing. */
 
 .studio-canvas .react-flow__viewport {
-  transition: opacity 700ms cubic-bezier(0.32, 0.72, 0, 1);
+  animation: studio-graph-in 500ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-[data-studio-ghost="true"] .studio-canvas .react-flow__viewport {
-  opacity: 0.35;
+@keyframes studio-graph-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
