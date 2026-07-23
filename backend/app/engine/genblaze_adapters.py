@@ -87,6 +87,15 @@ _REPLICATE_IMAGE_SLOTS: dict[str, str] = {
 }
 
 
+# Kontext edits exactly one image: its schema declares a single `input_image`
+# string, not an array. Without a spec the stock fallback would hand a wired
+# reference to `image` — a key the model never declares, and Replicate 422s
+# unknown input keys.
+_REPLICATE_IMAGE_SINGLE_SLOTS: dict[str, str] = {
+    "black-forest-labs/flux-kontext-pro": "input_image",
+}
+
+
 # GPT Image 2 has no resolution parameter of its own — its `aspect_ratio` enum
 # mixes ratio words with exact pixel sizes ("2048x1152", "3840x2160", ...).
 # The canvas offers ratio + resolution as two axes like every other image
@@ -125,7 +134,11 @@ def gpt_image_2_size_transform(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def replicate_image_specs() -> list[ModelSpec]:
-    """Specs routing every incoming image into the slug's array parameter."""
+    """Specs routing every incoming image into the slug's own reference key.
+
+    Array slots for the lab flagships that take several references, a single
+    slot for Kontext, which takes exactly one.
+    """
     return [
         ModelSpec(
             model_id=slug,
@@ -136,6 +149,13 @@ def replicate_image_specs() -> list[ModelSpec]:
             ),
         )
         for slug, slot in _REPLICATE_IMAGE_SLOTS.items()
+    ] + [
+        ModelSpec(
+            model_id=slug,
+            modality=Modality.IMAGE,
+            input_mapping=route_images(slots=(slot,)),
+        )
+        for slug, slot in _REPLICATE_IMAGE_SINGLE_SLOTS.items()
     ]
 
 

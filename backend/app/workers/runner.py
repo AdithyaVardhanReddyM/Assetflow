@@ -649,6 +649,8 @@ async def _finish(
                     "modality": r.modality,
                     "sha256": r.sha256,
                     "size_bytes": r.size_bytes,
+                    "width": r.width,
+                    "height": r.height,
                     "text": (r.asset_metadata or {}).get("text"),
                     # Post-run URLs are durable, unlike the mid-run previews.
                     "ephemeral": False,

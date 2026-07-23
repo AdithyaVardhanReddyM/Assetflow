@@ -110,13 +110,19 @@ async def get_workflow(
     return _serialize(await _get_owned(session, workflow_id, user))
 
 
+# Generations kept per node in the results payload. Newer ones win; anything
+# older is still in the assets table, just not in the canvas carousel.
+RESULTS_PER_NODE = 8
+
+
 @router.get("/{workflow_id}/results")
 async def workflow_results(
     workflow_id: uuid.UUID, session: Session, user: CurrentUser
 ) -> dict[str, Any]:
-    """The latest generated asset per canvas node, across all of this
-    workflow's runs. This is what re-hydrates result previews when a canvas is
-    reopened — the graph itself stores no run output."""
+    """Recent generated assets per canvas node (newest first), across all of
+    this workflow's runs. This is what re-hydrates result previews — and the
+    per-node generation carousel — when a canvas is reopened; the graph itself
+    stores no run output."""
     from app.engine.manifests import preview_url
 
     await _get_owned(session, workflow_id, user)
@@ -131,12 +137,17 @@ async def workflow_results(
             Asset.node_id.is_not(None),
         )
         .order_by(Asset.node_id, Asset.created_at.desc())
-        # Postgres DISTINCT ON: the newest row per node wins.
-        .distinct(Asset.node_id)
     )
     rows = (await session.execute(stmt)).scalars()
-    return {
-        "results": [
+
+    per_node: dict[str, int] = {}
+    results: list[dict[str, Any]] = []
+    for a in rows:
+        seen = per_node.get(a.node_id, 0)
+        if seen >= RESULTS_PER_NODE:
+            continue
+        per_node[a.node_id] = seen + 1
+        results.append(
             {
                 "node_id": a.node_id,
                 "asset_id": str(a.id),
@@ -146,10 +157,14 @@ async def workflow_results(
                 "media_type": a.media_type,
                 "modality": a.modality,
                 "text": (a.asset_metadata or {}).get("text"),
+                # The card takes the generation's shape, so the canvas needs
+                # the real pixel dimensions, not the requested ratio param.
+                "width": a.width,
+                "height": a.height,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
             }
-            for a in rows
-        ]
-    }
+        )
+    return {"results": results}
 
 
 @router.patch("/{workflow_id}")

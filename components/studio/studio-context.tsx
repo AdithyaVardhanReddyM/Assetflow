@@ -11,7 +11,7 @@
 import * as React from "react";
 
 import type { Catalog } from "@/lib/studio/catalog";
-import type { AssetPreview } from "@/lib/studio/graph";
+import type { AssetPreview, NodeGeneration } from "@/lib/studio/graph";
 
 export type RunScope = "node" | "chain";
 
@@ -35,8 +35,11 @@ export type StudioContextValue = {
   pickFileFor: (id: string) => void;
   /** "Run" vs "Run from here" — the latter walks the connected chain downstream. */
   runFrom: (id: string, scope: RunScope) => void;
-  /** Save the node's generated result to disk. */
-  downloadNode: (id: string) => void;
+  /**
+   * Save a node's generated result to disk. Without `generation` this is the
+   * node's latest result; with one (a carousel pick) it saves that take.
+   */
+  downloadNode: (id: string, generation?: NodeGeneration) => void;
 };
 
 const StudioContext = React.createContext<StudioContextValue | null>(null);

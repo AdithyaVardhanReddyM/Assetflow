@@ -67,9 +67,16 @@ export function isRunBusy(run: NodeRunState | undefined): boolean {
 export function RunWell({
   run,
   modality,
+  onMediaSize,
 }: {
   run: NodeRunState | undefined;
   modality: string;
+  /**
+   * Reports the displayed media's natural pixel size once it loads — the
+   * fallback that lets the card take a result's true shape when the asset row
+   * never recorded dimensions.
+   */
+  onMediaSize?: (width: number, height: number) => void;
 }): React.ReactElement | null {
   if (!run) return null;
 
@@ -121,6 +128,10 @@ export function RunWell({
           controls
           playsInline
           preload="metadata"
+          onLoadedMetadata={(e) => {
+            const el = e.currentTarget;
+            if (el.videoWidth && el.videoHeight) onMediaSize?.(el.videoWidth, el.videoHeight);
+          }}
           className="nodrag block h-full w-full object-contain"
         />
       );
@@ -140,6 +151,10 @@ export function RunWell({
         key={output.url}
         src={output.url}
         alt="Generated result"
+        onLoad={(e) => {
+          const el = e.currentTarget;
+          if (el.naturalWidth && el.naturalHeight) onMediaSize?.(el.naturalWidth, el.naturalHeight);
+        }}
         className="block h-full w-full object-cover"
       />
     );

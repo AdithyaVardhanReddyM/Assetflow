@@ -373,6 +373,57 @@ providers:
             group: advanced
             options: [{value: webp}, {value: png}, {value: jpeg}]
 
+      # Kontext is an image editor first: with a reference wired it rewrites
+      # that image, with nothing wired it reads as plain text-to-image. It
+      # outputs a fixed ~1MP for whichever ratio is picked — there is no
+      # resolution knob to offer. Lives here rather than on GMI Cloud, whose
+      # copy of the model 500s on every submit (see the note in that block).
+      - id: black-forest-labs/flux-kontext-pro
+        label: FLUX.1 Kontext Pro
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        expected_duration_sec: 10
+        # Carried over from the GMI listing — Replicate publishes no price on
+        # its API, so this stays an estimate.
+        est_cost_usd: 0.05
+        output_media_type: image/jpeg
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            # Upstream defaults to match_input_image; the canvas seeds a
+            # concrete ratio so the card previews its shape before any
+            # reference is wired, same as Nano Banana Pro.
+            default: "1:1"
+            options:
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+              - {value: "3:2"}
+              - {value: "2:3"}
+              - {value: "4:5"}
+              - {value: "5:4"}
+              - {value: "21:9"}
+              - {value: "9:21"}
+              - {value: "2:1"}
+              - {value: "1:2"}
+              - {value: match_input_image, label: Match input}
+          - {name: prompt_upsampling, type: boolean, label: Enhance prompt, default: false, group: advanced}
+          - name: output_format
+            type: enum
+            label: Format
+            default: jpg
+            group: advanced
+            options: [{value: jpg}, {value: png}]
+          # BFL's schema admits 0-6, but 2 is the ceiling once an input image
+          # is in play — and this node draws a reference port, so a 6 set
+          # while unwired would 422 the moment someone connected an image.
+          - {name: safety_tolerance, type: integer, label: Safety tolerance, default: 2, min: 0, max: 2, step: 1, group: advanced}
+
       # Sora 2 pairs synced audio with the clip. Duration is a fixed enum
       # upstream (4/8/12s); `aspect_ratio` travels as the canvas's ratio pair
       # and the factory folds it into Sora's landscape/portrait vocabulary.
@@ -1042,41 +1093,14 @@ providers:
             options: [{value: jpeg}, {value: png}]
           - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
 
-      # Kontext outputs a fixed ~1MP for whichever ratio is picked — there is
-      # genuinely no resolution knob, so none is offered. GMI's endpoint also
-      # documents no input-image param for this model (unlike BFL's own API),
-      # so it lists no reference port rather than drawing a handle whose
-      # payload would be dropped.
-      - id: flux-kontext-pro
-        label: FLUX.1 Kontext Pro
-        modality: image
-        adapter: app.engine.genblaze_adapters:gmicloud_image_provider
-        expected_duration_sec: 10
-        est_cost_usd: 0.05
-        output_media_type: image/jpeg
-        params:
-          - name: aspect_ratio
-            type: enum
-            label: Aspect ratio
-            default: "1:1"
-            # GMI accepts any ratio between 3:7 and 7:3; these are the named
-            # stops it documents, plus 3:4 inside that range.
-            options:
-              - {value: "1:1"}
-              - {value: "16:9"}
-              - {value: "9:16"}
-              - {value: "4:3"}
-              - {value: "3:4"}
-              - {value: "7:3"}
-              - {value: "3:7"}
-          - {name: prompt_upsampling, type: boolean, label: Enhance prompt, default: false, group: advanced}
-          - name: output_format
-            type: enum
-            label: Format
-            default: jpeg
-            group: advanced
-            options: [{value: jpeg}, {value: png}]
-          - {name: safety_tolerance, type: integer, label: Safety tolerance, default: 2, min: 0, max: 6, step: 1, group: advanced}
+      # FLUX.1 Kontext Pro is deliberately *not* here. GMI's `flux-kontext-pro`
+      # slug is live — an empty payload comes back with their own parameter
+      # validation error — but every real submit 500s with
+      # `API request failed with status 403`, including a bare {"prompt": ...}.
+      # The 403 is GMI's own upstream credential failing, not ours: Seedream
+      # generates fine on the same key in the same session. The model lives
+      # under Replicate instead, where it also gains the reference-image port
+      # GMI's endpoint never documented. Re-probe before restoring it.
 
   - key: decart
     label: Decart

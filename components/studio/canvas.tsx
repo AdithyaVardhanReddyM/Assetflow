@@ -30,6 +30,7 @@ import { findModel, visiblePorts } from "@/lib/studio/catalog";
 import {
   type AssetPreview,
   type Graph,
+  type NodeGeneration,
   type NodeRunState,
   type StudioEdge,
   type StudioNode,
@@ -91,14 +92,16 @@ export type CanvasProps = {
   assets: Record<string, AssetPreview>;
   /** Per-node state of the run in flight, merged onto nodes as it changes. */
   runStates: Record<string, NodeRunState>;
+  /** Recent generations per node (newest first) — the carousel entries. */
+  histories: Record<string, NodeGeneration[]>;
   apiRef: React.RefObject<CanvasApi | null>;
   onGraphChange: (graph: Graph) => void;
   onZoomChange: (zoom: number) => void;
   onInteract: () => void;
   onUpload: (file: File) => Promise<AssetPreview | null>;
   onRun: (nodeId: string, scope: RunScope) => void;
-  /** Save a node's generated result to disk. */
-  onDownload: (nodeId: string) => void;
+  /** Save a node's generated result (a specific carousel take, or latest) to disk. */
+  onDownload: (nodeId: string, generation?: NodeGeneration) => void;
   panMode: boolean;
   /** Frame the whole document on open, for a canvas that already has one. */
   fitOnMount: boolean;
@@ -115,6 +118,7 @@ function CanvasInner({
   initialGraph,
   assets,
   runStates,
+  histories,
   apiRef,
   onGraphChange,
   onZoomChange,
@@ -204,6 +208,18 @@ function CanvasInner({
       }),
     );
   }, [runStates, setNodes]);
+
+  // Generation history rides in the same way — nodes read `data.history` to
+  // draw the carousel of earlier takes.
+  React.useEffect(() => {
+    setNodes((current) =>
+      current.map((n) => {
+        const history = histories[n.id];
+        if (n.data.history === history) return n;
+        return { ...n, data: { ...n.data, history } };
+      }),
+    );
+  }, [histories, setNodes]);
 
   // Report the document upward on every change. React Flow mutates position
   // during a drag, so this fires often — the shell debounces before saving.

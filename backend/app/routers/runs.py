@@ -65,6 +65,8 @@ def _serialize_asset(asset: Asset) -> dict[str, Any]:
         "modality": asset.modality,
         "sha256": asset.sha256,
         "size_bytes": asset.size_bytes,
+        "width": asset.width,
+        "height": asset.height,
     }
 
 

@@ -12,6 +12,7 @@ import * as React from "react";
 import {
   type NodeProps,
   useNodeConnections,
+  useNodesData,
   useUpdateNodeInternals,
 } from "@xyflow/react";
 import {
@@ -33,7 +34,13 @@ import {
   statusReason,
   visiblePorts,
 } from "@/lib/studio/catalog";
-import type { GenerateNodeData, StudioNode } from "@/lib/studio/graph";
+import type {
+  FlowNodeData,
+  GenerateNodeData,
+  NodeGeneration,
+  NodeRunState,
+  StudioNode,
+} from "@/lib/studio/graph";
 import { accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
@@ -150,6 +157,87 @@ function nodeShape(ratio: string, modality: string): { width: number; well: numb
   return { width, well: Math.round(width / r) };
 }
 
+/**
+ * The strip of this node's recent takes, under the prompt box. Newest first;
+ * the active one is drawn larger, and picking one swaps it into the well so
+ * two generations can be compared without losing either. Media only — an
+ * LLM's takes are paragraphs, and a filmstrip of paragraphs reads as noise.
+ */
+function GenerationCarousel({
+  history,
+  activeId,
+  onSelect,
+}: {
+  history: NodeGeneration[];
+  /** null selects the newest — the state every fresh generation resets to. */
+  activeId: string | null;
+  onSelect: (assetId: string | null) => void;
+}) {
+  return (
+    <div className="nodrag nowheel thin-scrollbar mt-1.5 flex items-center justify-center gap-1.5 overflow-x-auto px-1 py-1">
+      {history.map((gen, i) => {
+        const active = activeId ? gen.assetId === activeId : i === 0;
+        const isVideo = gen.mediaType?.startsWith("video/");
+        const isAudio = gen.mediaType?.startsWith("audio/");
+        return (
+          <button
+            key={gen.assetId ?? gen.url ?? i}
+            type="button"
+            aria-label={`Generation ${history.length - i} of ${history.length}`}
+            aria-current={active || undefined}
+            onClick={() => onSelect(i === 0 ? null : gen.assetId)}
+            className={cn(
+              "relative shrink-0 overflow-hidden bg-[#faf8f4] transition-all duration-150",
+              active
+                ? "size-14 border-2 border-[#1f211c]"
+                : "size-10 border border-[#1f211c]/15 opacity-75 hover:opacity-100",
+            )}
+          >
+            {isAudio || !gen.url ? (
+              <span className="grid h-full w-full place-items-center text-[#a09a88]">
+                <MusicGenIcon className="size-4" />
+              </span>
+            ) : isVideo ? (
+              // First frame as the thumbnail; playback stays in the well.
+              <video
+                src={gen.url}
+                muted
+                playsInline
+                preload="metadata"
+                className="pointer-events-none h-full w-full object-cover"
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={gen.url}
+                alt=""
+                className="pointer-events-none h-full w-full object-cover"
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The words a prompt-driven node will actually run with: a Text node's literal,
+ * or an LLM node's rewrite once it has produced one. From here the two are the
+ * same thing — text arriving from upstream — so both read out identically.
+ *
+ * Empty is a real state, not a failure: an LLM that has not run yet has nothing
+ * to show, and neither has an empty Text node.
+ */
+function drivingText(source: { data: FlowNodeData } | undefined): string {
+  if (!source) return "";
+  if (source.data.kind === "input.text") {
+    const text = source.data.wire.text;
+    return typeof text === "string" ? text.trim() : "";
+  }
+  return source.data.run?.output?.text?.trim() ?? "";
+}
+
 export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const { catalog, updateNode, deleteNode, duplicateNode, runFrom, downloadNode } =
     useStudio();
@@ -174,6 +262,20 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     [incoming],
   );
 
+  // Whatever is wired into `prompt`, so the box can read out its text rather
+  // than only announce that it exists. At most one edge lands here — a
+  // single-connection port replaces rather than accumulates — so the first
+  // connection is the one driving this node.
+  const promptSourceIds = React.useMemo(
+    () =>
+      incoming
+        .filter((c) => c.targetHandle === "prompt")
+        .slice(0, 1)
+        .map((c) => c.source),
+    [incoming],
+  );
+  const promptSource = useNodesData<StudioNode>(promptSourceIds)[0];
+
   // Changing the model changes which handles exist; React Flow caches handle
   // geometry per node and would keep drawing edges to the old positions.
   const updateNodeInternals = useUpdateNodeInternals();
@@ -187,7 +289,71 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const accent = accentFor(role || modality);
   const copy = ROLE_COPY[role];
   const promptDriven = connected.has("prompt");
-  const ratio = ratioOf(wire.params ?? {}, model);
+  const drivenText = promptDriven ? drivingText(promptSource) : "";
+
+  // --- generation history -------------------------------------------------
+
+  const history = React.useMemo(
+    () => (modality === "text" ? [] : (data.history ?? [])),
+    [modality, data.history],
+  );
+  /** null shows the newest take; an id pins an earlier one for comparison. */
+  const [pinnedId, setPinnedId] = React.useState<string | null>(null);
+  // A fresh generation always takes the stage: the pin resets to newest.
+  const newestId = history[0]?.assetId ?? null;
+  React.useEffect(() => {
+    setPinnedId(null);
+  }, [newestId]);
+
+  // While a run is in flight or has just failed, the live state owns the well;
+  // otherwise the pinned take (or the newest) is what's on show.
+  const liveOwnsWell =
+    isRunBusy(data.run) ||
+    data.run?.status === "failed" ||
+    data.run?.status === "skipped";
+  const displayed = liveOwnsWell
+    ? undefined
+    : ((pinnedId ? history.find((g) => g.assetId === pinnedId) : undefined) ??
+      history[0]);
+  const wellRun: NodeRunState | undefined = displayed
+    ? {
+        status: "succeeded",
+        progress: 1,
+        output: {
+          url: displayed.url,
+          mediaType: displayed.mediaType,
+          text: displayed.text ?? null,
+        },
+      }
+    : data.run;
+
+  // The displayed take's real dimensions beat the requested ratio param, so
+  // the card reshapes when the carousel switches to a differently-framed take
+  // — and `nodeShape` already re-measures handles when the geometry moves.
+  // Asset rows don't always record dimensions (a provider may not report
+  // them), so the well also measures the media as it loads and that fills in.
+  const [measured, setMeasured] = React.useState<
+    Record<string, { w: number; h: number }>
+  >({});
+  const displayedKey = displayed?.assetId ?? displayed?.url ?? null;
+  const onMediaSize = React.useCallback(
+    (w: number, h: number) => {
+      if (!displayedKey) return;
+      setMeasured((current) =>
+        current[displayedKey]?.w === w && current[displayedKey]?.h === h
+          ? current
+          : { ...current, [displayedKey]: { w, h } },
+      );
+    },
+    [displayedKey],
+  );
+  const dims =
+    displayed?.width && displayed?.height
+      ? { w: displayed.width, h: displayed.height }
+      : displayedKey
+        ? measured[displayedKey]
+        : undefined;
+  const ratio = dims ? `${dims.w}:${dims.h}` : ratioOf(wire.params ?? {}, model);
   const shape = nodeShape(ratio, modality);
 
   // A model driven entirely by its ports has nothing to describe, so it shows
@@ -279,8 +445,9 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           <BarButton
             label="Download"
             icon={DownloadSimpleIcon}
-            disabled={!data.run?.output}
-            onClick={() => downloadNode(id)}
+            disabled={!data.run?.output && !history.length}
+            // Saves what the well is showing — a pinned earlier take included.
+            onClick={() => downloadNode(id, displayed ?? undefined)}
           />
           <BarButton label="Delete" icon={TrashIcon} danger onClick={() => deleteNode(id)} />
           <MoreMenu>
@@ -333,8 +500,8 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
             style={{ height: shape.well }}
           >
-            <RunWell run={data.run} modality={modality} />
-            {data.run ? null : (
+            <RunWell run={wellRun} modality={modality} onMediaSize={onMediaSize} />
+            {wellRun ? null : (
               <div className="flex flex-col items-center gap-2.5 px-3 text-center">
                 <span
                   className="grid size-10 place-items-center"
@@ -376,25 +543,35 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           />
         ) : null}
 
-        {takesPrompt ? (
-        <textarea
-          rows={2}
-          value={promptDriven ? "" : (wire.prompt ?? "")}
-          disabled={promptDriven}
-          onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
-          placeholder={
-            promptDriven
-              ? // Either a Text node's literal or an LLM node's rewrite — from
-                // here they are the same thing: this box no longer decides.
-                "Driven by the connected node"
-              : (copy?.placeholder ?? `Describe the ${kindLabel.toLowerCase()}…`)
-          }
-          // `nodrag` keeps a click from dragging the node; `nowheel` keeps the
-          // canvas from swallowing the wheel to pan with (`panOnScroll`), which
-          // otherwise leaves a long prompt scrollable only by its scrollbar.
-          className="nodrag nowheel thin-scrollbar max-h-28 min-h-7 w-full resize-none overflow-y-auto bg-transparent py-0.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88] disabled:text-[#a09a88]"
-        />
-        ) : null}
+        {!takesPrompt ? null : promptDriven ? (
+          // Connected, so this row stops being an input and becomes a readout
+          // of the upstream text — held in a chip to say the words are the
+          // connection's, not something typed here. Until there are any (an
+          // empty Text node, an LLM that has not run), the chip states the fact
+          // of the connection instead.
+          <div className="flex min-h-7 items-center py-0.5">
+            <span
+              title={drivenText || undefined}
+              className={cn(
+                "line-clamp-2 max-w-full bg-[#1f211c]/6 px-2 py-1 text-[13px] leading-5 break-words",
+                drivenText ? "text-[#4c4a41]" : "text-[#8a8271]",
+              )}
+            >
+              {drivenText || "Prompt connected"}
+            </span>
+          </div>
+        ) : (
+          <textarea
+            rows={2}
+            value={wire.prompt ?? ""}
+            onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
+            placeholder={copy?.placeholder ?? `Describe the ${kindLabel.toLowerCase()}…`}
+            // `nodrag` keeps a click from dragging the node; `nowheel` keeps the
+            // canvas from swallowing the wheel to pan with (`panOnScroll`), which
+            // otherwise leaves a long prompt scrollable only by its scrollbar.
+            className="nodrag nowheel thin-scrollbar max-h-28 min-h-7 w-full resize-none overflow-y-auto bg-transparent py-0.5 text-[13px] leading-5 text-[#1f211c] outline-none placeholder:text-[#a09a88]"
+          />
+        )}
 
         <div className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-[#8a8271]">
@@ -472,6 +649,16 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           </div>
         </div>
       </NodeCard>
+
+      {/* Earlier takes, newest first. Appears once there is something to
+          compare against — a single generation is already on the well. */}
+      {history.length > 1 ? (
+        <GenerationCarousel
+          history={history}
+          activeId={pinnedId}
+          onSelect={setPinnedId}
+        />
+      ) : null}
 
       {unavailable ? (
         <p className="mt-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[#a9743f]">

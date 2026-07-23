@@ -17,7 +17,7 @@
 
 import { API_URL } from "./catalog";
 import { type ApiAuth, authHeaders } from "./assets-client";
-import type { Graph, GraphNode } from "./graph";
+import type { Graph, GraphNode, NodeGeneration } from "./graph";
 
 export type RunEvent = {
   seq?: number;
@@ -34,6 +34,8 @@ export type RunEventAsset = {
   preview_url?: string | null;
   media_type?: string | null;
   text?: string | null;
+  width?: number | null;
+  height?: number | null;
   ephemeral?: boolean;
 };
 
@@ -43,6 +45,8 @@ export type RunAssetRow = {
   url: string;
   media_type: string;
   modality: string;
+  width?: number | null;
+  height?: number | null;
 };
 
 export type StartRunResult =
@@ -196,13 +200,14 @@ export async function startRun(
 }
 
 /**
- * Latest result per node from every prior run of this workflow — what puts
- * yesterday's image back in its node when the canvas is reopened.
+ * Recent generations per node (newest first) from every prior run of this
+ * workflow — what puts yesterday's image back in its node, and fills the
+ * carousel of earlier takes, when the canvas is reopened.
  */
 export async function fetchWorkflowResults(
   workflowId: string,
   auth: ApiAuth,
-): Promise<Record<string, NodeResult>> {
+): Promise<Record<string, NodeGeneration[]>> {
   try {
     const res = await fetch(`${API_URL}/v1/workflows/${workflowId}/results`, {
       headers: authHeaders(auth.token, auth.userId),
@@ -215,16 +220,23 @@ export async function fetchWorkflowResults(
         url: string | null;
         media_type: string | null;
         text: string | null;
+        width: number | null;
+        height: number | null;
+        created_at: string | null;
       }[];
     };
-    const out: Record<string, NodeResult> = {};
+    const out: Record<string, NodeGeneration[]> = {};
+    // The endpoint orders newest-first within each node; push preserves it.
     for (const r of body.results) {
-      out[r.node_id] = {
+      (out[r.node_id] ??= []).push({
         assetId: r.asset_id,
         url: r.url,
         mediaType: r.media_type,
         text: r.text,
-      };
+        width: r.width,
+        height: r.height,
+        createdAt: r.created_at,
+      });
     }
     return out;
   } catch {

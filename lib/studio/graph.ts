@@ -216,6 +216,25 @@ export type FlowNodeData = {
   uploading?: boolean;
   /** Live state from the run in flight (or the one just finished). */
   run?: NodeRunState;
+  /**
+   * This node's recent generations, newest first — what the carousel under a
+   * generate node pages through. View state like `run`: hydrated from the
+   * workflow's run history and advanced by run events, never saved in `wire`.
+   */
+  history?: NodeGeneration[];
+};
+
+/** One generated result of a node — a carousel entry. */
+export type NodeGeneration = {
+  assetId: string | null;
+  /** A URL the browser can fetch — presigned B2 or local media. */
+  url: string | null;
+  mediaType: string | null;
+  text?: string | null;
+  /** Real pixel dimensions of the output, when known — drives the card shape. */
+  width?: number | null;
+  height?: number | null;
+  createdAt?: string | null;
 };
 
 /** Mirrors the step statuses the run events carry. */

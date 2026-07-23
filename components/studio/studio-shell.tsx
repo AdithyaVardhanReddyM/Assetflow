@@ -24,6 +24,7 @@ import type { Catalog } from "@/lib/studio/catalog";
 import {
   type AssetPreview,
   type Graph,
+  type NodeGeneration,
   type NodeRunState,
   MAX_NODES,
 } from "@/lib/studio/graph";
@@ -84,7 +85,7 @@ export function StudioShell({
   const [assets, setAssets] = React.useState<Record<string, AssetPreview>>({});
   const [commentItems, setCommentItems] = React.useState(initialComments);
 
-  const { getToken, userId } = useAuth();
+  const { getToken, userId, isLoaded: authLoaded } = useAuth();
 
   const canvas = React.useRef<CanvasApi | null>(null);
   const nameRef = React.useRef(workflowName);
@@ -120,7 +121,9 @@ export function StudioShell({
    */
   const resolvedFor = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (resolvedFor.current === workflowId) return;
+    // Wait for Clerk before latching: an effect that fires pre-auth sends no
+    // identity, gets an empty answer, and would never run again.
+    if (!authLoaded || resolvedFor.current === workflowId) return;
     resolvedFor.current = workflowId;
 
     const ids = initialGraph.nodes
@@ -137,7 +140,7 @@ export function StudioShell({
     return () => {
       live = false;
     };
-  }, [workflowId, initialGraph, authFor]);
+  }, [workflowId, initialGraph, authFor, authLoaded]);
 
   // --- persistence --------------------------------------------------------
 
@@ -349,6 +352,31 @@ export function StudioShell({
    * upstream node's *result*, never re-runs it), and the Download button.
    */
   const nodeResults = React.useRef<Record<string, NodeResult>>({});
+  /**
+   * Recent generations per node, newest first — the carousel under each
+   * generate node. Hydrated from run history on open, advanced as runs land.
+   */
+  const [histories, setHistories] = React.useState<Record<string, NodeGeneration[]>>({});
+
+  /** Mirrors the backend's RESULTS_PER_NODE — what one node's carousel holds. */
+  const HISTORY_LIMIT = 8;
+  const prependGeneration = React.useCallback(
+    (nodeId: string, generation: NodeGeneration) => {
+      setHistories((current) => {
+        const existing = current[nodeId] ?? [];
+        // The same asset can arrive twice — terminal event, then the resolver
+        // fallback — and must land as one carousel entry, not two.
+        if (generation.assetId && existing.some((g) => g.assetId === generation.assetId)) {
+          return current;
+        }
+        return {
+          ...current,
+          [nodeId]: [generation, ...existing].slice(0, HISTORY_LIMIT),
+        };
+      });
+    },
+    [],
+  );
   /** Abort for the event stream in flight; a new run replaces the old feed. */
   const activeStream = React.useRef<(() => void) | null>(null);
   React.useEffect(() => () => activeStream.current?.(), []);
@@ -357,16 +385,31 @@ export function StudioShell({
   // so yesterday's image comes back from the workflow's run history.
   const hydratedFor = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (hydratedFor.current === workflowId) return;
+    // Same pre-auth guard as the preview effect above: a fetch without the
+    // caller's identity 404s, and the latch would swallow the retry.
+    if (!authLoaded || hydratedFor.current === workflowId) return;
     hydratedFor.current = workflowId;
     let live = true;
     void (async () => {
       const results = await fetchWorkflowResults(workflowId, await authFor());
       if (!live || !Object.keys(results).length) return;
-      nodeResults.current = { ...results, ...nodeResults.current };
+      // Anything a run produced in this session outranks the fetched history.
+      setHistories((current) => ({ ...results, ...current }));
+      const latest: Record<string, NodeResult> = {};
+      for (const [nodeId, generations] of Object.entries(results)) {
+        const r = generations[0];
+        if (!r) continue;
+        latest[nodeId] = {
+          assetId: r.assetId,
+          url: r.url,
+          mediaType: r.mediaType,
+          text: r.text ?? null,
+        };
+      }
+      nodeResults.current = { ...latest, ...nodeResults.current };
       setRunStates((current) => {
         const next = { ...current };
-        for (const [nodeId, r] of Object.entries(results)) {
+        for (const [nodeId, r] of Object.entries(latest)) {
           if (next[nodeId]) continue; // a live run outranks history
           next[nodeId] = {
             status: "succeeded",
@@ -380,7 +423,7 @@ export function StudioShell({
     return () => {
       live = false;
     };
-  }, [workflowId, authFor]);
+  }, [workflowId, authFor, authLoaded]);
 
   const patchRunState = React.useCallback(
     (nodeId: string, patch: Partial<NodeRunState>) => {
@@ -407,6 +450,16 @@ export function StudioShell({
         rows.map((r) => r.id),
         auth,
       );
+      for (const row of rows) {
+        if (!row.node_id) continue;
+        prependGeneration(row.node_id, {
+          assetId: row.id,
+          url: previews[row.id]?.url ?? row.url,
+          mediaType: row.media_type,
+          width: row.width ?? null,
+          height: row.height ?? null,
+        });
+      }
       setRunStates((current) => {
         const next = { ...current };
         for (const row of rows) {
@@ -429,7 +482,7 @@ export function StudioShell({
         return next;
       });
     },
-    [authFor],
+    [authFor, prependGeneration],
   );
 
   const onRunEvent = React.useCallback(
@@ -482,6 +535,19 @@ export function StudioShell({
             void resolveRunOutputs(runId);
             break;
           }
+          for (const asset of assets) {
+            if (!asset.node_id) continue;
+            prependGeneration(asset.node_id, {
+              assetId: asset.asset_id ?? null,
+              url:
+                asset.preview_url ??
+                (asset.url?.startsWith("http") ? asset.url : null),
+              mediaType: asset.media_type ?? null,
+              text: asset.text ?? null,
+              width: asset.width ?? null,
+              height: asset.height ?? null,
+            });
+          }
           setRunStates((current) => {
             const next = { ...current };
             for (const asset of assets) {
@@ -516,7 +582,7 @@ export function StudioShell({
           break;
       }
     },
-    [patchRunState, resolveRunOutputs],
+    [patchRunState, prependGeneration, resolveRunOutputs],
   );
 
   const onRun = React.useCallback(
@@ -569,8 +635,8 @@ export function StudioShell({
 
   /** Save a node's result to disk — the Download button on result nodes. */
   const onDownload = React.useCallback(
-    async (nodeId: string) => {
-      const result = nodeResults.current[nodeId];
+    async (nodeId: string, generation?: NodeGeneration) => {
+      const result = generation ?? nodeResults.current[nodeId];
       const live = runStates[nodeId]?.output;
       const source = result ?? { assetId: null, url: live?.url ?? null };
       if (!source.assetId && !source.url) return;
@@ -599,7 +665,8 @@ export function StudioShell({
               initialGraph={initialGraph}
               assets={assets}
               runStates={runStates}
-              onDownload={(id) => void onDownload(id)}
+              histories={histories}
+              onDownload={(id, generation) => void onDownload(id, generation)}
               apiRef={canvas}
               onGraphChange={onGraphChange}
               onZoomChange={setZoom}
