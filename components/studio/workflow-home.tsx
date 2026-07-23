@@ -11,6 +11,7 @@
  */
 
 import * as React from "react";
+import { ViewTransition } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { FrameCornersIcon } from "@phosphor-icons/react";
@@ -59,7 +60,13 @@ export function WorkflowHome({
   const router = useRouter();
 
   const [prompt, setPrompt] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
+  /**
+   * Which control is mid-creation, so the spinner can live *in* it. A plain
+   * boolean would only tell the screen that something is happening, which is
+   * what a scrim over everything is for — and a scrim is the wrong answer to
+   * "did my click land?".
+   */
+  const [pending, setPending] = React.useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = React.useState<WorkflowCard | null>(null);
   /**
    * Cards removed locally. Held as ids rather than a copy of the list so the
@@ -78,31 +85,33 @@ export function WorkflowHome({
   );
 
   /**
-   * Creates the canvas and goes to it. `busy` is never cleared on success —
-   * the navigation unmounts this screen, and releasing it first would flash
-   * the home screen back to life for the length of the route transition.
+   * Creates the canvas and goes to it. `pending` is never cleared on success —
+   * the navigation unmounts this screen, and releasing it first would snap the
+   * control back to its resting label for the length of the route transition.
    */
   const open = React.useCallback(
-    async (seed: WorkflowSeed, search = "") => {
-      if (busy) return;
-      setBusy(true);
+    async (key: string, seed: WorkflowSeed, search = "") => {
+      // One creation at a time: a second click while the first is in flight
+      // would leave an orphan row behind whichever canvas won the navigation.
+      if (pending) return;
+      setPending(key);
       const result = await startWorkflow(seed);
       if (!result.ok) {
         toast.error(result.error);
-        setBusy(false);
+        setPending(null);
         return;
       }
       router.push(`/workflow/${result.data.id}${search}`);
     },
-    [busy, router],
+    [pending, router],
   );
 
   const onToolSelect = React.useCallback(
     (id: ToolId) => {
       // A create tool becomes the new canvas's first node; a pointer tool is
       // only a mode, so it rides along in the query string instead.
-      if (isCreateTool(id)) return void open({ tool: id });
-      void open({}, id === "move" ? "" : `?tool=${id}`);
+      if (isCreateTool(id)) return void open(`tool:${id}`, { tool: id });
+      void open(`tool:${id}`, {}, id === "move" ? "" : `?tool=${id}`);
     },
     [open],
   );
@@ -110,7 +119,7 @@ export function WorkflowHome({
   const onGenerate = React.useCallback(
     (spec: PromptSpec) => {
       const text = prompt.trim();
-      void open({
+      void open("prompt", {
         tool: spec.modality,
         prompt: text,
         // Only the identity travels: the server re-resolves it against the
@@ -156,7 +165,7 @@ export function WorkflowHome({
       <div
         className={cn(
           "fixed inset-0 overflow-hidden bg-[#f7f4ee] text-[#1f211c]",
-          busy && "pointer-events-none",
+          pending && "pointer-events-none",
         )}
       >
         {/* The canvas grid, painted in CSS — the home screen has no graph to
@@ -190,14 +199,24 @@ export function WorkflowHome({
           />
         </div>
 
-        <Toolbar activeTool="move" onSelect={onToolSelect} />
+        {/* Named on both routes, so the toolbar holds still across the
+            navigation instead of being torn down and rebuilt. */}
+        <ViewTransition name="studio-toolbar">
+          <Toolbar
+            activeTool="move"
+            busyTool={pending?.startsWith("tool:") ? pending.slice(5) : null}
+            onSelect={onToolSelect}
+          />
+        </ViewTransition>
 
         {/* Greeting */}
-        <div className="pointer-events-none fixed inset-x-0 top-[19vh] z-20 px-20 text-center">
-          <h1 className="animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_both] text-[clamp(2rem,4.5vw,3.25rem)] leading-[1.05] font-medium tracking-[-0.02em]">
-            {greeting}, <span className="font-serif italic">{firstName}</span>
-          </h1>
-        </div>
+        <ViewTransition exit="lift-out" default="none">
+          <div className="pointer-events-none fixed inset-x-0 top-[19vh] z-20 px-20 text-center">
+            <h1 className="animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_both] text-[clamp(2rem,4.5vw,3.25rem)] leading-[1.05] font-medium tracking-[-0.02em]">
+              {greeting}, <span className="font-serif italic">{firstName}</span>
+            </h1>
+          </div>
+        </ViewTransition>
 
         {/* Prompt bar, and the way past it for anyone who'd rather not start
             from a sentence. */}
@@ -206,64 +225,87 @@ export function WorkflowHome({
           style={{ transitionTimingFunction: EASE }}
         >
           <div className="w-[min(760px,100%)]">
-            <PromptBar
-              catalog={catalog}
-              value={prompt}
-              onChange={setPrompt}
-              onGenerate={onGenerate}
-              onAttach={() => void open({ tool: "upload" })}
-            />
-
-            <div className="animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_150ms_both]">
-              <div className="mt-4 flex items-center justify-center gap-3">
-                <span aria-hidden className="h-px w-12 bg-[#1f211c]/12" />
-                <span className="text-[11px] tracking-[0.18em] text-[#a09a88] uppercase">
-                  or
-                </span>
-                <span aria-hidden className="h-px w-12 bg-[#1f211c]/12" />
+            {/* The morph that carries the screen: this same bar is docked at
+                the bottom of the canvas, so it glides down rather than one
+                copy vanishing while another appears. */}
+            <ViewTransition name="studio-prompt-bar" share="morph">
+              <div>
+                <PromptBar
+                  catalog={catalog}
+                  value={prompt}
+                  onChange={setPrompt}
+                  onGenerate={onGenerate}
+                  busy={pending === "prompt"}
+                  onAttach={() => void open("tool:upload", { tool: "upload" })}
+                />
               </div>
+            </ViewTransition>
 
-              <div className="mt-2.5 flex justify-center">
-                <button
-                  type="button"
-                  onClick={() => void open({})}
-                  className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white/70 px-4 text-[13px] font-semibold text-[#4c4a41] backdrop-blur-sm transition-all duration-150 hover:-translate-y-px hover:border-[#1f211c]/32 hover:bg-white hover:text-[#1f211c] hover:shadow-[0_10px_24px_-14px_rgba(31,33,28,0.5)]"
-                >
-                  <FrameCornersIcon className="size-4" />
-                  Start from blank
-                </button>
+            <ViewTransition exit="lift-out" default="none">
+              <div className="animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_150ms_both]">
+                {/* The greeting's serif italic, borrowed one size down — the
+                    rule fades out at both ends so it reads as a seam, not a
+                    divider. */}
+                <div className="mt-4 flex items-center justify-center gap-3.5">
+                  <span
+                    aria-hidden
+                    className="h-px w-16 bg-gradient-to-r from-transparent to-[#1f211c]/18"
+                  />
+                  <span className="font-serif text-[17px] leading-none text-[#8a8271] italic">
+                    or
+                  </span>
+                  <span
+                    aria-hidden
+                    className="h-px w-16 bg-gradient-to-l from-transparent to-[#1f211c]/18"
+                  />
+                </div>
+
+                <div className="mt-2.5 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => void open("blank", {})}
+                    className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white px-4 text-[13px] font-semibold text-[#4c4a41] transition-colors duration-150 hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+                  >
+                    {pending === "blank" ? (
+                      <>
+                        <Spinner className="size-4 text-[#8a8271]" />
+                        Creating workflow…
+                      </>
+                    ) : (
+                      <>
+                        <FrameCornersIcon className="size-4" />
+                        Start from blank
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
-            </div>
+            </ViewTransition>
           </div>
         </div>
 
         {/* Previous workflows */}
-        <div className="fixed inset-x-0 bottom-7 z-20">
-          <WorkflowCards
-            workflows={visibleWorkflows}
-            onOpen={(card) => {
-              setBusy(true);
-              router.push(`/workflow/${card.id}`);
-            }}
-            onDelete={setPendingDelete}
-            onStartTemplate={(name) => void open({ name })}
-          />
-        </div>
-
-        {/* Held back a beat: a canvas usually opens faster than this would be
-            readable, and a spinner that flashes is worse than none. */}
-        <div
-          aria-hidden={!busy}
-          className={cn(
-            "pointer-events-none fixed inset-0 z-50 grid place-items-center bg-[#f7f4ee]/40 backdrop-blur-[2px] transition-opacity duration-200",
-            busy ? "opacity-100 delay-300" : "opacity-0",
-          )}
-        >
-          <div className="flex items-center gap-2.5 border border-[#1f211c]/8 bg-white/92 px-4 py-2.5 text-[13px] font-medium text-[#4c4a41] shadow-[0_18px_44px_-12px_rgba(31,33,28,0.28)]">
-            <Spinner className="size-3.5 text-[#8a8271]" />
-            Opening canvas…
+        <ViewTransition exit="lift-out" default="none">
+          <div className="fixed inset-x-0 bottom-7 z-20">
+            <WorkflowCards
+              workflows={visibleWorkflows}
+              busyId={
+                pending?.startsWith("card:")
+                  ? pending.slice(5)
+                  : pending?.startsWith("template:")
+                    ? pending
+                    : null
+              }
+              onOpen={(card) => {
+                if (pending) return;
+                setPending(`card:${card.id}`);
+                router.push(`/workflow/${card.id}`);
+              }}
+              onDelete={setPendingDelete}
+              onStartTemplate={(name) => void open(`template:${name}`, { name })}
+            />
           </div>
-        </div>
+        </ViewTransition>
 
         <AlertDialog
           open={pendingDelete !== null}

@@ -52,7 +52,12 @@ async def verify_schema(*, raise_on_drift: bool = True) -> list[str]:
 
     if problems:
         detail = "; ".join(problems)
-        hint = "Run `pnpm db:push` from the repo root to apply db/schema.ts."
+        # Not `db:push` — it introspects the live database first and drizzle-kit
+        # 0.31 crashes doing so here. `migrate` replays the generated SQL.
+        hint = (
+            "Run `pnpm db:generate && pnpm db:migrate` from the repo root "
+            "to apply db/schema.ts."
+        )
         if raise_on_drift:
             raise SchemaDriftError(f"Database schema is out of sync — {detail}. {hint}")
         log.warning("db.schema_drift", problems=problems, hint=hint)

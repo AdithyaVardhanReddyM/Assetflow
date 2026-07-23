@@ -148,6 +148,63 @@ body {
   }
 }
 
+/* --- Studio route transitions ----------------------------------------
+   The home screen and the canvas are two routes, so the morph between them
+   is the browser's View Transitions API rather than a CSS transition on one
+   mounted tree. `studio-prompt-bar` is named on both sides and does the
+   carrying; everything else either leaves or arrives around it.
+
+   Timings are asymmetric on purpose: the home screen's furniture clears out
+   quickly so it isn't competing with the canvas for attention, and the canvas
+   arrives a beat later, more gently. */
+
+::view-transition-group(.morph) {
+  animation-duration: 460ms;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Blurs away the pixel stretching while the bar changes shape mid-flight. */
+::view-transition-image-pair(.morph) {
+  animation: 460ms cubic-bezier(0.32, 0.72, 0, 1) both studio-morph-blur;
+}
+
+@keyframes studio-morph-blur {
+  40% {
+    filter: blur(2.5px);
+  }
+}
+
+::view-transition-old(.lift-out) {
+  animation: 180ms cubic-bezier(0.32, 0.72, 0, 1) both studio-lift-out;
+}
+
+@keyframes studio-lift-out {
+  to {
+    opacity: 0;
+    transform: translateY(-14px);
+    filter: blur(4px);
+  }
+}
+
+::view-transition-new(.settle-in) {
+  animation: 320ms 140ms cubic-bezier(0.32, 0.72, 0, 1) both studio-settle-in;
+}
+
+@keyframes studio-settle-in {
+  from {
+    opacity: 0;
+    transform: scale(1.015);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 1ms !important;
+  }
+}
+
 /* --- Studio canvas ---------------------------------------------------
    Only `base.css` is imported from @xyflow/react — the full `style.css`
    themes nodes, handles and controls for a look this canvas does not use,
@@ -372,6 +429,24 @@ body {
 
 .studio-canvas .react-flow__viewport {
   animation: studio-graph-in 500ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Comment mode aims the pane. Two selectors because base.css ships
+   `.react-flow__pane.draggable { cursor: grab }` at the same specificity, and a
+   tie is decided by source order we do not control. Same `_`-is-a-space trap as
+   the note above: this cannot be written as a Tailwind arbitrary variant. */
+.studio-canvas[data-comment-mode="true"] .react-flow__pane,
+.studio-canvas[data-comment-mode="true"] .react-flow__pane.draggable,
+.studio-canvas[data-comment-mode="true"] .react-flow__pane.selection {
+  cursor: crosshair;
+}
+
+/* React Flow renders the viewport with `pointer-events: none` and lets nodes
+   opt back in. Comment pins are neither nodes nor panels, so they have to opt
+   in themselves — without this every click on a pin falls through to the pane,
+   which reads as "clicking a comment makes another comment". */
+.studio-comment-pin {
+  pointer-events: auto;
 }
 
 @keyframes studio-graph-in {

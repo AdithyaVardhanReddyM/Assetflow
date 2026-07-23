@@ -15,6 +15,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/ui/spinner";
 import {
   CompositionIcon,
   ImageGenIcon,
@@ -105,10 +106,13 @@ export const CREATE_TOOLS: ToolDef[] = [
 function ToolButton({
   tool,
   active,
+  busy,
   onSelect,
 }: {
   tool: ToolDef;
   active: boolean;
+  /** This tool is creating a workflow — the glyph becomes the progress. */
+  busy: boolean;
   onSelect: (id: ToolId) => void;
 }) {
   const IconComp = tool.icon;
@@ -120,6 +124,7 @@ function ToolButton({
             type="button"
             aria-label={tool.label}
             aria-pressed={active}
+            aria-busy={busy || undefined}
             onClick={() => onSelect(tool.id)}
             className={cn(
               "grid size-9 place-items-center transition-colors duration-150",
@@ -128,10 +133,14 @@ function ToolButton({
                 : "text-[#4c4a41] hover:bg-[#1f211c]/6 hover:text-[#1f211c]",
             )}
           >
-            <IconComp
-              className="size-[19px]"
-              weight={active ? "fill" : "regular"}
-            />
+            {busy ? (
+              <Spinner className="size-[17px]" />
+            ) : (
+              <IconComp
+                className="size-[19px]"
+                weight={active ? "fill" : "regular"}
+              />
+            )}
           </button>
         }
       />
@@ -151,9 +160,12 @@ function ToolButton({
 
 export function Toolbar({
   activeTool,
+  busyTool = null,
   onSelect,
 }: {
   activeTool: ToolId;
+  /** The tool whose click is still creating a workflow, on the home screen. */
+  busyTool?: string | null;
   onSelect: (id: ToolId) => void;
 }) {
   const island =
@@ -171,6 +183,7 @@ export function Toolbar({
             key={tool.id}
             tool={tool}
             active={activeTool === tool.id}
+            busy={busyTool === tool.id}
             onSelect={onSelect}
           />
         ))}
@@ -181,6 +194,7 @@ export function Toolbar({
             key={tool.id}
             tool={tool}
             active={activeTool === tool.id}
+            busy={busyTool === tool.id}
             onSelect={onSelect}
           />
         ))}

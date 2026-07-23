@@ -2,7 +2,14 @@
 //
 // The FastAPI backend (backend/app/db/models.py) mirrors these tables with
 // SQLAlchemy but runs NO migrations of its own: two migration tools pointed at
-// one database is a genuine hazard. Schema changes go here, then `pnpm db:push`.
+// one database is a genuine hazard. Schema changes go here, then
+// `pnpm db:generate && pnpm db:migrate`.
+//
+// Not `db:push`: it introspects the live database first, and drizzle-kit 0.31
+// crashes doing so against this one. Postgres reports every NOT NULL as a CHECK
+// constraint in information_schema, and push's reader assumes each such row has
+// a definition to parse. `migrate` replays the generated SQL and never looks.
+//
 // backend/app/db/verify.py reflects the live schema at startup and fails loudly
 // if the mirror has drifted.
 //
@@ -71,6 +78,53 @@ export const workflows = pgTable(
     ...timestamps,
   },
   (t) => [index("workflows_tenant_updated_idx").on(t.tenantId, t.updatedAt)],
+);
+
+/**
+ * Canvas annotations — the human layer laid over a document the compiler reads.
+ *
+ * Deliberately *not* nodes inside `workflows.graph`: that shape is mirrored
+ * field for field by `backend/app/graph/schema.py` and handed to the planner,
+ * so a comment living there would be a node kind the compiler has to learn to
+ * ignore, in two languages. Beside the graph instead, the executable document
+ * never changes and a comment can never fail a validation it has no part in.
+ *
+ * Threads are one level deep. `parentId` carries no foreign key, matching
+ * `runs.parentRunId`: the rows are in the same table, and the cascade that
+ * matters is already on `workflowId`.
+ */
+export const workflowComments = pgTable(
+  "workflow_comments",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    workflowId: uuid()
+      .notNull()
+      .references(() => workflows.id, { onDelete: "cascade" }),
+    tenantId: text().notNull(),
+    /** Null on a pin; the pin's id on a reply. */
+    parentId: uuid(),
+
+    authorUserId: text().notNull(),
+    /** Denormalised: rendering a thread should not need a round trip to Clerk. */
+    authorName: text().notNull(),
+
+    /** Flow coordinates — a pin has to stay on what it points at through pan
+     *  and zoom, so these are canvas space, never screen space. Replies
+     *  inherit their pin's position and ignore their own. */
+    x: doublePrecision().notNull().default(0),
+    y: doublePrecision().notNull().default(0),
+
+    body: text().notNull(),
+
+    resolvedAt: timestamp({ withTimezone: true }),
+    resolvedBy: text(),
+    deletedAt: timestamp({ withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("workflow_comments_workflow_idx").on(t.workflowId, t.createdAt),
+    index("workflow_comments_parent_idx").on(t.parentId),
+  ],
 );
 
 /**
@@ -250,6 +304,14 @@ export const assets = pgTable(
 
 export const workflowsRelations = relations(workflows, ({ many }) => ({
   runs: many(runs),
+  comments: many(workflowComments),
+}));
+
+export const workflowCommentsRelations = relations(workflowComments, ({ one }) => ({
+  workflow: one(workflows, {
+    fields: [workflowComments.workflowId],
+    references: [workflows.id],
+  }),
 }));
 
 export const runsRelations = relations(runs, ({ one, many }) => ({
@@ -278,6 +340,8 @@ export const assetsRelations = relations(assets, ({ one }) => ({
 
 export type Workflow = typeof workflows.$inferSelect;
 export type NewWorkflow = typeof workflows.$inferInsert;
+export type WorkflowComment = typeof workflowComments.$inferSelect;
+export type NewWorkflowComment = typeof workflowComments.$inferInsert;
 export type Run = typeof runs.$inferSelect;
 export type NewRun = typeof runs.$inferInsert;
 export type RunStep = typeof runSteps.$inferSelect;

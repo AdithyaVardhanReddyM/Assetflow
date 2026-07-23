@@ -7,6 +7,7 @@ import { db } from "@/db";
 import { fetchCatalog } from "@/lib/studio/catalog";
 import { parseGraph } from "@/lib/studio/graph";
 import { requireTenant } from "@/lib/studio/tenant";
+import { listComments } from "../comments";
 
 export const metadata = { title: "Canvas · Asset Flow" };
 
@@ -35,7 +36,7 @@ export default async function WorkflowCanvasPage({
   const who = await requireTenant();
   if (!who) notFound();
 
-  const [catalog, row, query] = await Promise.all([
+  const [catalog, row, comments, query] = await Promise.all([
     fetchCatalog(),
     db.query.workflows.findFirst({
       // Missing and not-yours resolve identically, matching the server
@@ -45,6 +46,9 @@ export default async function WorkflowCanvasPage({
         and(eq(w.id, id), eq(w.tenantId, who.tenantId), isNull(w.deletedAt)),
       columns: { id: true, name: true, graph: true },
     }),
+    // Tenant-scoped in its own right, so a mismatched id yields an empty
+    // thread list rather than someone else's notes.
+    listComments(id),
     searchParams,
   ]);
   if (!row) notFound();
@@ -62,6 +66,7 @@ export default async function WorkflowCanvasPage({
       workflowId={row.id}
       initialName={row.name}
       initialGraph={graph}
+      initialComments={comments.ok ? comments.data : []}
       catalog={catalog}
       initialTool={tool && POINTER_TOOLS.has(tool) ? (tool as ToolId) : "move"}
     />

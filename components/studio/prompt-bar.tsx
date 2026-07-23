@@ -39,6 +39,7 @@ import { ImageGenIcon, VideoGenIcon } from "./asset-icons";
 import { ModelLogo } from "./model-logos";
 import { ModelMenuList } from "./model-menu";
 import { Slider } from "@/components/ui/slider";
+import { Spinner } from "@/components/ui/spinner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -248,12 +249,18 @@ export function PromptBar({
   onChange,
   onGenerate,
   onAttach,
+  busy = false,
 }: {
   catalog: Catalog;
   value: string;
   onChange: (v: string) => void;
   onGenerate: (spec: PromptSpec) => void;
   onAttach: () => void;
+  /**
+   * On the home screen, Generate creates a workflow before it can place a
+   * node — so the wait belongs on the button that started it.
+   */
+  busy?: boolean;
 }) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const [modality, setModality] = React.useState<PromptModality>("image");
@@ -304,8 +311,12 @@ export function PromptBar({
   }, [value]);
 
   const isVideo = modality === "video";
-  const generate = () =>
+  // Guarded here rather than only on the button, because Enter in the textarea
+  // reaches this without going through it.
+  const generate = () => {
+    if (busy) return;
     onGenerate({ modality, model, params: model ? params[modality] : undefined });
+  };
 
   return (
     <BorderBeam
@@ -452,10 +463,21 @@ export function PromptBar({
           <button
             type="button"
             onClick={generate}
-            className="flex h-9 shrink-0 items-center gap-2 bg-primary px-4 text-[13px] font-semibold text-primary-foreground shadow-[0_10px_24px_-8px_oklch(0.75_0.16_85_/_0.9),inset_0_1px_0_rgba(255,255,255,0.5)] transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97]"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            className="flex h-9 shrink-0 items-center gap-2 bg-primary px-4 text-[13px] font-semibold text-primary-foreground shadow-[0_10px_24px_-8px_oklch(0.75_0.16_85_/_0.9),inset_0_1px_0_rgba(255,255,255,0.5)] transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:active:scale-100 disabled:hover:brightness-100"
           >
-            <SparkleIcon weight="fill" className="size-4" />
-            Generate
+            {busy ? (
+              <>
+                <Spinner className="size-4" />
+                Creating workflow…
+              </>
+            ) : (
+              <>
+                <SparkleIcon weight="fill" className="size-4" />
+                Generate
+              </>
+            )}
           </button>
         </div>
       </div>

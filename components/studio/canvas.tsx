@@ -51,6 +51,11 @@ import {
   rolesCompatible,
 } from "@/lib/studio/node-ui";
 import { StudioProvider, type RunScope } from "./studio-context";
+import {
+  CommentLayer,
+  type CommentDraft,
+  type CommentsApi,
+} from "./comment-layer";
 import { NODE_TYPES } from "./nodes";
 
 export type CanvasApi = {
@@ -92,6 +97,9 @@ export type CanvasProps = {
   panMode: boolean;
   /** Frame the whole document on open, for a canvas that already has one. */
   fitOnMount: boolean;
+  comments: CommentsApi;
+  /** The comment tool is up: a click on empty canvas drops a pin. */
+  commentMode: boolean;
 };
 
 const MIN_ZOOM = 0.1;
@@ -109,6 +117,8 @@ function CanvasInner({
   onRun,
   panMode,
   fitOnMount,
+  comments,
+  commentMode,
 }: CanvasProps) {
   const seed = React.useMemo(() => toFlow(initialGraph), [initialGraph]);
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>(seed.nodes);
@@ -130,6 +140,37 @@ function CanvasInner({
   const fileInput = React.useRef<HTMLInputElement>(null);
   /** Which node a pending file picker is filling; null means "make a new one". */
   const uploadTarget = React.useRef<string | null>(null);
+
+  const [commentDraft, setCommentDraft] = React.useState<CommentDraft | null>(null);
+  const [openComment, setOpenComment] = React.useState<string | null>(null);
+
+  /**
+   * An unwritten note belongs to the tool that started it. Derived rather than
+   * cleared when the tool changes, so putting the comment tool down hides the
+   * composer without a render pass whose only job is to undo state — and
+   * picking it back up hands the half-written note back.
+   *
+   * An *open* thread is not scoped this way: reading one is not an edit, and
+   * it stays legible whichever tool you pick up next.
+   */
+  const draft = commentMode ? commentDraft : null;
+
+  /**
+   * One click, one action. A click on empty canvas dismisses whatever is open
+   * before it will place anything new, so closing a thread never leaves a
+   * stray draft behind it.
+   */
+  const onPaneClick = React.useCallback(
+    (event: React.MouseEvent) => {
+      if (openComment) return setOpenComment(null);
+      if (draft) return setCommentDraft(null);
+      if (!commentMode) return;
+      setCommentDraft(
+        rf.screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+      );
+    },
+    [openComment, draft, commentMode, rf],
+  );
 
   // Rehydrate upload previews onto their nodes. Kept out of the wire data so
   // the graph stores only `asset_id` — the URLs are short-lived presigned ones.
@@ -534,6 +575,12 @@ function CanvasInner({
       <div
         ref={container}
         className="studio-canvas absolute inset-0"
+        // Drives the crosshair from globals.css. Not a Tailwind arbitrary
+        // variant: `_` is Tailwind's escape for a space, so
+        // `[&_.react-flow__pane]` compiles to `.react-flow pane` and matches
+        // nothing — and the rule also has to out-specify base.css's
+        // `.react-flow__pane.draggable { cursor: grab }`.
+        data-comment-mode={commentMode}
         onDrop={onDrop}
         onDragOver={(e) => e.preventDefault()}
       >
@@ -547,13 +594,14 @@ function CanvasInner({
           isValidConnection={isValidConnection}
           onMove={(_, viewport) => onZoomChange(viewport.zoom)}
           onNodeDragStop={onInteract}
+          onPaneClick={onPaneClick}
           minZoom={MIN_ZOOM}
           maxZoom={MAX_ZOOM}
           // Scroll pans and ⌘/ctrl-scroll zooms, matching the rest of the app
           // and every canvas tool the user already knows.
           panOnScroll
           zoomOnScroll={false}
-          selectionOnDrag={!panMode}
+          selectionOnDrag={!panMode && !commentMode}
           panOnDrag={panMode ? true : [1, 2]}
           deleteKeyCode={["Backspace", "Delete"]}
           multiSelectionKeyCode={["Meta", "Shift"]}
@@ -573,6 +621,13 @@ function CanvasInner({
             gap={DOT_GAP}
             size={1}
             color={DOT_COLOR}
+          />
+          <CommentLayer
+            api={comments}
+            draft={draft}
+            openId={openComment}
+            onOpen={setOpenComment}
+            onCancelDraft={() => setCommentDraft(null)}
           />
         </ReactFlow>
 

@@ -11,6 +11,8 @@ import {
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 
+import { Spinner } from "@/components/ui/spinner";
+
 export type WorkflowCard = {
   id: string;
   name: string;
@@ -50,20 +52,34 @@ function CardShell({
   children,
   delay,
   overlay,
+  busy,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   delay: number;
   overlay?: React.ReactNode;
+  busy: boolean;
 }) {
   return (
     <div
       style={{ animationDelay: `${delay}ms` }}
       className="group relative w-52 shrink-0 overflow-hidden border border-[#1f211c]/8 bg-white/88 shadow-[0_1px_2px_rgba(31,33,28,0.05),0_8px_20px_-12px_rgba(31,33,28,0.22)] backdrop-blur-sm transition-all duration-200 animate-[studio-rise_0.65s_cubic-bezier(0.32,0.72,0,1)_both] hover:-translate-y-1 hover:border-[#1f211c]/16 hover:shadow-[0_2px_4px_rgba(31,33,28,0.06),0_18px_36px_-18px_rgba(31,33,28,0.28)]"
     >
-      <button type="button" onClick={onClick} className="block w-full text-left">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-busy={busy || undefined}
+        className="block w-full text-left"
+      >
         {children}
       </button>
+      {/* Sits over the art block only, so the card's own title stays readable
+          while it opens. */}
+      {busy ? (
+        <div className="absolute inset-x-0 top-0 grid h-[104px] place-items-center bg-white/55">
+          <Spinner className="size-5 text-[#1f211c]/55" />
+        </div>
+      ) : null}
       {overlay}
     </div>
   );
@@ -74,6 +90,7 @@ export function WorkflowCards({
   onOpen,
   onDelete,
   onStartTemplate,
+  busyId = null,
 }: {
   workflows: WorkflowCard[];
   /** Passed the whole card: opening one has to load its graph by id. */
@@ -82,6 +99,8 @@ export function WorkflowCards({
   onDelete: (card: WorkflowCard) => void;
   /** Templates are not saved rows — they open a blank canvas under that name. */
   onStartTemplate: (name: string) => void;
+  /** The card being opened — a workflow id, or `template:<name>`. */
+  busyId?: string | null;
 }) {
   const hasWorkflows = workflows.length > 0;
 
@@ -108,6 +127,7 @@ export function WorkflowCards({
                 <CardShell
                   key={wf.id}
                   delay={i * 55}
+                  busy={busyId === wf.id}
                   onClick={() => onOpen(wf)}
                   overlay={
                     <button
@@ -152,6 +172,7 @@ export function WorkflowCards({
                 <CardShell
                   key={tpl.name}
                   delay={i * 55}
+                  busy={busyId === `template:${tpl.name}`}
                   onClick={() => onStartTemplate(tpl.name)}
                 >
                   <div

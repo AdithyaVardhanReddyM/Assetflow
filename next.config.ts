@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    // Lets React's <ViewTransition> animate route changes — the prompt bar
+    // morphs from centre stage on /workflow into the canvas dock, which is the
+    // continuity the old single-route morph used to provide.
+    viewTransition: true,
+  },
   async redirects() {
     return [
       // The studio moved to /workflow, where a canvas is addressable by id.
