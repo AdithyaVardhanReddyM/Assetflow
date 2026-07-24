@@ -41,12 +41,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
-import {
-  type CatalogModel,
-  type PortSpec,
-  findModel,
-  visiblePorts,
-} from "@/lib/studio/catalog";
+import { type PortSpec, findModel, visiblePorts } from "@/lib/studio/catalog";
 import {
   type Clip,
   type CompositeTrack,
@@ -124,25 +119,85 @@ function formatTime(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
+// --- real media lengths ----------------------------------------------------
+
 /**
- * How long a source runs.
+ * Measured durations of actual media, keyed by URL.
  *
- * A generation's length is whatever its `duration` parameter says, and failing
- * that whatever the catalog expects of the model — the same numbers the
- * compiler uses to estimate a run. An upload has no duration on the canvas
- * (the assets table does not carry one), so it falls back to a nominal width
- * and the real length is settled at render time.
+ * A node's params say what was *asked for*; only the file that came back knows
+ * what it actually lasts — a "5 second" music request routinely returns
+ * shorter, and an upload declares nothing at all. So once a source has a
+ * playable URL, its clip is sized from the media's own metadata. Module-level
+ * because the same asset feeds every composition that references it.
  */
-function sourceDuration(
-  wire: Record<string, unknown>,
-  model: CatalogModel | undefined,
-): number {
+const measuredDurations = new Map<string, number>();
+const probesInFlight = new Set<string>();
+const probeSubscribers = new Set<() => void>();
+let probeVersion = 0;
+
+function probeDuration(url: string) {
+  if (measuredDurations.has(url) || probesInFlight.has(url)) return;
+  probesInFlight.add(url);
+  // A <video> element reads audio metadata too, and metadata needs no CORS —
+  // which matters because B2 presigned URLs cannot be fetch()ed.
+  const el = document.createElement("video");
+  el.preload = "metadata";
+  const settle = () => {
+    probesInFlight.delete(url);
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      measuredDurations.set(url, el.duration);
+      probeVersion += 1;
+      for (const notify of probeSubscribers) notify();
+    }
+    el.removeAttribute("src");
+  };
+  el.onloadedmetadata = settle;
+  el.onerror = settle;
+  el.src = url;
+}
+
+/** Re-renders the caller whenever any probe lands, and starts missing ones. */
+function useMeasuredDurations(urls: (string | null)[]) {
+  React.useSyncExternalStore(
+    (notify) => {
+      probeSubscribers.add(notify);
+      return () => {
+        probeSubscribers.delete(notify);
+      };
+    },
+    () => probeVersion,
+    () => 0,
+  );
+  const key = urls.filter(Boolean).join("\n");
+  React.useEffect(() => {
+    for (const url of key.split("\n")) if (url) probeDuration(url);
+  }, [key]);
+}
+
+/** The URL of what a source most recently produced (or holds, for uploads). */
+function sourceMediaUrl(source: { data: StudioNode["data"] } | undefined): string | null {
+  if (!source) return null;
+  const run = source.data.run;
+  return (
+    (run?.status === "succeeded" ? run.output?.url : null) ??
+    source.data.history?.[0]?.url ??
+    source.data.asset?.url ??
+    null
+  );
+}
+
+/**
+ * How long a generation is *expected* to run, before its media exists to
+ * measure: whatever its `duration` parameter says (tolerating the string a
+ * chip may have stored). Deliberately NOT `expected_duration_sec` — that
+ * catalog number is the model's wall-clock ETA for a run, not its output
+ * length, and drawing it once made a speech clip twenty seconds wide.
+ */
+function sourceDuration(wire: Record<string, unknown>): number {
   const params = (wire.params ?? {}) as Record<string, unknown>;
-  const declared = params.duration ?? params.duration_seconds;
-  if (typeof declared === "number" && Number.isFinite(declared) && declared > 0) {
-    return declared;
-  }
-  return model?.expected_duration_sec ?? ASSUMED_CLIP_SEC;
+  const declared = Number(params.duration ?? params.duration_seconds ?? NaN);
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  return ASSUMED_CLIP_SEC;
 }
 
 /** Pick a ruler step that yields roughly six to twelve ticks. */
@@ -185,9 +240,18 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
   );
   const sourceNodes = useNodesData<StudioNode>(sourceIds);
 
+  // Measure every connected source's actual media, so clips are drawn — and
+  // stored — at the length the file really has, not the length that was asked
+  // for. Re-renders when a probe lands, which is what makes widths live.
+  useMeasuredDurations(sourceNodes.map(sourceMediaUrl));
+
   const describe = React.useCallback(
     (sourceId: string): SourceInfo => {
       const source = sourceNodes.find((n) => n.id === sourceId);
+      const measured = (() => {
+        const url = sourceMediaUrl(source);
+        return url ? measuredDurations.get(url) : undefined;
+      })();
       if (!source) {
         return { label: "Source", accent: "any", Icon: VideoGenIcon, durationSec: ASSUMED_CLIP_SEC };
       }
@@ -197,7 +261,7 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
           label: typeof title === "string" && title ? title : "Upload",
           accent: source.data.asset?.modality ?? "any",
           Icon: source.data.asset?.modality === "audio" ? MusicGenIcon : VideoGenIcon,
-          durationSec: ASSUMED_CLIP_SEC,
+          durationSec: measured ?? ASSUMED_CLIP_SEC,
         };
       }
       if (source.data.kind === "transform.composite") {
@@ -205,7 +269,7 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
           label: "Composition",
           accent: "video",
           Icon: CompositionIcon,
-          durationSec: compositeTimeline(source.data.wire),
+          durationSec: measured ?? compositeTimeline(source.data.wire),
         };
       }
       const model = findModel(
@@ -222,26 +286,40 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
             : (ROLE_LABEL[role] ?? model?.label ?? "Generated"),
         accent: role || model?.modality || "any",
         Icon: ROLE_ICON[role] ?? VideoGenIcon,
-        durationSec: sourceDuration(source.data.wire, model),
+        durationSec: measured ?? sourceDuration(source.data.wire),
       };
     },
     [catalog, sourceNodes],
   );
 
-  useClipSync({ id, tracks, sourcesByHandle, describe, updateNode });
+  // The live length of every connected source, for drawing and for keeping the
+  // stored stamps honest — a clip's stored `duration_sec` is only the estimate
+  // from the moment it was connected.
+  const liveDurations = React.useMemo(
+    () => new Map(sourceIds.map((sid) => [sid, describe(sid).durationSec])),
+    [sourceIds, describe],
+  );
+
+  useClipSync({ id, tracks, sourcesByHandle, describe, durations: liveDurations, updateNode });
 
   // The timeline is as long as the edit needs, never shorter than the default
   // ruler — so a clip dragged past the end grows the view rather than falling
-  // off it.
+  // off it. Deliberately NOT the stored `timeline_sec`: nothing in the UI sets
+  // it, so honoring it here would only pin old documents to the ruler length
+  // they happened to be seeded with.
   const contentEnd = Math.max(
     ...tracks.flatMap((t) =>
-      t.clips.map((c) => c.start_sec + (c.duration_sec ?? ASSUMED_CLIP_SEC)),
+      t.clips.map(
+        (c) =>
+          c.start_sec +
+          (liveDurations.get(c.source) ?? c.duration_sec ?? ASSUMED_CLIP_SEC),
+      ),
     ),
     0,
   );
   const timeline = Math.min(
     MAX_TIMELINE_SEC,
-    Math.max(DEFAULT_TIMELINE_SEC, compositeTimeline(data.wire), Math.ceil(contentEnd * 1.1)),
+    Math.max(DEFAULT_TIMELINE_SEC, Math.ceil(contentEnd * 1.1)),
   );
 
   // Adding or removing a track changes which handles exist; React Flow caches
@@ -479,37 +557,56 @@ function useClipSync({
   tracks,
   sourcesByHandle,
   describe,
+  durations,
   updateNode,
 }: {
   id: string;
   tracks: CompositeTrack[];
   sourcesByHandle: Map<string, string[]>;
   describe: (sourceId: string) => SourceInfo;
+  /** Live length per source — measured media first, params second. */
+  durations: Map<string, number>;
   updateNode: (id: string, patch: Record<string, unknown>) => void;
 }) {
   // `describe` changes identity on every render (it closes over node data), so
   // it is read through a ref — depending on it would resync on every frame.
   const describeRef = React.useRef(describe);
+  const durationsRef = React.useRef(durations);
   React.useEffect(() => {
     describeRef.current = describe;
+    durationsRef.current = durations;
   });
 
   const signature = React.useMemo(
     () =>
       JSON.stringify([
         [...sourcesByHandle.entries()].sort(),
-        tracks.map((t) => [t.id, t.clips.map((c) => c.source)]),
+        tracks.map((t) => [t.id, t.clips.map((c) => [c.source, c.duration_sec])]),
+        // Rounded, so a probe landing at 4.0000001 does not thrash the store.
+        [...durations.entries()]
+          .sort()
+          .map(([s, d]) => [s, Math.round(d * 10) / 10]),
       ]),
-    [sourcesByHandle, tracks],
+    [sourcesByHandle, tracks, durations],
   );
 
   React.useEffect(() => {
     let changed = false;
     const next = tracks.map((track) => {
       const connected = sourcesByHandle.get(trackPortId(track.id)) ?? [];
-      // Drop clips whose edge is gone; a stored position for a source nobody
-      // is feeding would otherwise resurrect it the moment it is reconnected.
-      const kept = track.clips.filter((c) => connected.includes(c.source));
+      const kept = track.clips
+        // Drop clips whose edge is gone; a stored position for a source nobody
+        // is feeding would otherwise resurrect it the moment it is reconnected.
+        .filter((c) => connected.includes(c.source))
+        // Restamp lengths that drifted from the live number — a param edit or
+        // a finished run changes how long the source really is, and the stored
+        // stamp is what the compiler's timeline math reads.
+        .map((c) => {
+          const live = durationsRef.current.get(c.source);
+          if (live == null || Math.abs(live - (c.duration_sec ?? 0)) < 0.05) return c;
+          changed = true;
+          return { ...c, duration_sec: Math.round(live * 10) / 10 };
+        });
       const added: Clip[] = [];
       let end = Math.max(
         ...kept.map((c) => c.start_sec + (c.duration_sec ?? ASSUMED_CLIP_SEC)),
@@ -518,7 +615,8 @@ function useClipSync({
       for (const source of connected) {
         if (kept.some((c) => c.source === source)) continue;
         if (kept.length + added.length >= MAX_CLIPS_PER_TRACK) break;
-        const duration = describeRef.current(source).durationSec;
+        const duration =
+          durationsRef.current.get(source) ?? describeRef.current(source).durationSec;
         added.push({ source, start_sec: end, duration_sec: duration });
         end += duration;
       }
@@ -598,22 +696,37 @@ function Fader({
   }
 
   function startDrag(event: React.PointerEvent) {
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    const pointerId = event.pointerId;
     const target = event.currentTarget as HTMLElement;
-    target.setPointerCapture(event.pointerId);
+    // Same shape as the clip drag: capture is best effort, the drag itself
+    // rides window listeners so a refused capture cannot kill it.
+    try {
+      target.setPointerCapture(pointerId);
+    } catch {
+      /* drag works without capture */
+    }
     setFromPointer(event.clientX);
 
-    const move = (e: PointerEvent) => setFromPointer(e.clientX);
-    const end = () => {
-      target.releasePointerCapture(event.pointerId);
-      target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", end);
-      target.removeEventListener("pointercancel", end);
+    const move = (e: PointerEvent) => {
+      if (e.pointerId === pointerId) setFromPointer(e.clientX);
     };
-    target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", end);
-    target.addEventListener("pointercancel", end);
+    const end = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        /* already released */
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
   }
 
   const filled = Math.min(1, gain / MAX_GAIN);
@@ -645,7 +758,7 @@ function Fader({
               }}
               style={{ width: FADER_WIDTH }}
               className={cn(
-                "relative h-3 shrink-0 cursor-ew-resize bg-[#1f211c]/8 outline-none",
+                "relative h-3 shrink-0 cursor-ew-resize touch-none bg-[#1f211c]/8 outline-none",
                 "focus-visible:ring-1 focus-visible:ring-[#1f211c]/35",
                 muted && "opacity-40",
               )}
@@ -718,6 +831,7 @@ function TrackRow({
   const dragRef = React.useRef<{ source: string; start: number } | null>(null);
 
   function startDrag(event: React.PointerEvent, clip: Clip) {
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     const rect = strip.current?.getBoundingClientRect();
@@ -726,10 +840,20 @@ function TrackRow({
     // and so are pointer deltas, so the two cancel and no zoom factor is needed.
     const perSecond = rect.width / timeline;
     const grabOffset = event.clientX - (rect.left + clip.start_sec * perSecond);
+    const pointerId = event.pointerId;
     const target = event.currentTarget as HTMLElement;
-    target.setPointerCapture(event.pointerId);
+    // Best effort only. The drag rides window listeners below, so a capture
+    // the browser refuses — or that React Flow's selection layer steals on the
+    // same pane — cannot kill it; before this, a failed capture threw before
+    // the move listeners ever attached and the clip simply would not drag.
+    try {
+      target.setPointerCapture(pointerId);
+    } catch {
+      /* drag works without capture */
+    }
 
     const move = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
       const raw = (e.clientX - grabOffset - rect.left) / perSecond;
       // Snapped to a tenth: finer than anyone can aim at node scale, and it
       // keeps the stored number readable.
@@ -740,11 +864,16 @@ function TrackRow({
       dragRef.current = next;
       setDragging(next);
     };
-    const end = () => {
-      target.releasePointerCapture(event.pointerId);
-      target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", end);
-      target.removeEventListener("pointercancel", end);
+    const end = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        /* already released */
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
       const landed = dragRef.current;
       dragRef.current = null;
       setDragging(null);
@@ -752,11 +881,11 @@ function TrackRow({
       // updater — this reaches all the way up to the canvas's node list.
       if (landed) onMove(landed.source, landed.start);
     };
-    target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", end);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
     // A cancelled gesture (a browser takeover, a lost capture) still has to
     // release, or the clip stays stuck to the pointer with no way to drop it.
-    target.addEventListener("pointercancel", end);
+    window.addEventListener("pointercancel", end);
   }
 
   return (
@@ -781,14 +910,16 @@ function TrackRow({
           const accent = accentFor(info.accent);
           const start =
             dragging?.source === clip.source ? dragging.start : clip.start_sec;
-          const duration = clip.duration_sec ?? info.durationSec;
+          // Always the live number — the stored stamp is whatever was believed
+          // at connect time, and the whole point of the strip is proportion.
+          const duration = info.durationSec;
           return (
             <div
               key={clip.source}
               onPointerDown={(e) => startDrag(e, clip)}
               title={`${info.label} · ${formatTime(start)}`}
               className={cn(
-                "absolute inset-y-1 flex cursor-grab items-center gap-1 overflow-hidden border px-1.5 active:cursor-grabbing",
+                "absolute inset-y-1 flex cursor-grab touch-none items-center gap-1 overflow-hidden border px-1.5 active:cursor-grabbing",
                 dragging?.source === clip.source
                   ? "border-[#1f211c]/45 shadow-[0_6px_16px_-6px_rgba(31,33,28,0.45)]"
                   : "border-[#1f211c]/12",

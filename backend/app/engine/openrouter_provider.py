@@ -100,6 +100,14 @@ class OpenRouterTextProvider(SyncProvider):
             ],
             # Ask OpenRouter to account the request so cost lands on the step.
             "usage": {"include": True},
+            # This node writes clean, prompt-ready text that feeds straight into
+            # image and video models — chain-of-thought is never wanted in the
+            # output. On a reasoning model (Kimi K2.x is one) an enabled
+            # reasoning trace silently eats the `max_tokens` budget: the answer
+            # never gets emitted, `content` comes back empty with finish_reason
+            # "length", and the step fails. Disabling it hands the whole budget
+            # to the answer. Models with no reasoning mode ignore the field.
+            "reasoning": {"enabled": False},
         }
         if params.get("temperature") is not None:
             body["temperature"] = float(params["temperature"])
@@ -142,12 +150,23 @@ class OpenRouterTextProvider(SyncProvider):
 
         data = response.json()
         try:
-            content = (data["choices"][0]["message"]["content"] or "").strip()
+            message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(
                 "OpenRouter returned an unexpected response shape.",
                 error_code=ProviderErrorCode.MODEL_ERROR,
             ) from exc
+        # `content` is the answer. Belt-and-suspenders with `reasoning` disabled
+        # above: if a model ignores that flag and still spends its budget
+        # thinking, the only text it returned is in `reasoning` /
+        # `reasoning_content` — a truncated draft beats failing the whole run.
+        content = (
+            message.get("content")
+            or message.get("reasoning")
+            or message.get("reasoning_content")
+            or ""
+        )
+        content = content.strip() if isinstance(content, str) else ""
         if not content:
             raise ProviderError(
                 "OpenRouter returned an empty completion.",

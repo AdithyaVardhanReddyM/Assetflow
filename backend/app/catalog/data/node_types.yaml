@@ -82,7 +82,7 @@ node_types:
       - {id: out, modality: video}
     default_data:
       op: mux
-      timeline_sec: 30.0
+      timeline_sec: 8.0
       video: {id: video, label: null, gain: 1.0, muted: false, clips: []}
       tracks:
         - {id: a1, label: null, gain: 1.0, muted: false, clips: []}

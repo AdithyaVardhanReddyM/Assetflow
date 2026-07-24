@@ -93,15 +93,6 @@ _REPLICATE_IMAGE_SLOTS: dict[str, str] = {
 }
 
 
-# Kontext edits exactly one image: its schema declares a single `input_image`
-# string, not an array. Without a spec the stock fallback would hand a wired
-# reference to `image` — a key the model never declares, and Replicate 422s
-# unknown input keys.
-_REPLICATE_IMAGE_SINGLE_SLOTS: dict[str, str] = {
-    "black-forest-labs/flux-kontext-pro": "input_image",
-}
-
-
 # GPT Image 2 has no resolution parameter of its own — its `aspect_ratio` enum
 # mixes ratio words with exact pixel sizes ("2048x1152", "3840x2160", ...).
 # The canvas offers ratio + resolution as two axes like every other image
@@ -140,11 +131,7 @@ def gpt_image_2_size_transform(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def replicate_image_specs() -> list[ModelSpec]:
-    """Specs routing every incoming image into the slug's own reference key.
-
-    Array slots for the lab flagships that take several references, a single
-    slot for Kontext, which takes exactly one.
-    """
+    """Specs routing every incoming image into the slug's array parameter."""
     return [
         ModelSpec(
             model_id=slug,
@@ -155,13 +142,6 @@ def replicate_image_specs() -> list[ModelSpec]:
             ),
         )
         for slug, slot in _REPLICATE_IMAGE_SLOTS.items()
-    ] + [
-        ModelSpec(
-            model_id=slug,
-            modality=Modality.IMAGE,
-            input_mapping=route_images(slots=(slot,)),
-        )
-        for slug, slot in _REPLICATE_IMAGE_SINGLE_SLOTS.items()
     ]
 
 
@@ -401,9 +381,8 @@ def seedream5_specs() -> list[ModelSpec]:
 def gmicloud_image_provider() -> Any:
     """GMICloudImageProvider with Seedream 5 specs and the 5xx submit retry.
 
-    flux-kontext-pro needs no spec of its own: it lands on the stock fallback,
-    which passes ``aspect_ratio`` / ``prompt_upsampling`` / ``output_format``
-    through unchanged (no allowlist on GMI's image fallback).
+    Only Seedream needs per-slug specs; any other GMI image slug lands on the
+    stock permissive fallback (no allowlist on GMI's image surface).
     """
     image_cls, _ = _gmi_retrying_classes()
 

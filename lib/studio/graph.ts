@@ -89,7 +89,7 @@ export type GenerateNodeData = {
 /** Mirrors the limits in schema.py. */
 export const MAX_AUDIO_TRACKS = 6;
 export const MAX_CLIPS_PER_TRACK = 12;
-export const DEFAULT_TIMELINE_SEC = 30;
+export const DEFAULT_TIMELINE_SEC = 8;
 export const MAX_TIMELINE_SEC = 600;
 
 /** The picture track's id and handle. A composition has exactly one. */

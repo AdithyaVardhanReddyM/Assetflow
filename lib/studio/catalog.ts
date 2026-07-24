@@ -183,7 +183,7 @@ const FALLBACK_NODE_TYPES: CatalogNodeType[] = [
     outputs: [{ id: "out", modality: "video", required: false, multi: false, model_gated: false }],
     default_data: {
       op: "mux",
-      timeline_sec: 30,
+      timeline_sec: 8,
       video: { id: "video", label: null, gain: 1, muted: false, clips: [] },
       tracks: [{ id: "a1", label: null, gain: 1, muted: false, clips: [] }],
     },

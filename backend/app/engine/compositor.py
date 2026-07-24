@@ -367,11 +367,13 @@ class TrackCompositor(SyncProvider):
             *(["-c:v", "libx264", "-pix_fmt", "yuv420p"] if reencoded else ["-c:v", "copy"]),
             "-c:a", "aac",
             "-b:a", "192k",
-            # The composition is as long as its picture track. On the copy path
-            # that is the shot's own length, so `-shortest` trims a music bed
-            # that outruns it; on the edit path the length is known outright,
-            # and `-shortest` would instead let a short clip cut the picture.
-            *(["-shortest"] if not reencoded else ["-t", f"{picture_end:.3f}"]),
+            # The composition is as long as its picture track, on both paths.
+            # `-t` trims a music bed that outruns the shot, and audio shorter
+            # than the picture simply ends early inside it. This must never be
+            # `-shortest`: that ends the file at the *shortest* stream, so one
+            # second of audio under a four-second shot cut the render to one
+            # second.
+            "-t", f"{picture_end:.3f}",
             "-y",
             str(out_path),
         ]

@@ -269,16 +269,20 @@ def test_render_length_follows_the_picture_not_the_ruler(captured, monkeypatch):
     assert "-shortest" not in cmd
 
 
-def test_the_copy_path_trims_audio_that_outruns_the_shot(captured, monkeypatch):
-    """With one shot the picture keeps its own length, so a music bed longer
-    than it has to be cut rather than extend the video."""
+def test_the_copy_path_keeps_the_pictures_own_length(captured, monkeypatch):
+    """With one shot the render is exactly as long as the shot: a music bed
+    that outruns it is cut, and audio shorter than it just ends early. Never
+    `-shortest` — that ends the file at the shortest *stream*, so one second
+    of audio under a longer shot would cut the whole render to one second."""
     with_audio(monkeypatch, False)
     TrackCompositor().generate(
         step(inputs=[VIDEO, AUDIO_1], edit=edit(vtrack(clip()), atrack(clip())))
     )
     cmd = captured[0]
-    assert "-shortest" in cmd
-    assert "-t" not in cmd
+    assert "-shortest" not in cmd
+    # The stub probe says every clip lasts one second — see `captured`.
+    assert cmd[cmd.index("-t") + 1] == "1.000"
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
 
 
 # --------------------------------------------------------------------------- #

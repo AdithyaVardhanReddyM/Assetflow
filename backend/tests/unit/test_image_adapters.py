@@ -100,16 +100,6 @@ def test_replicate_specs_use_each_models_array_slot(slug, slot):
     assert mapped == {slot: ["https://x.test/a.png", "https://x.test/b.png"]}
 
 
-def test_kontext_routes_one_reference_to_input_image():
-    """Kontext takes a single `input_image` string, so a second wired image is
-    dropped rather than swapped into an array key the model never declares."""
-    spec = next(
-        s for s in replicate_image_specs() if s.model_id == "black-forest-labs/flux-kontext-pro"
-    )
-    mapped = spec.input_mapping([_img("https://x.test/a.png"), _img("https://x.test/b.png")])
-    assert mapped == {"input_image": "https://x.test/a.png"}
-
-
 def test_gpt_image_2_folds_resolution_into_pixel_sizes():
     from app.engine.genblaze_adapters import gpt_image_2_size_transform
 

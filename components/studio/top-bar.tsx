@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import {
   ArrowUUpLeftIcon,
@@ -138,10 +139,10 @@ export function TopBar({
               )}
             </span>
           </BarTooltip>
-          <BarTooltip label="Assets">
-            <button type="button" aria-label="Assets" className={iconBtn}>
+          <BarTooltip label="Asset library">
+            <Link href="/assets" aria-label="Asset library" className={iconBtn}>
               <FolderSimpleIcon className="size-4" />
-            </button>
+            </Link>
           </BarTooltip>
         </div>
       </div>

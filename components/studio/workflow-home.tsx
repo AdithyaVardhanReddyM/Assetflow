@@ -13,8 +13,10 @@
 import * as React from "react";
 import { ViewTransition } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FrameCornersIcon } from "@phosphor-icons/react";
+import { UserButton } from "@clerk/nextjs";
+import { FolderSimpleIcon, FrameCornersIcon } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
@@ -197,6 +199,23 @@ export function WorkflowHome({
             height={23}
             priority
           />
+        </div>
+
+        {/* Account — the same avatar the canvas top-bar carries, so it holds
+            its corner across the navigation into a workflow. The library sits
+            beside it: media outlives any one canvas, so its door is on the
+            home screen, not inside one. */}
+        <div className="fixed top-4 right-4 z-40 flex items-center gap-2 animate-[studio-drift-in_0.7s_cubic-bezier(0.32,0.72,0,1)_both]">
+          <Link
+            href="/assets"
+            className="flex h-10 items-center gap-2 border border-[#1f211c]/8 bg-white/88 px-3.5 text-[13px] font-semibold text-[#4c4a41] shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md transition-colors hover:text-[#1f211c]"
+          >
+            <FolderSimpleIcon className="size-4" />
+            Assets
+          </Link>
+          <div className="grid size-10 place-items-center rounded-full border border-[#1f211c]/8 bg-white/88 shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md">
+            <UserButton appearance={{ elements: { userButtonAvatarBox: "size-7" } }} />
+          </div>
         </div>
 
         {/* Named on both routes, so the toolbar holds still across the

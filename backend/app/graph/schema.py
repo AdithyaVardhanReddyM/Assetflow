@@ -25,7 +25,7 @@ MAX_AUDIO_TRACKS = 6
 #: timeline is unreadable at node scale and the work belongs in a real NLE.
 MAX_CLIPS_PER_TRACK = 12
 #: The timeline the node opens on, and the ceiling it can be grown to.
-DEFAULT_TIMELINE_SEC = 30.0
+DEFAULT_TIMELINE_SEC = 8.0
 MAX_TIMELINE_SEC = 600.0
 
 NodeId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]

@@ -104,6 +104,22 @@ async def list_assets(
     }
 
 
+@router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_asset(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser
+) -> Response:
+    """Remove an asset from the library.
+
+    Deletes only the index row. The bytes and the provenance manifest stay in
+    B2, which is the system of record — a run manifest that references this
+    artifact must keep resolving even after the library forgets it.
+    """
+    asset = await _get_owned(session, asset_id, user)
+    await session.delete(asset)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/{asset_id}")
 async def get_asset(
     asset_id: uuid.UUID, session: Session, user: CurrentUser
