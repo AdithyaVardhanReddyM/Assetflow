@@ -10,6 +10,7 @@ import {
   type Catalog,
   type CatalogModel,
   type Modality,
+  aspectOptionFor,
   defaultParams,
   modelsForModality,
 } from "./catalog";
@@ -56,8 +57,23 @@ export type NodeBlueprint = {
    * when the catalog gains or loses a provider.
    */
   prefer?: string[];
+  /**
+   * Specialized flavor this tool places ("character_sheet") — persisted on the
+   * node's wire data, where a role could not be: it is a job for the prompt,
+   * not a model class, so any capable model of the modality qualifies.
+   */
+  preset?: "character_sheet";
   label: string;
 };
+
+/** The one shape a character sheet comes in — mirrors graph/presets.py. */
+export const CHARACTER_SHEET_RATIO = "16:9";
+
+/** Whether a model can serve a blueprint's preset (16:9 for the sheet). */
+function servesPreset(model: CatalogModel, blueprint: NodeBlueprint): boolean {
+  if (blueprint.preset !== "character_sheet") return true;
+  return aspectOptionFor(model, CHARACTER_SHEET_RATIO) !== null;
+}
 
 export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
   // Seedream 5.0 Lite is the house default for image work: cheapest of the
@@ -103,12 +119,14 @@ export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
     label: "Speech",
   },
   sfx: { kind: "generate", modality: "audio", role: "sfx", label: "Sound effects" },
-  // No role: a character sheet is an ordinary image generation with a
-  // particular prompt, not a model class of its own — so it opens on the same
-  // default image model.
+  // A preset, not a role: a character sheet is an image generation whose
+  // prompt the compiler shapes (face close-up, full-body front and back on
+  // one 16:9 canvas), so it opens on the default image model — filtered to
+  // the models that can actually emit 16:9.
   character: {
     kind: "generate",
     modality: "image",
+    preset: "character_sheet",
     prefer: ["seedream-5.0-lite"],
     label: "Character sheet",
   },
@@ -138,7 +156,7 @@ export function pickModel(
   if (blueprint.kind !== "generate" || !blueprint.modality) return undefined;
   const wanted = blueprint.role ?? "";
   const candidates = modelsForModality(catalog, blueprint.modality).filter(
-    (m) => (m.role ?? "") === wanted,
+    (m) => (m.role ?? "") === wanted && servesPreset(m, blueprint),
   );
   for (const id of blueprint.prefer ?? []) {
     // Only a *usable* preference wins. An unavailable model is still listed in
@@ -199,8 +217,15 @@ export function blueprintData(
         prompt: overrides.prompt ?? null,
         params: overrides.params ?? (model ? defaultParams(model) : {}),
         fallback_models: [],
+        preset: blueprint.preset ?? null,
         title: overrides.title ?? null,
       };
+      if (blueprint.preset === "character_sheet" && model) {
+        // Locked from birth: the compiler forces this anyway, but seeding it
+        // keeps the node's preview the shape it will actually render.
+        const option = aspectOptionFor(model, CHARACTER_SHEET_RATIO);
+        if (option) data.params = { ...data.params, aspect_ratio: option };
+      }
       return data as unknown as Record<string, unknown>;
     }
   }

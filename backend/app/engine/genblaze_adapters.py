@@ -31,6 +31,7 @@ import mimetypes
 import os
 import re
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,11 @@ from genblaze_core.providers import (
 from genblaze_core.providers.retry import retry_after_from_response
 from genblaze_core.providers.spec import StringSchema
 from genblaze_core.runnable.config import RunnableConfig
+
+from app.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def _read_asset_bytes(url: str) -> bytes:
     """Fetch an input asset — presigned https URL or a local file:// one.
@@ -219,6 +225,113 @@ def replicate_provider() -> Any:
     return ReplicateProvider(models=registry)
 
 
+# --- GMI Cloud ---------------------------------------------------------------
+
+# GMI's request queue intermittently answers a perfectly valid submit with
+# `500 {"error": "Backend error (401). Please try again."}` — its gateway failing
+# to reach the model backend, nothing to do with our key. Measured on
+# seedance-2-0-fast: the identical payload failed at 21:25:59 and succeeded at
+# 21:26:39, and an image-to-video submit failed twice around a success with the
+# same `first_frame`. GMI's own advice is in the message: try again.
+#
+# GenBlaze will not do it for us. Its submit phase retries `PRE_RESPONSE_EXCEPTIONS`
+# only (connect errors), because a submit that *did* land could double-bill on
+# replay. That reasoning does not apply here: GMI records the request as `failed`
+# with no output before answering, so the retry re-enqueues nothing.
+_GMI_SUBMIT_ATTEMPTS = 3
+_GMI_SUBMIT_BACKOFF_SEC = 2.0
+
+
+class _RetryFlakyGMISubmit:
+    """Mixin retrying `POST /requests` when GMI 5xxs.
+
+    Only SERVER_ERROR is retried — a 400 (bad params), 401/403 (our key) or 429
+    would fail identically however many times we ask.
+    """
+
+    def _submit_request(self, model: str, payload: dict) -> Any:
+        for attempt in range(1, _GMI_SUBMIT_ATTEMPTS + 1):
+            try:
+                return super()._submit_request(model, payload)  # type: ignore[misc]
+            except ProviderError as exc:
+                if (
+                    exc.error_code is not ProviderErrorCode.SERVER_ERROR
+                    or attempt == _GMI_SUBMIT_ATTEMPTS
+                ):
+                    raise
+                log.warning(
+                    "gmicloud.submit_retry",
+                    model=model,
+                    attempt=attempt,
+                    of=_GMI_SUBMIT_ATTEMPTS,
+                    error=str(exc),
+                )
+                time.sleep(_GMI_SUBMIT_BACKOFF_SEC * attempt)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+# GMI's request queue vocabulary. Terminal mirrors the stock connector's set;
+# the queued-flavoured statuses are the non-terminal ones worth naming in the
+# UI — a step parked behind other jobs reads differently from one generating.
+_GMI_TERMINAL_STATUSES = frozenset({"success", "failed", "cancelled"})
+_GMI_QUEUED_STATUSES = frozenset({"created", "queued", "pending", "in_queue"})
+
+
+class _GMIQueueStatusProgress:
+    """Mixin surfacing GMI's queue `status` between polls.
+
+    GMI reports no numeric progress, and the stock connector's poll()
+    discards the non-terminal status it just fetched. This override keeps
+    it, so ``poll_progress`` can tell the UI whether a step is still waiting
+    in queue or actively generating.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._queue_status: dict[str, str] = {}
+
+    def poll(self, prediction_id: Any, config: RunnableConfig | None = None) -> bool:
+        try:
+            detail = self._fetch_detail(prediction_id)
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"GMICloud poll failed: {exc}",
+                error_code=ProviderErrorCode.UNKNOWN,
+            ) from exc
+        status = str(detail.get("status", "")).lower()
+        if status in _GMI_TERMINAL_STATUSES:
+            self._cache_poll_result(prediction_id, detail)
+            self._queue_status.pop(str(prediction_id), None)
+            return True
+        self._queue_status[str(prediction_id)] = status
+        return False
+
+    def poll_progress(self, prediction_id: Any) -> dict[str, Any] | None:
+        if self._queue_status.get(str(prediction_id)) in _GMI_QUEUED_STATUSES:
+            return {"message": "Waiting in queue"}
+        return None
+
+
+@lru_cache(maxsize=1)
+def _gmi_retrying_classes() -> tuple[Any, Any]:
+    """Lazy subclasses so this module imports without the gmicloud extra."""
+    from genblaze_gmicloud import GMICloudImageProvider, GMICloudVideoProvider
+
+    class RetryingGMICloudImageProvider(  # type: ignore[misc]
+        _GMIQueueStatusProgress, _RetryFlakyGMISubmit, GMICloudImageProvider
+    ):
+        pass
+
+    class RetryingGMICloudVideoProvider(  # type: ignore[misc]
+        _GMIQueueStatusProgress, _RetryFlakyGMISubmit, GMICloudVideoProvider
+    ):
+        pass
+
+    return RetryingGMICloudImageProvider, RetryingGMICloudVideoProvider
+
+
 # --- GMI Cloud image models -------------------------------------------------
 
 # (aspect_ratio, resolution) → the "WxH" Seedream 5 actually takes. Every value
@@ -286,18 +399,18 @@ def seedream5_specs() -> list[ModelSpec]:
 
 
 def gmicloud_image_provider() -> Any:
-    """Stock GMICloudImageProvider, plus Seedream 5 specs.
+    """GMICloudImageProvider with Seedream 5 specs and the 5xx submit retry.
 
     flux-kontext-pro needs no spec of its own: it lands on the stock fallback,
     which passes ``aspect_ratio`` / ``prompt_upsampling`` / ``output_format``
     through unchanged (no allowlist on GMI's image fallback).
     """
-    from genblaze_gmicloud import GMICloudImageProvider
+    image_cls, _ = _gmi_retrying_classes()
 
-    registry = GMICloudImageProvider.create_registry()
+    registry = image_cls.create_registry()
     for spec in seedream5_specs():
         registry.register(spec)
-    return GMICloudImageProvider(models=registry)
+    return image_cls(models=registry)
 
 
 def gmi_video_specs() -> list[ModelSpec]:
@@ -339,21 +452,22 @@ def gmi_video_specs() -> list[ModelSpec]:
 
 
 def gmicloud_video_provider() -> Any:
-    """Stock GMICloudVideoProvider carrying the current lineup's specs."""
-    from genblaze_gmicloud import GMICloudVideoProvider
+    """GMICloudVideoProvider carrying the current lineup's specs, plus the
+    5xx submit retry."""
+    _, video_cls = _gmi_retrying_classes()
 
-    registry = GMICloudVideoProvider.create_registry()
+    registry = video_cls.create_registry()
     for spec in gmi_video_specs():
         registry.register(spec)
-    return GMICloudVideoProvider(models=registry)
+    return video_cls(models=registry)
 
 
 @lru_cache(maxsize=1)
 def _kling_lipsync_cls():
     """Lazy subclass so this module imports without the gmicloud extra."""
-    from genblaze_gmicloud import GMICloudVideoProvider
+    _, video_cls = _gmi_retrying_classes()
 
-    class GMIKlingLipSyncProvider(GMICloudVideoProvider):  # type: ignore[misc]
+    class GMIKlingLipSyncProvider(video_cls):  # type: ignore[misc, valid-type]
         """Kling lip-sync on GMI — a two-step flow the stock submit can't do.
 
         Step 1 posts the wired video to ``kling-identify-face`` (synchronous:
@@ -474,6 +588,37 @@ RUNWAY_IMAGE_RATIOS = frozenset(
 _MAX_RUNWAY_REFERENCES = 3
 
 
+class _RunwayTaskProgress:
+    """Mixin turning Runway's in-flight task into progress signals.
+
+    Runway tasks carry a numeric ``progress`` (0-1) while RUNNING, and some
+    Gen-4 models attach a draft-frame thumbnail. ``poll()`` already retrieved
+    the task each tick — ``_note_poll_task`` stashes the non-terminal one so
+    ``poll_progress`` can report it without a second API call.
+    """
+
+    _progress_tasks: dict[str, Any]
+
+    def _note_poll_task(self, prediction_id: Any, task: Any, done: bool) -> None:
+        if done:
+            self._progress_tasks.pop(str(prediction_id), None)
+        else:
+            self._progress_tasks[str(prediction_id)] = task
+
+    def poll_progress(self, prediction_id: Any) -> dict[str, Any] | None:
+        task = self._progress_tasks.get(str(prediction_id))
+        if task is None:
+            return None
+        signals: dict[str, Any] = {}
+        progress = getattr(task, "progress", None)
+        if isinstance(progress, (int, float)) and 0 <= progress <= 1:
+            signals["progress_pct"] = float(progress)
+        preview = getattr(task, "thumbnail_url", None) or getattr(task, "preview_url", None)
+        if preview:
+            signals["preview_url"] = str(preview)
+        return signals or None
+
+
 def _check_image_ratio(params: dict[str, Any]) -> None:
     ratio = params.get("ratio")
     if ratio is not None and ratio not in RUNWAY_IMAGE_RATIOS:
@@ -508,7 +653,7 @@ _RUNWAY_IMAGE_FAMILY = ModelFamily(
 )
 
 
-class RunwayImageProvider(BaseProvider):
+class RunwayImageProvider(_RunwayTaskProgress, BaseProvider):
     """Runway text-to-image (Gen-4 Image). Mirrors genblaze_runway's task flow.
 
     The stock RunwayProvider always submits through ``image_to_video.create``,
@@ -555,6 +700,7 @@ class RunwayImageProvider(BaseProvider):
         self.poll_interval = poll_interval
         self._api_secret = api_secret
         self._client: Any = None
+        self._progress_tasks: dict[str, Any] = {}
 
     def _get_client(self):
         if self._client is None:
@@ -607,10 +753,11 @@ class RunwayImageProvider(BaseProvider):
         client = self._get_client()
         try:
             task = client.tasks.retrieve(prediction_id)
-            if task.status in ("SUCCEEDED", "FAILED"):
+            done = task.status in ("SUCCEEDED", "FAILED")
+            if done:
                 self._cache_poll_result(prediction_id, task)
-                return True
-            return False
+            self._note_poll_task(prediction_id, task, done)
+            return done
         except Exception as exc:
             raise ProviderError(
                 f"Runway image poll failed: {exc}",
@@ -711,7 +858,7 @@ _RUNWAY_VIDEO_FAMILY = ModelFamily(
 )
 
 
-class RunwayVideoProvider(BaseProvider):
+class RunwayVideoProvider(_RunwayTaskProgress, BaseProvider):
     """Runway video for models the stock adapter cannot drive.
 
     genblaze_runway's RunwayProvider always calls ``image_to_video.create``,
@@ -758,6 +905,7 @@ class RunwayVideoProvider(BaseProvider):
         self.poll_interval = poll_interval
         self._api_secret = api_secret
         self._client: Any = None
+        self._progress_tasks: dict[str, Any] = {}
 
     def _get_client(self):
         if self._client is None:
@@ -855,10 +1003,11 @@ class RunwayVideoProvider(BaseProvider):
         client = self._get_client()
         try:
             task = client.tasks.retrieve(prediction_id)
-            if task.status in ("SUCCEEDED", "FAILED"):
+            done = task.status in ("SUCCEEDED", "FAILED")
+            if done:
                 self._cache_poll_result(prediction_id, task)
-                return True
-            return False
+            self._note_poll_task(prediction_id, task, done)
+            return done
         except Exception as exc:
             raise ProviderError(
                 f"Runway video poll failed: {exc}",
@@ -985,6 +1134,7 @@ class LumaAgentsProvider(BaseProvider):
         self._api_key = api_key
         self._http_timeout = http_timeout
         self._http: Any = None
+        self._poll_states: dict[str, str] = {}
 
     def _get_http(self):
         if self._http is None:
@@ -1065,7 +1215,9 @@ class LumaAgentsProvider(BaseProvider):
             data = resp.json()
             if data.get("state") in ("completed", "failed"):
                 self._cache_poll_result(prediction_id, data)
+                self._poll_states.pop(str(prediction_id), None)
                 return True
+            self._poll_states[str(prediction_id)] = str(data.get("state", ""))
             return False
         except Exception as exc:
             raise ProviderError(
@@ -1073,6 +1225,13 @@ class LumaAgentsProvider(BaseProvider):
                 error_code=ProviderErrorCode.UNKNOWN,
                 retry_after=retry_after_from_response(exc),
             ) from exc
+
+    def poll_progress(self, prediction_id: Any) -> dict[str, Any] | None:
+        # The Agents API reports no numeric progress; "queued" is still worth
+        # naming — a parked step reads differently from one dreaming.
+        if self._poll_states.get(str(prediction_id)) == "queued":
+            return {"message": "Waiting in queue"}
+        return None
 
     def fetch_output(self, prediction_id: Any, step: Step) -> Step:
         try:
@@ -1177,6 +1336,7 @@ class DecartLucyVideoProvider(BaseProvider):
         self._api_key = api_key
         self._output_dir = Path(output_dir) if output_dir else None
         self._client: Any = None
+        self._poll_states: dict[str, str] = {}
 
     def _get_client(self):
         if self._client is None:
@@ -1241,13 +1401,23 @@ class DecartLucyVideoProvider(BaseProvider):
             from genblaze_core._utils import _run_async
 
             status = _run_async(self._get_client().queue.status(prediction_id))
-            return status.status in ("completed", "failed")
+            done = status.status in ("completed", "failed")
+            if done:
+                self._poll_states.pop(str(prediction_id), None)
+            else:
+                self._poll_states[str(prediction_id)] = str(status.status)
+            return done
         except Exception as exc:
             raise ProviderError(
                 f"Decart video edit poll failed: {exc}",
                 error_code=ProviderErrorCode.UNKNOWN,
                 retry_after=retry_after_from_response(exc),
             ) from exc
+
+    def poll_progress(self, prediction_id: Any) -> dict[str, Any] | None:
+        if self._poll_states.get(str(prediction_id)) == "queued":
+            return {"message": "Waiting in queue"}
+        return None
 
     def fetch_output(self, prediction_id: Any, step: Step) -> Step:
         try:

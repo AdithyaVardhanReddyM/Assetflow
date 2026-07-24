@@ -305,6 +305,45 @@ export function visiblePorts(
   return out;
 }
 
+function ratioValue(value: string): number | null {
+  const parts = value.split(":");
+  if (parts.length !== 2) return null;
+  const w = Number(parts[0]);
+  const h = Number(parts[1]);
+  return w > 0 && h > 0 ? w / h : null;
+}
+
+/**
+ * The `aspect_ratio` value that makes this model emit the given shape, or null
+ * when it cannot. Mirrors `aspect_option_for` in `backend/app/graph/presets.py`:
+ * compared numerically rather than by spelling, because providers disagree on
+ * it — Runway's enum says "1920:1080" where everyone else says "16:9". A model
+ * without the param has a fixed output shape, which either matches or doesn't.
+ */
+export function aspectOptionFor(model: CatalogModel, ratio: string): string | null {
+  const target = ratioValue(ratio);
+  if (target === null) return null;
+
+  const spec = model.params.find((p) => p.name === "aspect_ratio");
+  if (spec) {
+    const values = (spec.options ?? []).map((o) => o.value);
+    if (values.includes(ratio)) return ratio;
+    return (
+      values.find((v) => {
+        const own = ratioValue(v);
+        return own !== null && Math.abs(own - target) < 0.01;
+      }) ?? null
+    );
+  }
+
+  const declared = model.output_aspect_ratio;
+  if (typeof declared === "string") {
+    const own = ratioValue(declared);
+    if (own !== null && Math.abs(own - target) < 0.01) return declared;
+  }
+  return null;
+}
+
 export function statusReason(model: CatalogModel): string | null {
   switch (model.status) {
     case "ready":

@@ -6,6 +6,7 @@
  * from the assets table at load time rather than persisted in the graph.
  */
 
+import * as React from "react";
 import { type NodeProps } from "@xyflow/react";
 import {
   ArrowsClockwiseIcon,
@@ -33,6 +34,12 @@ import {
   barChip,
   menuItem,
 } from "./node-chrome";
+import {
+  DetailChip,
+  ExpandButton,
+  ExpandDetails,
+  NodeExpandModal,
+} from "./expand-modal";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 
 const NODE_WIDTH = 260;
@@ -43,6 +50,13 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
   const asset = data.asset;
   const uploading = data.uploading ?? false;
   const accent = accentFor(asset?.modality ?? "any");
+
+  const [expanded, setExpanded] = React.useState(false);
+  // Audio has no full-size view — only a visual asset offers the expand.
+  const expandMedia =
+    !uploading && asset && (asset.modality === "image" || asset.modality === "video")
+      ? { url: asset.url, isVideo: asset.modality === "video" }
+      : null;
 
   return (
     <div style={{ width: NODE_WIDTH }}>
@@ -56,6 +70,7 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
         <OutputPort modality={asset?.modality ?? "any"} className="top-4" />
 
         <div className="relative flex min-h-44 items-center justify-center bg-[#faf8f4]">
+          {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
           {uploading ? (
             <div className="flex flex-col items-center gap-2 py-10 text-center">
               <SpinnerIcon className="size-5 animate-spin text-[#8a8271]" />
@@ -154,6 +169,19 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
           </MoreMenu>
         </FloatingBar>
       </div>
+
+      {expandMedia && asset ? (
+        <NodeExpandModal open={expanded} onOpenChange={setExpanded} media={expandMedia}>
+          <ExpandDetails
+            heading={wire.title || asset.filename || "Upload"}
+            onDownload={() => window.open(asset.url, "_blank", "noopener,noreferrer")}
+            chips={<DetailChip>{asset.mediaType}</DetailChip>}
+            footer={
+              asset.width && asset.height ? `${asset.width} × ${asset.height} px` : null
+            }
+          />
+        </NodeExpandModal>
+      ) : null}
     </div>
   );
 }

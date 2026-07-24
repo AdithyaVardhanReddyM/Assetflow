@@ -493,16 +493,24 @@ export function StudioShell({
           if (nodeId) patchRunState(nodeId, { status: "pending" });
           break;
         case "node.started":
-          if (nodeId) patchRunState(nodeId, { status: "running", progress: 0 });
-          break;
-        case "node.progress":
           if (nodeId)
-            patchRunState(nodeId, {
-              status: "running",
-              progress:
-                typeof event.progress_pct === "number" ? event.progress_pct : undefined,
-            });
+            patchRunState(nodeId, { status: "running", progress: 0, progressMessage: null });
           break;
+        case "node.progress": {
+          if (!nodeId) break;
+          const patch: Partial<NodeRunState> = {
+            status: "running",
+            // Every tick restates the provider's wording (or lack of one), so
+            // "Waiting in queue" clears the moment generation actually starts.
+            progressMessage:
+              typeof event.message === "string" && event.message ? event.message : null,
+          };
+          // Absent pct must not wipe the last real one — spreading an explicit
+          // `undefined` into the run state would.
+          if (typeof event.progress_pct === "number") patch.progress = event.progress_pct;
+          patchRunState(nodeId, patch);
+          break;
+        }
         case "node.completed": {
           if (!nodeId) break;
           const asset = (event.assets as RunEventAsset[] | undefined)?.[0];
@@ -512,6 +520,7 @@ export function StudioShell({
           patchRunState(nodeId, {
             status: "succeeded",
             progress: 1,
+            progressMessage: null,
             output: { url, mediaType: asset?.media_type ?? null, text: asset?.text ?? null },
           });
           break;

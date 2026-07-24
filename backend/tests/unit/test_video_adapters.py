@@ -11,6 +11,8 @@ touches the network.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from genblaze_core import Modality
 from genblaze_core.exceptions import ProviderError
@@ -69,6 +71,89 @@ def test_seedance_aliases_ratio_and_routes_frames_then_references():
     assert payload["first_frame"] == "https://x.test/a.png"
     assert payload["last_frame"] == "https://x.test/b.png"
     assert payload["reference_images"] == ["https://x.test/c.png"]
+
+
+class _FakeResponse:
+    """Just enough of `httpx.Response` for `GMICloudBase._submit_request`."""
+
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self._body = body
+        self.text = json.dumps(body)
+        self.headers = {}
+
+    def json(self):
+        return self._body
+
+
+class _FakeClient:
+    """Replays a canned sequence of responses and counts the posts."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.posts = []
+
+    def post(self, url, json=None):
+        self.posts.append((url, json))
+        return self._responses.pop(0)
+
+
+_GMI_502 = {"error": "Backend error (401). Please try again."}
+
+
+def test_gmi_submit_retries_a_flaky_5xx_and_succeeds(monkeypatch):
+    """GMI answers a valid submit with `500 Backend error (401)` maybe half the
+    time; the same payload goes through seconds later. GenBlaze never retries
+    submit, so without this the canvas shows a dead node on a live workflow."""
+    from app.engine import genblaze_adapters
+    from app.engine.genblaze_adapters import gmicloud_video_provider
+
+    monkeypatch.setattr(genblaze_adapters.time, "sleep", lambda _: None)
+    provider = gmicloud_video_provider()
+    client = _FakeClient(
+        [
+            _FakeResponse(500, _GMI_502),
+            _FakeResponse(500, _GMI_502),
+            _FakeResponse(200, {"request_id": "req-live"}),
+        ]
+    )
+    provider._http_client = client
+
+    result = provider._submit_request("seedance-2-0-fast-260128", {"prompt": "p"})
+
+    assert result.prediction_id == "req-live"
+    assert len(client.posts) == 3
+
+
+def test_gmi_submit_gives_up_after_the_attempt_budget(monkeypatch):
+    from app.engine import genblaze_adapters
+    from app.engine.genblaze_adapters import gmicloud_video_provider
+
+    monkeypatch.setattr(genblaze_adapters.time, "sleep", lambda _: None)
+    provider = gmicloud_video_provider()
+    client = _FakeClient([_FakeResponse(500, _GMI_502)] * 3)
+    provider._http_client = client
+
+    with pytest.raises(ProviderError, match="Backend error"):
+        provider._submit_request("seedance-2-0-fast-260128", {"prompt": "p"})
+    assert len(client.posts) == genblaze_adapters._GMI_SUBMIT_ATTEMPTS
+
+
+def test_gmi_submit_does_not_retry_a_rejected_payload(monkeypatch):
+    """A 400 is our mistake, not GMI's weather — asking again just burns time."""
+    from app.engine import genblaze_adapters
+    from app.engine.genblaze_adapters import gmicloud_image_provider
+
+    monkeypatch.setattr(genblaze_adapters.time, "sleep", lambda _: None)
+    provider = gmicloud_image_provider()
+    client = _FakeClient(
+        [_FakeResponse(400, {"error": "invalid payload parameters: prompt"})]
+    )
+    provider._http_client = client
+
+    with pytest.raises(ProviderError, match="invalid payload"):
+        provider._submit_request("seedream-5.0-lite", {})
+    assert len(client.posts) == 1
 
 
 def test_kling_v3_stringifies_duration_and_requires_a_start_image():

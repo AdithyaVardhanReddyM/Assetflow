@@ -191,6 +191,10 @@ function paramLabel(param: ParamDescriptor): string {
   return param.label || param.name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
 
+export function formatParamValue(param: ParamDescriptor, value: unknown): string {
+  return formatValue(param, value);
+}
+
 function formatValue(param: ParamDescriptor, value: unknown): string {
   // An unset param still runs at the catalog default, so show that rather than
   // a dash — a chip reading "—" claims the node has no aspect ratio when it does.

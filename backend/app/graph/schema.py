@@ -78,6 +78,10 @@ class GenerateNodeData(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     fallback_models: list[str] = Field(default_factory=list, max_length=3)
     expected_duration_sec: float | None = None
+    #: Specialized flavor of this node ("character_sheet"): same wire shape,
+    #: but the compiler shapes the prompt and locks params to fit the job —
+    #: see graph/presets.py. Not a model role: any capable model qualifies.
+    preset: Literal["character_sheet"] | None = None
     #: Canvas-only caption; never sent to a provider.
     title: str | None = Field(default=None, max_length=120)
 

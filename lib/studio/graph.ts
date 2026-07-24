@@ -77,6 +77,12 @@ export type GenerateNodeData = {
   params: Record<string, unknown>;
   fallback_models: string[];
   expected_duration_sec?: number | null;
+  /**
+   * Specialized flavor of this node ("character_sheet") — mirrors `preset` in
+   * schema.py. The compiler shapes the prompt and locks params off it; the
+   * canvas filters the model picker and locks the ratio chip to match.
+   */
+  preset?: string | null;
   title: string | null;
 };
 
@@ -252,6 +258,8 @@ export type NodeRunState = {
   status: NodeRunStatus;
   /** 0..1 while running. */
   progress?: number | null;
+  /** Provider-worded state while running, e.g. "Waiting in queue". */
+  progressMessage?: string | null;
   error?: string | null;
   output?: NodeRunOutput | null;
 };

@@ -19,6 +19,12 @@ from app.catalog.models import ModelDescriptor, ParamDescriptor, ProviderStatus
 from app.catalog.registry import Catalog, PortSpec
 from app.graph.errors import Diagnostic, ErrorCode, WarningCode, error, warning
 from app.graph.plan import ExecutionPlan, PlanEstimates, PlannedStep, PlanResult
+from app.graph.presets import (
+    CHARACTER_SHEET,
+    CHARACTER_SHEET_RATIO,
+    aspect_option_for,
+    character_sheet_prompt,
+)
 from app.graph.schema import (
     VIDEO_TRACK_ID,
     AssetRef,
@@ -560,6 +566,31 @@ def _build_step(
             )
             return None
 
+    # A character sheet is locked to one shape — three panels side by side
+    # only fit a wide canvas — so the model has to be an image model that can
+    # actually emit 16:9, and the aspect param is forced rather than offered.
+    preset_ratio: str | None = None
+    if data.preset == CHARACTER_SHEET:
+        if model.modality.value != "image":
+            ctx.fail(
+                ErrorCode.MODALITY_UNSUPPORTED,
+                f"A character sheet needs an image model, but {model.label} "
+                f"produces {model.modality.value}.",
+                node_id=node.id,
+                hint="Pick an image model.",
+            )
+            return None
+        preset_ratio = aspect_option_for(model, CHARACTER_SHEET_RATIO)
+        if preset_ratio is None:
+            ctx.fail(
+                ErrorCode.MODALITY_UNSUPPORTED,
+                f"{model.label} cannot produce a {CHARACTER_SHEET_RATIO} image, "
+                "which a character sheet requires.",
+                node_id=node.id,
+                hint=f"Pick an image model that supports {CHARACTER_SHEET_RATIO}.",
+            )
+            return None
+
     # prompt: a connected text node wins over the literal typed on the node
     prompt = data.prompt
     for edge in incoming:
@@ -569,10 +600,33 @@ def _build_step(
     # An upstream LLM step writes this prompt, so there is nothing to resolve
     # here: the words do not exist until that step has run.
     prompt_from = index_of[prompt_pred] if prompt_pred is not None else None
+    if data.preset == CHARACTER_SHEET:
+        # The template supplies the words, so the usual prompt requirement
+        # relaxes to "describe the character *somehow*" — typed, written by an
+        # LLM, or shown via a reference image.
+        if (
+            prompt_from is None
+            and not (prompt or "").strip()
+            and not upload_preds
+            and not step_preds
+        ):
+            ctx.fail(
+                ErrorCode.NO_PROMPT,
+                "This character sheet needs a description or a reference image.",
+                node_id=node.id,
+                hint="Describe the character, or connect a reference image.",
+            )
+            return None
+        if prompt_from is None:
+            prompt = character_sheet_prompt(prompt)
+        else:
+            # The LLM's words do not exist yet; the runner wraps them the
+            # moment they do — keyed off this marker.
+            metadata["prompt_preset"] = CHARACTER_SHEET
     # Some models are driven entirely by their input ports — lipsync takes an
     # avatar and a speech track and has nothing to describe — so a missing
     # prompt is only an error for models that declare they need one.
-    if model.requires_prompt and prompt_from is None and not (prompt or "").strip():
+    elif model.requires_prompt and prompt_from is None and not (prompt or "").strip():
         ctx.fail(
             ErrorCode.NO_PROMPT,
             "This node needs a prompt.",
@@ -582,7 +636,13 @@ def _build_step(
         )
         return None
 
-    params = _validate_params(node.id, data.params, model, ctx)
+    raw_params = dict(data.params)
+    if preset_ratio is not None and any(p.name == "aspect_ratio" for p in model.params):
+        # Locked, not defaulted: whatever the canvas stored, a sheet renders
+        # wide. Set before validation so a stale stored ratio cannot fail a
+        # node whose value was about to be overridden anyway.
+        raw_params["aspect_ratio"] = preset_ratio
+    params = _validate_params(node.id, raw_params, model, ctx)
 
     # Uploads either ride GenBlaze's external_inputs, or — when the model exposes
     # a URL-typed parameter — go in as a param. The param path is what makes

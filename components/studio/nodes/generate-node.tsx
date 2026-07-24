@@ -28,6 +28,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   type CatalogModel,
+  aspectOptionFor,
   findModel,
   modelsForModality,
   remapParams,
@@ -41,14 +42,21 @@ import type {
   NodeRunState,
   StudioNode,
 } from "@/lib/studio/graph";
-import { accentFor } from "@/lib/studio/node-ui";
+import { CHARACTER_SHEET_RATIO, accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { ModelLogo } from "../model-logos";
 import { ModelMenuList } from "../model-menu";
 import { OutputPort, PortRail } from "./ports";
 import { RunBeam, RunWell, isRunBusy } from "./run-well";
-import { ROLE_COPY, ROLE_ICON, ROLE_LABEL } from "./roles";
+import {
+  PRESET_COPY,
+  PRESET_ICON,
+  PRESET_LABEL,
+  ROLE_COPY,
+  ROLE_ICON,
+  ROLE_LABEL,
+} from "./roles";
 import {
   BarButton,
   BarDivider,
@@ -59,6 +67,7 @@ import {
   NodeCard,
   ParamControl,
   barChip,
+  formatParamValue,
   menuItem,
   menuSurface,
 } from "./node-chrome";
@@ -68,6 +77,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  type ExpandInput,
+  DetailChip,
+  ExpandButton,
+  ExpandDetails,
+  NodeExpandModal,
+  timeAgo,
+} from "./expand-modal";
 
 /**
  * The card is inscribed in this box: a landscape node is MAX_WIDTH across, a
@@ -238,6 +255,26 @@ function drivingText(source: { data: FlowNodeData } | undefined): string {
   return source.data.run?.output?.text?.trim() ?? "";
 }
 
+/**
+ * What an upstream node currently shows, as a modal input thumbnail. Media
+ * only — an audio source or an LLM has nothing a thumbnail could depict.
+ */
+function sourceThumb(node: { data: FlowNodeData } | undefined): ExpandInput | null {
+  if (!node) return null;
+  const d = node.data;
+  if (d.kind === "input.upload") {
+    if (!d.asset) return null;
+    if (d.asset.modality !== "image" && d.asset.modality !== "video") return null;
+    return { url: d.asset.url, isVideo: d.asset.modality === "video" };
+  }
+  const out = d.history?.[0] ?? (d.run?.status === "succeeded" ? d.run.output : null);
+  const url = out?.url ?? null;
+  const mediaType = out?.mediaType ?? null;
+  if (!url || !mediaType) return null;
+  if (!mediaType.startsWith("image/") && !mediaType.startsWith("video/")) return null;
+  return { url, isVideo: mediaType.startsWith("video/") };
+}
+
 export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const { catalog, updateNode, deleteNode, duplicateNode, runFrom, downloadNode } =
     useStudio();
@@ -248,12 +285,19 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   // The model's role wins over its modality where it has one, so the three
   // audio tools do not all render as an identical "Audio" node.
   const role = model?.role ?? "";
+  // A preset ("character_sheet") is the node's own specialization — sharper
+  // than role or modality, so it wins the icon, the copy, and the picker.
+  const preset = wire.preset ?? "";
   const ports = visiblePorts(catalog, "generate", model);
   // Same role only: a lip-sync node offers the lip-sync models and nothing
   // else, and they never appear on a plain video node — modality alone would
-  // mix the two, since both are `video`.
+  // mix the two, since both are `video`. A character sheet narrows further,
+  // to the image models that can actually emit its 16:9 canvas.
   const options = modelsForModality(catalog, modality).filter(
-    (m) => (m.role ?? "") === role,
+    (m) =>
+      (m.role ?? "") === role &&
+      (preset !== "character_sheet" ||
+        aspectOptionFor(m, CHARACTER_SHEET_RATIO) !== null),
   );
 
   const incoming = useNodeConnections({ handleType: "target" });
@@ -276,6 +320,23 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   );
   const promptSource = useNodesData<StudioNode>(promptSourceIds)[0];
 
+  // Whatever is wired into the media ports — the modal shows their previews as
+  // the generation's inputs (the start/end frames, the reference images).
+  const mediaSourceIds = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          incoming.filter((c) => c.targetHandle !== "prompt").map((c) => c.source),
+        ),
+      ),
+    [incoming],
+  );
+  const mediaSources = useNodesData<StudioNode>(mediaSourceIds);
+  const inputThumbs = React.useMemo(
+    () => mediaSources.map(sourceThumb).filter((t): t is ExpandInput => t !== null),
+    [mediaSources],
+  );
+
   // Changing the model changes which handles exist; React Flow caches handle
   // geometry per node and would keep drawing edges to the old positions.
   const updateNodeInternals = useUpdateNodeInternals();
@@ -284,10 +345,12 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     updateNodeInternals(id);
   }, [id, portKey, updateNodeInternals]);
 
-  const Icon = ROLE_ICON[role] ?? MODALITY_ICON[modality] ?? ImageGenIcon;
-  const kindLabel = ROLE_LABEL[role] ?? MODALITY_LABEL[modality] ?? "Generate";
+  const Icon =
+    PRESET_ICON[preset] ?? ROLE_ICON[role] ?? MODALITY_ICON[modality] ?? ImageGenIcon;
+  const kindLabel =
+    PRESET_LABEL[preset] ?? ROLE_LABEL[role] ?? MODALITY_LABEL[modality] ?? "Generate";
   const accent = accentFor(role || modality);
-  const copy = ROLE_COPY[role];
+  const copy = PRESET_COPY[preset] ?? ROLE_COPY[role];
   const promptDriven = connected.has("prompt");
   const drivenText = promptDriven ? drivingText(promptSource) : "";
 
@@ -356,6 +419,20 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   const ratio = dims ? `${dims.w}:${dims.h}` : ratioOf(wire.params ?? {}, model);
   const shape = nodeShape(ratio, modality);
 
+  // --- expand modal -------------------------------------------------------
+
+  const [expanded, setExpanded] = React.useState(false);
+  // Only a settled visual take expands — audio and text have no full-size
+  // view, and a busy or failed well has nothing to blow up yet.
+  const expandMedia =
+    !liveOwnsWell && displayed?.url && (modality === "image" || modality === "video")
+      ? {
+          url: displayed.url,
+          isVideo:
+            modality === "video" || Boolean(displayed.mediaType?.startsWith("video/")),
+        }
+      : null;
+
   // A model driven entirely by its ports has nothing to describe, so it shows
   // neither the text box nor the port that would fill it.
   const takesPrompt = model?.requires_prompt !== false;
@@ -372,13 +449,20 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
   }, [id, shape.width, shape.well, updateNodeInternals]);
 
   function selectModel(next: CatalogModel) {
+    let params = remapParams(wire.params ?? {}, next);
+    if (preset === "character_sheet") {
+      // Locked to the sheet's canvas, in whatever spelling this provider's
+      // enum uses ("16:9", or Runway's "1920:1080").
+      const option = aspectOptionFor(next, CHARACTER_SHEET_RATIO);
+      if (option) params = { ...params, aspect_ratio: option };
+    }
     updateNode(id, {
       provider: next.provider,
       model: next.id,
       // The compiler fails a node whose declared modality disagrees with its
       // model's, so these two always move together.
       modality: next.modality,
-      params: remapParams(wire.params ?? {}, next),
+      params,
     });
   }
 
@@ -386,8 +470,15 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     updateNode(id, { params: { ...(wire.params ?? {}), [name]: value } });
   }
 
-  const basicParams = (model?.params ?? []).filter((p) => (p.group ?? "basic") === "basic");
-  const advancedParams = (model?.params ?? []).filter((p) => p.group === "advanced");
+  // A character sheet's ratio is not the user's to pick — the chip disappears
+  // rather than offering a choice the compiler would overrule.
+  const lockedParams = preset === "character_sheet" ? ["aspect_ratio"] : [];
+  const basicParams = (model?.params ?? []).filter(
+    (p) => (p.group ?? "basic") === "basic" && !lockedParams.includes(p.name),
+  );
+  const advancedParams = (model?.params ?? []).filter(
+    (p) => p.group === "advanced" && !lockedParams.includes(p.name),
+  );
   // Full-width controls that sit in the node body (the lyrics box, the voice
   // picker) rather than shrinking into a bar chip.
   const bodyParams = (model?.params ?? []).filter((p) => p.group === "body");
@@ -497,10 +588,11 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             While generating it wears the prompt bar's border beam. */}
         <RunBeam active={isRunBusy(data.run)}>
           <div
-            className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
+            className="group relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
             style={{ height: shape.well }}
           >
             <RunWell run={wellRun} modality={modality} onMediaSize={onMediaSize} />
+            {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
             {wellRun ? null : (
               <div className="flex flex-col items-center gap-2.5 px-3 text-center">
                 <span
@@ -667,6 +759,46 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
         </p>
       ) : null}
 
+      {expandMedia ? (
+        <NodeExpandModal open={expanded} onOpenChange={setExpanded} media={expandMedia}>
+          <ExpandDetails
+            heading={timeAgo(displayed?.createdAt) ?? kindLabel}
+            onDownload={() => downloadNode(id, displayed ?? undefined)}
+            prompt={(promptDriven ? drivenText : (wire.prompt ?? "")) || null}
+            inputs={inputThumbs}
+            chips={
+              <>
+                {model ? (
+                  <DetailChip>
+                    <ModelLogo
+                      provider={model.provider}
+                      modelId={model.id}
+                      label={model.label}
+                      size="sm"
+                    />
+                    <span className="max-w-36 truncate">{model.label}</span>
+                  </DetailChip>
+                ) : null}
+                {(model?.params ?? [])
+                  .filter((p) => (p.group ?? "basic") !== "body")
+                  .map((param) => {
+                    const text = formatParamValue(param, (wire.params ?? {})[param.name]);
+                    if (text === "—") return null;
+                    return (
+                      <DetailChip key={param.name}>
+                        {/* A bare "On" says nothing — booleans keep their name. */}
+                        {param.type === "boolean"
+                          ? `${param.label ?? param.name} ${text}`
+                          : text}
+                      </DetailChip>
+                    );
+                  })}
+              </>
+            }
+            footer={dims ? `${dims.w} × ${dims.h} px` : null}
+          />
+        </NodeExpandModal>
+      ) : null}
     </div>
   );
 }

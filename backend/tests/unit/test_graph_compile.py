@@ -165,6 +165,19 @@ def test_text_node_overrides_literal_prompt(catalog):
 
 
 def test_upload_node_becomes_external_input(catalog):
+    # Force the unavailable state on a copy, like
+    # `test_unavailable_provider_without_fallback` does: GMI_API_KEY lives in
+    # backend/.env, and `get_settings()` exports that file into os.environ, so
+    # whether gmicloud reads READY here comes down to whether some *other* test
+    # module imported app.config during collection.
+    from app.catalog.models import ProviderStatus
+
+    catalog = catalog.model_copy(deep=True)
+    gmi = catalog.provider("gmicloud")
+    gmi.status = ProviderStatus.MISSING_KEY
+    for m in gmi.models:
+        m.status = ProviderStatus.MISSING_KEY
+
     graph = build(
         [
             node("up", "input.upload", asset_id="asset-1"),
@@ -181,7 +194,6 @@ def test_upload_node_becomes_external_input(catalog):
             modality="image", sha256="ab" * 32,
         )
     }
-    # gmicloud isn't installed, so allow the mock substitution path
     result = plan_graph(graph, catalog=catalog, assets=assets, allow_mock_fallback=True)
     assert result.valid, result.errors
     step = result.plan.step_for_node("v")
@@ -832,3 +844,83 @@ def test_compiler_never_raises_on_hostile_input(catalog):
     result = plan_graph(graph, catalog=catalog)
     assert not result.valid
     assert result.errors
+
+
+# --------------------------------------------------------------------------- #
+# presets — the character sheet
+# --------------------------------------------------------------------------- #
+
+
+def sheet(node_id, **kw):
+    return gen(
+        node_id, model="mock-image-v1", modality="image",
+        preset="character_sheet", **kw,
+    )
+
+
+def test_character_sheet_wraps_prompt_and_locks_ratio(catalog):
+    """The node runs a collage instruction — face close-up, full-body front
+    and back — with the user's words folded in, and always renders 16:9."""
+    result = plan_graph(
+        build([sheet("a", prompt="a knight in bronze armour",
+                     params={"aspect_ratio": "1:1"})]),
+        catalog=catalog,
+    )
+    assert result.valid, result.errors
+    step = result.plan.steps[0]
+    assert "full-body front view" in step.prompt
+    assert "full-body back view" in step.prompt
+    assert step.prompt.endswith("a knight in bronze armour")
+    # The stored square is overridden, not honoured: sheets are wide.
+    assert step.params["aspect_ratio"] == "16:9"
+
+
+def test_character_sheet_rejects_non_image_model(catalog):
+    result = plan_graph(
+        build([gen("a", preset="character_sheet")]),  # mock-video-v1
+        catalog=catalog,
+    )
+    assert ErrorCode.MODALITY_UNSUPPORTED in codes(result)
+
+
+def test_character_sheet_runs_on_reference_image_alone(catalog):
+    """No typed prompt is fine when a reference image describes the character —
+    the template alone is a complete instruction."""
+    graph = build(
+        [
+            node("up", "input.upload", asset_id="asset-1", y=0),
+            sheet("a", prompt=None, y=100),
+        ],
+        [edge("e1", "up", "a", "image_ref")],
+    )
+    assets = {
+        "asset-1": AssetRef(
+            asset_id="asset-1", url="https://b2/ref.png", media_type="image/png",
+            modality="image", sha256="ab" * 32,
+        )
+    }
+    result = plan_graph(graph, catalog=catalog, assets=assets)
+    assert result.valid, result.errors
+    assert "Character reference sheet" in result.plan.steps[0].prompt
+
+
+def test_character_sheet_with_nothing_to_describe_fails(catalog):
+    result = plan_graph(build([sheet("a", prompt=None)]), catalog=catalog)
+    assert ErrorCode.NO_PROMPT in codes(result)
+
+
+def test_character_sheet_defers_llm_prompt_to_the_runner(catalog):
+    """An LLM-written description cannot be wrapped at compile time — the
+    marker tells the runner to wrap the words once they exist."""
+    graph = build(
+        [
+            gen("llm", model="mock-llm-v1", modality="text", prompt="rough idea", y=0),
+            sheet("a", prompt=None, y=100),
+        ],
+        [edge("e1", "llm", "a", "prompt")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    step = result.plan.step_for_node("a")
+    assert step.prompt_from == 0
+    assert step.metadata["prompt_preset"] == "character_sheet"

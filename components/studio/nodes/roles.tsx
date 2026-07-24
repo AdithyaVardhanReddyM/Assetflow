@@ -11,6 +11,7 @@
 
 import {
   SpeakerHifiIcon,
+  UserFocusIcon,
   UserSoundIcon,
 } from "@phosphor-icons/react";
 
@@ -57,5 +58,26 @@ export const ROLE_COPY: Record<string, { placeholder: string; well: string }> = 
   sfx: {
     placeholder: "Describe the sound effect…",
     well: "Your audio will appear here",
+  },
+};
+
+/**
+ * Presentation for a node's `preset` — the specialized generate flavors that
+ * are a job for the prompt rather than a model class (see graph/presets.py).
+ * Wins over role and modality, since a preset is the most specific thing a
+ * node can say about itself.
+ */
+export const PRESET_ICON: Record<string, RoleIcon> = {
+  character_sheet: UserFocusIcon,
+};
+
+export const PRESET_LABEL: Record<string, string> = {
+  character_sheet: "Character sheet",
+};
+
+export const PRESET_COPY: Record<string, { placeholder: string; well: string }> = {
+  character_sheet: {
+    placeholder: "Describe the character — identity, outfit, style…",
+    well: "Face close-up plus full-body front and back will appear here",
   },
 };

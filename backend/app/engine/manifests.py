@@ -54,6 +54,39 @@ def _signing_backend() -> Any:
     )
 
 
+# Long enough for a provider to queue a job and only then fetch the input —
+# Replicate downloads at dequeue, not at submit — and for ffmpeg to stream a
+# whole composition. Short enough that a signature which leaks into a manifest
+# is dead long before anyone reads that manifest back.
+PROVIDER_URL_TTL = 6 * 3600
+
+
+def sign_for_fetch(url: str, *, expires_in: int = PROVIDER_URL_TTL) -> str:
+    """Presign a durable URL so something *outside* this process can fetch it.
+
+    Our bucket is private, so a durable `https://s3.../assetflow/...` URL is a
+    401 to everyone but us. Anything holding it that is not us — a provider's
+    downloader fetching a reference image, ffmpeg opening a composition clip —
+    needs a signature attached first.
+
+    Passes through anything that is not ours (a provider CDN URL, a local-mode
+    `/media` URL, a `file://` path), and returns the input unchanged if signing
+    fails: the fetcher's own error names the URL, which beats one from here.
+    """
+    settings = get_settings()
+    if settings.storage_mode is StorageMode.LOCAL or not settings.b2_configured:
+        return url
+    if not url.startswith("http"):
+        return url
+    try:
+        backend = _signing_backend()
+        key = backend.key_from_url(url)
+        return backend.presigned_get_url(key, expires_in=expires_in) if key else url
+    except Exception as exc:  # noqa: BLE001 - fall back to the durable URL
+        log.warning("storage.sign_for_fetch_failed", error=f"{type(exc).__name__}: {exc}")
+        return url
+
+
 def preview_url(url_or_key: str | None, *, expires_in: int = 3600) -> str | None:
     """Best-effort presigned URL for rendering in an `<img>`/`<video>`.
 

@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = 90
     per_tenant_run_limit: int = 3
     step_timeout_seconds: float = 600.0
+    # Video jobs routinely outlive the default ceiling (a queued Seedance clip
+    # burned its credits against a 600s poll limit while GMI kept generating).
+    # Plans containing a video step poll up to this long instead.
+    video_step_timeout_seconds: float = 1800.0
     max_run_attempts: int = 3
 
     @field_validator("cors_origins", "clerk_authorized_parties", mode="before")

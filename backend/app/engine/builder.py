@@ -11,9 +11,10 @@ Two choices worth stating outright:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from app.engine.manifests import sign_for_fetch
 from app.engine.providers import build_provider
 from app.graph.plan import ExecutionPlan, PlannedStep
 from app.graph.schema import AssetRef
@@ -43,17 +44,72 @@ class BuildContext:
     run_id: str
     assets: dict[str, AssetRef]
     preflight: bool = True
+    #: node_id -> upstream prediction id. Steps listed here re-attach to a job
+    #: the provider is already running (or has finished) instead of submitting
+    #: a new one — the retry path for a step that timed out after its credits
+    #: were already spent.
+    resume_ids: dict[str, str] = field(default_factory=dict)
+
+
+class ResumeProvider:
+    """A provider that re-attaches to an in-flight upstream job.
+
+    GenBlaze's resume path takes the prediction id as an *argument* —
+    `aresume(prediction_id, step, config)` — there is no RunnableConfig key
+    for it, and `Pipeline` only ever executes a step through the provider's
+    `invoke`/`ainvoke`. Wrapping the adapter is therefore the seam: the
+    pipeline keeps its sink, manifest, events and input chaining, and the one
+    thing that changes is that this step polls/fetches the checkpointed job
+    instead of calling `submit()` — which is what keeps a retried timeout from
+    billing the provider twice.
+    """
+
+    def __init__(self, inner: Any, prediction_id: str) -> None:
+        self._inner = inner
+        self._prediction_id = prediction_id
+
+    def __getattr__(self, name: str) -> Any:
+        # Everything the pipeline consults — name, capabilities, preflight
+        # validation, cost estimation, param normalization — is the adapter's.
+        return getattr(self._inner, name)
+
+    def invoke(self, step: Any, config: Any = None) -> Any:
+        return self._inner.resume(self._prediction_id, step, config)
+
+    async def ainvoke(self, step: Any, config: Any = None) -> Any:
+        return await self._inner.aresume(self._prediction_id, step, config)
 
 
 def _to_genblaze_asset(ref: AssetRef) -> Any:
     from genblaze_core import Asset
 
     return Asset(
-        url=ref.url,
+        # Signed, because this URL is handed to a *remote* provider: Replicate,
+        # Runway and GMI all fetch a reference image server-side, and the
+        # durable URL on the asset row is a 401 to anyone without our keys.
+        url=sign_for_fetch(ref.url),
         media_type=ref.media_type,
         sha256=ref.sha256,
         size_bytes=ref.size_bytes,
     )
+
+
+def _sign_urls(value: Any) -> Any:
+    """Copy `value`, presigning every private-bucket URL nested inside it.
+
+    Two kinds of param carry an asset a fetcher outside this process has to
+    open: a URL-typed param (an upload routed to a model that takes a URL
+    rather than a chained input) and a composition clip, which travels as a
+    URL inside the edit. Copied rather than mutated — the plan is persisted and
+    goes on the manifest, and durable URLs are what belong there.
+    """
+    if isinstance(value, dict):
+        return {key: _sign_urls(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sign_urls(item) for item in value]
+    if isinstance(value, str) and value.startswith("http"):
+        return sign_for_fetch(value)
+    return value
 
 
 def _step_kwargs(step: PlannedStep, ctx: BuildContext) -> dict[str, Any]:
@@ -95,6 +151,9 @@ def build_pipeline(plan: ExecutionPlan, ctx: BuildContext) -> Any:
 
     for step in plan.steps:
         provider = build_provider(step.provider_key, step.model)
+        resume_id = ctx.resume_ids.get(step.node_id)
+        if resume_id:
+            provider = ResumeProvider(provider, resume_id)
         modality = getattr(Modality, _MODALITY_BY_NAME[step.modality])
         step_type = getattr(StepType, _STEP_TYPE_BY_NAME.get(step.step_type, "GENERATE"))
 
@@ -104,9 +163,11 @@ def build_pipeline(plan: ExecutionPlan, ctx: BuildContext) -> Any:
             prompt=step.prompt,
             modality=modality,
             step_type=step_type,
-            params=dict(step.params),
+            params=_sign_urls(dict(step.params)),
             metadata={**step.metadata, "node_id": step.node_id, "run_id": ctx.run_id},
-            fallback_models=step.fallback_models or None,
+            # A fallback re-submits under another model — exactly the second
+            # bill a resumed step exists to avoid.
+            fallback_models=None if resume_id else (step.fallback_models or None),
             expected_duration_sec=step.expected_duration_sec,
             **_step_kwargs(step, ctx),
         )
@@ -116,5 +177,6 @@ def build_pipeline(plan: ExecutionPlan, ctx: BuildContext) -> Any:
         steps=len(plan.steps),
         max_concurrency=plan.max_concurrency,
         providers=sorted({s.provider_key for s in plan.steps}),
+        resumed=sorted(n for n in ctx.resume_ids if plan.step_for_node(n)) or None,
     )
     return pipeline

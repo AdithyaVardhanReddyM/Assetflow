@@ -9,7 +9,10 @@
  *
  * Every busy state — queued, running, waiting on the result — is one voice: a
  * shimmering "Generating" (the surrounding card carries a border beam, wired
- * in the node components via `isRunBusy`). No spinners, no percentages.
+ * in the node components via `isRunBusy`). When the provider volunteers more —
+ * a queue status, or a real 0..1 progress (Runway reports one) — the shimmer
+ * takes its wording and a slim bar grows beneath it; providers that report
+ * nothing keep the plain shimmer. No spinners either way.
  */
 
 import * as React from "react";
@@ -81,11 +84,28 @@ export function RunWell({
   if (!run) return null;
 
   if (isRunBusy(run)) {
+    const pct =
+      run.status === "running" &&
+      typeof run.progress === "number" &&
+      run.progress > 0 &&
+      run.progress < 1
+        ? run.progress
+        : null;
     return (
-      <ShimmeringText
-        text="Generating"
-        className="text-[13px] font-medium tracking-[0.02em]"
-      />
+      <div className="flex w-full flex-col items-center gap-2.5 px-8">
+        <ShimmeringText
+          text={run.progressMessage || "Generating"}
+          className="text-[13px] font-medium tracking-[0.02em]"
+        />
+        {pct !== null && (
+          <div className="h-[3px] w-full max-w-36 overflow-hidden rounded-full bg-[#1f211c]/10">
+            <div
+              className="h-full rounded-full bg-[#1f211c]/45 transition-[width] duration-700 ease-out"
+              style={{ width: `${Math.round(pct * 100)}%` }}
+            />
+          </div>
+        )}
+      </div>
     );
   }
 

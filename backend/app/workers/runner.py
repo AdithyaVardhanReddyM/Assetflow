@@ -25,6 +25,7 @@ from app.engine.events import EventMapper, extract_result
 from app.engine.manifests import preview_url
 from app.engine.sinks import build_sink, collect_assets
 from app.graph.plan import ExecutionPlan, PlanEstimates, PlannedStep
+from app.graph.presets import CHARACTER_SHEET, character_sheet_prompt
 from app.graph.schema import AssetRef
 from app.logging import get_logger, run_id_var
 from app.workers import queue
@@ -109,6 +110,44 @@ async def _seed_steps(session: AsyncSession, run: Run, plan: ExecutionPlan) -> N
                 params=step.params,
             )
         )
+
+
+def _resume_targets(plan: ExecutionPlan, prior_steps: list[RunStep]) -> dict[str, str]:
+    """node_id -> upstream prediction id for steps a retry should re-attach to.
+
+    A step that hit the poll timeout was *charged* — the provider accepted the
+    job and kept running it after we stopped waiting. Its job id was
+    checkpointed on `upstream_id` (see `_apply_step_update`), so a retry can
+    poll/fetch that job instead of submitting — and paying for — a new one.
+    Only a timeout qualifies: any other failure means the upstream job itself
+    is dead and resubmitting is the correct (and only) way to get output.
+
+    Guarded on provider+model still matching the plan, so a retry of a run
+    whose graph was since edited never feeds one model's job id to another.
+    """
+    targets: dict[str, str] = {}
+    for row in prior_steps:
+        if (
+            row.status is not StepStatus.FAILED
+            or row.error_code != "timeout"
+            or not row.upstream_id
+        ):
+            continue
+        step = plan.step_for_node(row.node_id)
+        if step is None or step.provider_key != row.provider or step.model != row.model:
+            continue
+        targets[row.node_id] = row.upstream_id
+    return targets
+
+
+async def _parent_resume_ids(
+    session: AsyncSession, run: Run, plan: ExecutionPlan
+) -> dict[str, str]:
+    """Resumable upstream job ids from the run this one retries, if any."""
+    if run.parent_run_id is None:
+        return {}
+    rows = await session.execute(select(RunStep).where(RunStep.run_id == run.parent_run_id))
+    return _resume_targets(plan, list(rows.scalars()))
 
 
 async def _apply_step_update(
@@ -254,6 +293,14 @@ async def execute_run(session: AsyncSession, run_id: uuid.UUID, worker_id: str) 
 
     try:
         assets = await _load_asset_refs(session, run, plan)
+        resume_ids = await _parent_resume_ids(session, run, plan)
+        if resume_ids:
+            log.info(
+                "runner.resuming_steps",
+                run_id=str(run_id),
+                parent_run_id=str(run.parent_run_id),
+                nodes=sorted(resume_ids),
+            )
         ctx = BuildContext(
             tenant_id=run.tenant_id,
             workflow_id=str(run.workflow_id) if run.workflow_id else None,
@@ -262,6 +309,7 @@ async def execute_run(session: AsyncSession, run_id: uuid.UUID, worker_id: str) 
             # Preflight validates model slugs before any paid call. Worth the
             # latency: a typo'd model should cost nothing.
             preflight=True,
+            resume_ids=resume_ids,
         )
 
         if any(s.prompt_from is not None for s in plan.steps):
@@ -303,6 +351,18 @@ async def execute_run(session: AsyncSession, run_id: uuid.UUID, worker_id: str) 
             )
 
 
+def _step_timeout(plan: ExecutionPlan, settings: Any) -> float:
+    """Per-step poll ceiling for this plan.
+
+    GenBlaze takes one timeout for every step in a pipeline, so a plan
+    containing any video step gets the video ceiling — video jobs routinely
+    run past 600s while an image would have failed long before either limit.
+    """
+    if any(s.modality == "video" for s in plan.steps):
+        return float(settings.video_step_timeout_seconds)
+    return float(settings.step_timeout_seconds)
+
+
 def _pipeline_timeout(plan: ExecutionPlan, settings: Any) -> float:
     """Wall-clock ceiling on the whole pipeline, not a per-step guard.
 
@@ -312,7 +372,7 @@ def _pipeline_timeout(plan: ExecutionPlan, settings: Any) -> float:
     GMI: a 15s-estimated image spent >120s queued and the old 120s floor
     killed it)."""
     estimated = plan.estimates.duration_sec or 120.0
-    floor = float(settings.step_timeout_seconds) + 60.0
+    floor = _step_timeout(plan, settings) + 60.0
     return max(floor, min(estimated * 2.5, 1800.0))
 
 
@@ -375,7 +435,7 @@ async def _stream_pipeline(
     try:
         stream = pipeline.astream(
             sink=sink,
-            timeout=settings.step_timeout_seconds,
+            timeout=_step_timeout(plan, settings),
             fail_fast=False,
             raise_on_failure=False,
             pipeline_timeout=_pipeline_timeout(plan, settings),
@@ -503,7 +563,14 @@ async def _execute_staged(
     failed: set[int] = set()
 
     def resolved_prompt(step: PlannedStep) -> str | None:
-        return words[step.prompt_from] if step.prompt_from is not None else step.prompt
+        if step.prompt_from is None:
+            return step.prompt
+        prompt = words[step.prompt_from]
+        # A character sheet's literal prompt was wrapped at compile time; an
+        # LLM-written one could not be — the words only exist now.
+        if step.metadata.get("prompt_preset") == CHARACTER_SHEET:
+            return character_sheet_prompt(prompt)
+        return prompt
 
     for step in (s for s in plan.steps if s.modality == "text"):
         if step.prompt_from is not None and step.prompt_from not in words:

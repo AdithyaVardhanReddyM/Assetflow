@@ -78,6 +78,12 @@ import {
   menuSurface,
 } from "./node-chrome";
 import {
+  DetailChip,
+  ExpandButton,
+  ExpandDetails,
+  NodeExpandModal,
+} from "./expand-modal";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -286,6 +292,13 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
 
   const clipCount = tracks.reduce((n, t) => n + t.clips.length, 0);
 
+  const [expanded, setExpanded] = React.useState(false);
+  // A settled render only — a busy or failed well has nothing to blow up.
+  const expandMedia =
+    !isRunBusy(data.run) && data.run?.status === "succeeded" && data.run.output?.url
+      ? { url: data.run.output.url, isVideo: true }
+      : null;
+
   return (
     <div style={{ width: NODE_WIDTH }}>
       <NodeHeader
@@ -301,10 +314,11 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
             While rendering it wears the prompt bar's border beam. */}
         <RunBeam active={isRunBusy(data.run)}>
           <div
-            className="relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
+            className="group relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
             style={{ height: WELL_HEIGHT }}
           >
             <RunWell run={data.run} modality="video" />
+            {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
             {data.run ? null : (
               <div className="flex flex-col items-center gap-2.5 px-3 text-center">
                 <span
@@ -431,6 +445,23 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
           </MoreMenu>
         </FloatingBar>
       </div>
+
+      {expandMedia ? (
+        <NodeExpandModal open={expanded} onOpenChange={setExpanded} media={expandMedia}>
+          <ExpandDetails
+            heading="Composition"
+            onDownload={() => downloadNode(id)}
+            chips={
+              <>
+                <DetailChip>
+                  {clipCount} {clipCount === 1 ? "clip" : "clips"}
+                </DetailChip>
+                <DetailChip>{formatTime(timeline)}</DetailChip>
+              </>
+            }
+          />
+        </NodeExpandModal>
+      ) : null}
     </div>
   );
 }
