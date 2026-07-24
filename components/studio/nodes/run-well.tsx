@@ -20,6 +20,7 @@ import { WarningIcon } from "@phosphor-icons/react";
 import { BorderBeam } from "border-beam";
 
 import { ShimmeringText } from "@/components/ui/shimmering-text";
+import { WaveformPlayer } from "@/components/studio/waveform-player";
 import type { NodeRunState } from "@/lib/studio/graph";
 
 /**
@@ -158,8 +159,8 @@ export function RunWell({
     }
     if (modality === "audio" || output.mediaType?.startsWith("audio/")) {
       return (
-        <div className="nodrag flex w-full items-center px-4">
-          <audio key={output.url} src={output.url} controls className="w-full" />
+        <div className="flex w-full items-center px-4">
+          <WaveformPlayer key={output.url} url={output.url} />
         </div>
       );
     }

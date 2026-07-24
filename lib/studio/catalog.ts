@@ -41,6 +41,13 @@ export type ParamDescriptor = {
   max_length?: number;
   /** A string param rendered as a multi-line box. Only meaningful in "body". */
   multiline?: boolean;
+  /**
+   * A richer control than this param's type would get by default. "voice"
+   * swaps the enum select for the picker that hangs tone, accent, age and a
+   * playable sample off each option. `options` stays authoritative for which
+   * values exist — the picker only decorates them.
+   */
+  ui?: "voice";
   options?: ParamOption[];
 };
 

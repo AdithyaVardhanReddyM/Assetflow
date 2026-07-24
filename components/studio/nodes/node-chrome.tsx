@@ -30,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { VoicePicker } from "@/components/studio/nodes/voice-picker";
 
 /**
  * Menus size to their content. The base popup used to pin its width to
@@ -472,14 +473,25 @@ export function NodeBodyControls({
 
   return (
     <div className="flex flex-col gap-2.5">
-      {enumParams.map((param) => (
-        <EnumRow
-          key={param.name}
-          param={param}
-          value={values[param.name]}
-          onChange={(v) => onChange(param.name, v)}
-        />
-      ))}
+      {enumParams.map((param) =>
+        // `ui: voice` earns the richer control — tone, accent and a sample
+        // beat a name the user has no way to interpret.
+        param.ui === "voice" ? (
+          <VoicePicker
+            key={param.name}
+            param={param}
+            value={values[param.name]}
+            onChange={(v) => onChange(param.name, v)}
+          />
+        ) : (
+          <EnumRow
+            key={param.name}
+            param={param}
+            value={values[param.name]}
+            onChange={(v) => onChange(param.name, v)}
+          />
+        ),
+      )}
 
       {textParam ? (
         <div className="flex flex-col gap-1.5">

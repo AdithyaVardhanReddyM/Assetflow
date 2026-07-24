@@ -53,6 +53,13 @@ class ParamDescriptor(BaseModel):
     # A string param the canvas renders as a multi-line box rather than a
     # one-line field. Only meaningful with group "body".
     multiline: bool = False
+    # A richer control to render in place of the generic one for this type.
+    # "voice" swaps the plain enum select for the voice picker, which hangs
+    # tone/accent/age and a playable sample off each option — a bare name like
+    # "Brian" tells the user nothing about how it sounds. The options list
+    # stays authoritative for *which* voices exist; the picker only decorates
+    # them with what `GET /v1/catalog/voices` knows.
+    ui: Literal["voice"] | None = None
     options: list[ParamOption] = Field(default_factory=list)
 
     def display_label(self) -> str:

@@ -713,20 +713,42 @@ providers:
             # A body picker, not a bar chip: the voice is the node's main
             # choice, so it sits full-width under the preview.
             group: body
-            default: 21m00Tcm4TlvDq8ikWAM
+            # `ui: voice` swaps the plain select for the picker that shows
+            # tone, accent, age and a playable sample per voice — the names
+            # below are only an offline fallback for those labels.
+            ui: voice
+            default: EXAVITQu4vr4xnSDxMaL
+            # ElevenLabs' premade set only. Those IDs are global and stable
+            # across API keys; the "professional" voices that also come back
+            # from GET /v1/voices belong to whoever's key it is, so listing
+            # them here would break the moment the key changed.
+            #
+            # Rachel (21m00Tcm4TlvDq8ikWAM) is deliberately gone: ElevenLabs
+            # now resolves that legacy ID to a *different* voice (Janet,
+            # eLDc7xhWxG2FElT3kUTj), so the node was labelling one voice and
+            # generating another. Sarah takes over as the default.
             options:
-              - {value: 21m00Tcm4TlvDq8ikWAM, label: Rachel}
               - {value: EXAVITQu4vr4xnSDxMaL, label: Sarah}
               - {value: Xb7hH8MSUJpSbSDYk0k2, label: Alice}
               - {value: XrExE9yKIg1WjnnlVkGX, label: Matilda}
               - {value: cgSgspJ2msm6clMCkdW9, label: Jessica}
               - {value: pFZP5JQG7iQjIQuC4Bku, label: Lily}
+              - {value: FGY2WhTYpPnrIDTdsKH5, label: Laura}
+              - {value: hpp4J3VqNfWAUOO0d1Us, label: Bella}
               - {value: pNInz6obpgDQGcFmaJgB, label: Adam}
               - {value: JBFqnCBsd6RMkjVDRZzb, label: George}
               - {value: IKne3meq5aSn9XLyUdCD, label: Charlie}
               - {value: nPczCjzI2devNBz1zQrb, label: Brian}
               - {value: onwK4e9ZLuTAKqWW03F9, label: Daniel}
               - {value: bIHbv24MWmeRgasZH58o, label: Will}
+              - {value: CwhRBWXzGAHq8TQ4Fs17, label: Roger}
+              - {value: cjVigY5qzO86Huf0OWal, label: Eric}
+              - {value: iP95p4xoKVk53GoZ742B, label: Chris}
+              - {value: TX3LPaxmHKxFdv7VOQHJ, label: Liam}
+              - {value: SAz9YHcvj6GT2YYXdXww, label: River}
+              - {value: N2lVS1w4EtoT3dr4eOWO, label: Callum}
+              - {value: SOYHLrjzK2X1ezoPC6cr, label: Harry}
+              - {value: pqHfZKP75CvOlQylNhV4, label: Bill}
           - &eleven_format
             name: output_format
             type: enum
