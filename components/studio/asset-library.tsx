@@ -29,6 +29,8 @@ import {
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
+  SealCheckIcon,
+  SealWarningIcon,
   SparkleIcon,
   TrashSimpleIcon,
   UploadSimpleIcon,
@@ -48,10 +50,21 @@ import {
   deleteLibraryAsset,
   fetchLibrary,
   fetchProvenance,
+  fetchRunManifest,
   type AssetProvenance,
   type LibraryAsset,
+  type LineageChain,
+  type LineageHop,
+  type RunManifestRecord,
 } from "@/lib/studio/library-client";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { LinkPendingIcon } from "./link-pending-icon";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -373,7 +386,7 @@ export function AssetLibrary() {
             href="/workflow"
             className="flex h-10 items-center gap-2 border border-[#1f211c]/8 bg-white/88 px-3.5 text-[13px] font-semibold text-[#4c4a41] shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md transition-colors hover:text-[#1f211c]"
           >
-            <ArrowLeftIcon className="size-4" />
+            <LinkPendingIcon icon={<ArrowLeftIcon className="size-4" />} />
             Workflows
           </Link>
           <div className="grid size-10 place-items-center rounded-full border border-[#1f211c]/8 bg-white/88 shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md">
@@ -511,7 +524,7 @@ export function AssetLibrary() {
                     href="/workflow"
                     className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white px-4 text-[13px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
                   >
-                    <SparkleIcon className="size-4" />
+                    <LinkPendingIcon icon={<SparkleIcon className="size-4" />} />
                     Go make something
                   </Link>
                 }
@@ -579,6 +592,8 @@ export function AssetLibrary() {
             setPendingDelete(inspecting);
             setInspecting(null);
           }}
+          onInspect={inspect}
+          getAuth={authFor}
         />
 
         <AlertDialog
@@ -943,6 +958,44 @@ function formatParamValue(value: unknown): string {
   return text.length > 72 ? `${text.slice(0, 72)}…` : text;
 }
 
+type MixTrack = {
+  id?: string;
+  kind?: string;
+  gain?: number;
+  clips?: { label?: string; start_sec?: number }[];
+};
+
+/**
+ * The composition node has no prompt — its whole story lives in params.edit
+ * as a timeline. Unpack it so the drawer reads as "what was mixed" instead
+ * of a truncated JSON blob.
+ */
+function readMixTimeline(lineage: AssetProvenance["lineage"]): {
+  timelineSec: number | null;
+  tracks: MixTrack[];
+} | null {
+  if (lineage?.provider !== "__ffmpeg__") return null;
+  const edit = lineage.params?.edit;
+  if (!edit || typeof edit !== "object") return null;
+  const { timeline_sec, tracks } = edit as {
+    timeline_sec?: unknown;
+    tracks?: unknown;
+  };
+  return {
+    timelineSec: typeof timeline_sec === "number" ? timeline_sec : null,
+    tracks: Array.isArray(tracks) ? (tracks as MixTrack[]) : [],
+  };
+}
+
+function describeMixTrack(track: MixTrack): string {
+  const clips = track.clips ?? [];
+  const parts = [`${clips.length} clip${clips.length === 1 ? "" : "s"}`];
+  if (typeof track.gain === "number" && track.gain !== 1) {
+    parts.push(`gain ${track.gain}`);
+  }
+  return parts.join(" · ");
+}
+
 /**
  * The dossier: where a file came from, spelled out as a chain of custody.
  * Prompt in serif — the human's voice — then the model, the run, and the
@@ -956,6 +1009,8 @@ function ProvenanceDrawer({
   onRetry,
   onDownload,
   onDelete,
+  onInspect,
+  getAuth,
 }: {
   asset: LibraryAsset | null;
   dossier: AssetProvenance | "loading" | "error";
@@ -964,6 +1019,9 @@ function ProvenanceDrawer({
   onRetry: () => void;
   onDownload: () => void;
   onDelete: () => void;
+  /** Hop the drawer to another asset in the lineage chain. */
+  onInspect: (asset: LibraryAsset) => void;
+  getAuth: () => Promise<{ token: string | null; userId: string | null }>;
 }) {
   return (
     <Sheet open={asset !== null} onOpenChange={(open) => !open && onClose()}>
@@ -1054,7 +1112,12 @@ function ProvenanceDrawer({
               )}
 
               {typeof dossier === "object" && (
-                <Dossier asset={asset} dossier={dossier} />
+                <Dossier
+                  asset={asset}
+                  dossier={dossier}
+                  onInspect={onInspect}
+                  getAuth={getAuth}
+                />
               )}
             </div>
           </>
@@ -1180,14 +1243,23 @@ function DossierRow({
 function Dossier({
   asset,
   dossier,
+  onInspect,
+  getAuth,
 }: {
   asset: LibraryAsset;
   dossier: AssetProvenance;
+  onInspect: (asset: LibraryAsset) => void;
+  getAuth: () => Promise<{ token: string | null; userId: string | null }>;
 }) {
   const lineage = dossier.lineage;
+  const chain = dossier.chain;
   const manifestUri = lineage?.manifestUri ?? dossier.manifestUri;
+  const mix = readMixTimeline(lineage);
+  const [recordOpen, setRecordOpen] = React.useState(false);
   const params = lineage?.params
-    ? Object.entries(lineage.params).filter(([, v]) => v !== null && v !== "")
+    ? Object.entries(lineage.params).filter(
+        ([k, v]) => v !== null && v !== "" && !(mix && k === "edit"),
+      )
     : [];
 
   return (
@@ -1202,7 +1274,41 @@ function Dossier({
           </CustodySection>
         )}
 
-        {lineage && (lineage.model || params.length > 0) && (
+        {mix && lineage && (
+          <CustodySection title="Composition">
+            <p className="flex flex-wrap items-baseline gap-x-2">
+              <span className="text-[13px] font-semibold">Timeline mix</span>
+              <span className="text-[10.5px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+                ffmpeg
+              </span>
+            </p>
+            <div className="mt-2 divide-y divide-[#1f211c]/5 border-y border-[#1f211c]/8">
+              {formatDuration(mix.timelineSec) && (
+                <DossierRow
+                  label="Timeline"
+                  value={formatDuration(mix.timelineSec)!}
+                  copy={JSON.stringify(lineage.params?.edit)}
+                />
+              )}
+              {mix.tracks.map((track, i) => {
+                const clipLabels = (track.clips ?? [])
+                  .map((clip) => clip.label)
+                  .filter(Boolean)
+                  .join(", ");
+                return (
+                  <DossierRow
+                    key={track.id ?? i}
+                    label={track.kind ?? "track"}
+                    value={describeMixTrack(track)}
+                    copy={clipLabels || undefined}
+                  />
+                );
+              })}
+            </div>
+          </CustodySection>
+        )}
+
+        {!mix && lineage && (lineage.model || params.length > 0) && (
           <CustodySection title="Model">
             {lineage.model && (
               <p className="flex flex-wrap items-baseline gap-x-2">
@@ -1235,6 +1341,14 @@ function Dossier({
                 ${lineage.costUsd.toFixed(4)} to generate
               </p>
             )}
+          </CustodySection>
+        )}
+
+        {/* The derivation, drawn: sources at the top, this file at the bottom.
+            Every hop with a file behind it is a door to that file's dossier. */}
+        {chain && chain.hops.length > 1 && (
+          <CustodySection title="Lineage">
+            <LineageRail chain={chain} currentId={asset.id} onInspect={onInspect} />
           </CustodySection>
         )}
 
@@ -1294,7 +1408,19 @@ function Dossier({
 
         {(asset.sha256 || lineage?.manifestHash || manifestUri) && (
           <CustodySection title="Integrity">
-            <div className="divide-y divide-[#1f211c]/5">
+            {lineage?.manifestVerified === true && (
+              <p className="flex items-center gap-1.5 pb-2 text-[12px] font-semibold text-[#3d6b35]">
+                <SealCheckIcon weight="fill" className="size-4" />
+                Verified — matches the sealed record in storage
+              </p>
+            )}
+            {lineage?.manifestVerified === false && (
+              <p className="flex items-center gap-1.5 pb-2 text-[12px] font-semibold text-[#a33d2f]">
+                <SealWarningIcon weight="fill" className="size-4" />
+                Hash mismatch against the record in storage
+              </p>
+            )}
+            <div className="divide-y divide-[#1f211c]/5 border-t border-[#1f211c]/8">
               {asset.sha256 && (
                 <DossierRow
                   label="SHA-256"
@@ -1305,21 +1431,32 @@ function Dossier({
               )}
               {lineage?.manifestHash && (
                 <DossierRow
-                  label="Manifest hash"
+                  label="Record hash"
                   value={shortHash(lineage.manifestHash)}
                   mono
                   copy={lineage.manifestHash}
                 />
               )}
-              {manifestUri && (
-                <DossierRow
-                  label="Manifest"
-                  value={manifestUri}
-                  mono
-                  copy={manifestUri}
-                />
-              )}
             </div>
+            {lineage?.runId && manifestUri && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setRecordOpen(true)}
+                  className="mt-2.5 inline-flex h-8 items-center gap-1.5 border border-[#1f211c]/14 bg-white px-3 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+                >
+                  <SealCheckIcon className="size-3.5" />
+                  Open the sealed record
+                </button>
+                {recordOpen && (
+                  <RecordDialog
+                    runId={lineage.runId}
+                    onOpenChange={setRecordOpen}
+                    getAuth={getAuth}
+                  />
+                )}
+              </>
+            )}
           </CustodySection>
         )}
       </ol>
@@ -1329,6 +1466,329 @@ function Dossier({
         vanish and the trail would still hold.
       </p>
     </>
+  );
+}
+
+/**
+ * The derivation as a picture: hops grouped by distance from this file,
+ * sources first, joined by a falling thread. Deliberately not a mini node
+ * canvas — at drawer width the story reads top to bottom, like the rail.
+ */
+function LineageRail({
+  chain,
+  currentId,
+  onInspect,
+}: {
+  chain: LineageChain;
+  currentId: string;
+  onInspect: (asset: LibraryAsset) => void;
+}) {
+  const levels = React.useMemo(() => {
+    const byDepth = new Map<number, LineageHop[]>();
+    for (const hop of chain.hops) {
+      byDepth.set(hop.depth, [...(byDepth.get(hop.depth) ?? []), hop]);
+    }
+    return [...byDepth.entries()].sort((a, b) => b[0] - a[0]).map(([, hops]) => hops);
+  }, [chain]);
+
+  return (
+    <div>
+      {levels.map((hops, i) => (
+        <React.Fragment key={hops[0]?.depth ?? i}>
+          {i > 0 && (
+            <div aria-hidden className="flex flex-col items-center py-0.5">
+              <span className="h-3.5 w-px bg-[#1f211c]/25" />
+              <CaretDownIcon className="-mt-0.5 size-3 text-[#1f211c]/40" />
+            </div>
+          )}
+          <div className={cn("grid gap-2", hops.length > 1 && "grid-cols-2")}>
+            {hops.map((hop) => (
+              <HopCard
+                key={hop.nodeId}
+                hop={hop}
+                currentId={currentId}
+                onInspect={onInspect}
+              />
+            ))}
+          </div>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+function hopLabel(hop: LineageHop): { name: string; detail: string } {
+  switch (hop.kind) {
+    case "input.text":
+      return { name: hop.title ?? "Prompt", detail: "written on the canvas" };
+    case "input.upload":
+      return {
+        name: hop.assets[0]?.filename ?? hop.title ?? "Upload",
+        detail: "uploaded file",
+      };
+    case "transform.composite":
+      return { name: "Timeline mix", detail: "ffmpeg" };
+    default:
+      return {
+        name: hop.model ?? hop.title ?? hop.nodeId,
+        detail: hop.provider ?? "generated",
+      };
+  }
+}
+
+function HopThumb({ hop }: { hop: LineageHop }) {
+  const asset = hop.assets[0];
+  if (asset?.previewUrl && asset.modality === "image") {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={asset.previewUrl}
+        alt=""
+        className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#eceadf] object-cover"
+      />
+    );
+  }
+  if (asset?.previewUrl && asset.modality === "video") {
+    return (
+      <video
+        src={asset.previewUrl}
+        muted
+        playsInline
+        preload="metadata"
+        className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#1f211c] object-cover"
+      />
+    );
+  }
+  const Icon =
+    hop.kind === "input.text"
+      ? FileTextIcon
+      : asset?.modality === "audio"
+        ? WaveformIcon
+        : asset?.modality === "text"
+          ? FileTextIcon
+          : hop.kind === "input.upload"
+            ? UploadSimpleIcon
+            : SparkleIcon;
+  return (
+    <span className="grid size-10 shrink-0 place-items-center border border-[#1f211c]/10 bg-[#eceadf] text-[#8a8271]">
+      <Icon className="size-4" />
+    </span>
+  );
+}
+
+function HopCard({
+  hop,
+  currentId,
+  onInspect,
+}: {
+  hop: LineageHop;
+  currentId: string;
+  onInspect: (asset: LibraryAsset) => void;
+}) {
+  const asset = hop.assets[0] ?? null;
+  const target = asset && asset.id !== currentId ? asset : null;
+  const { name, detail } = hopLabel(hop);
+  const snippet = hop.kind === "input.text" ? (hop.text ?? "").trim() : "";
+
+  return (
+    <button
+      type="button"
+      disabled={!target}
+      onClick={() => target && onInspect(target)}
+      title={target ? "Follow this file's own trail" : undefined}
+      className={cn(
+        "flex min-w-0 items-center gap-2.5 border bg-white p-2 text-left",
+        hop.depth === 0 ? "border-[#1f211c]/35" : "border-[#1f211c]/12",
+        target
+          ? "cursor-pointer transition-colors hover:border-[#1f211c]/50"
+          : "cursor-default",
+      )}
+    >
+      <HopThumb hop={hop} />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12px] font-semibold text-[#1f211c]">
+          {name}
+        </span>
+        {snippet ? (
+          <span className="block truncate font-serif text-[11.5px] text-[#8a8271] italic">
+            &ldquo;{snippet}&rdquo;
+          </span>
+        ) : (
+          <span className="block truncate text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+            {detail}
+          </span>
+        )}
+      </span>
+      {hop.assets.length > 1 && (
+        <span className="shrink-0 text-[10px] text-[#8a8271] tabular-nums">
+          +{hop.assets.length - 1}
+        </span>
+      )}
+    </button>
+  );
+}
+
+type ManifestStep = {
+  provider?: string;
+  model?: string;
+  step_type?: string;
+  prompt?: string | null;
+  cost_usd?: number | null;
+  metadata?: { node_id?: string };
+};
+
+/**
+ * The sealed record itself: re-read from B2 on open and re-hashed, so the
+ * badge in here is a live claim about the bucket — not an echo of our rows.
+ */
+function RecordDialog({
+  runId,
+  onOpenChange,
+  getAuth,
+}: {
+  runId: string;
+  onOpenChange: (open: boolean) => void;
+  getAuth: () => Promise<{ token: string | null; userId: string | null }>;
+}) {
+  // Mounted only while open, so every opening starts a fresh read — the
+  // dialog's claim is about the bucket *now*, and a cache would unmake it.
+  const [record, setRecord] = React.useState<
+    RunManifestRecord | "loading" | "error"
+  >("loading");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const fetched = await fetchRunManifest(runId, await getAuth());
+      if (!cancelled) setRecord(fetched ?? "error");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, getAuth]);
+
+  const steps: ManifestStep[] =
+    typeof record === "object"
+      ? ((record.manifest as { run?: { steps?: ManifestStep[] } }).run?.steps ?? [])
+      : [];
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[80dvh] overflow-y-auto rounded-none border border-[#1f211c]/14 bg-[#f7f4ee] p-0 text-[#1f211c] sm:max-w-[520px]">
+        <div className="border-b border-[#1f211c]/8 px-5 py-4">
+          <DialogTitle className="font-sans text-[15px] font-medium tracking-normal">
+            The sealed record
+          </DialogTitle>
+          <DialogDescription className="mt-1 text-[12px] leading-5 text-[#8a8271]">
+            Re-read from storage just now — not echoed from the database — and
+            its hash recomputed against the bytes that came back.
+          </DialogDescription>
+        </div>
+
+        <div className="px-5 py-4">
+          {record === "loading" && (
+            <div className="flex items-center gap-2 py-6 text-[12.5px] text-[#8a8271]">
+              <Spinner className="size-4" /> Reading the record out of storage…
+            </div>
+          )}
+
+          {record === "error" && (
+            <p className="py-4 text-[12.5px] leading-6 text-[#8a8271]">
+              The record isn&rsquo;t reachable right now. Manifests are written
+              when runs execute against Backblaze B2.
+            </p>
+          )}
+
+          {typeof record === "object" && (
+            <>
+              {record.verifiedNow === true && (
+                <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[#3d6b35]">
+                  <SealCheckIcon weight="fill" className="size-4" />
+                  Intact — the record in the bucket still matches its hash
+                </p>
+              )}
+              {record.verifiedNow === false && (
+                <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[#a33d2f]">
+                  <SealWarningIcon weight="fill" className="size-4" />
+                  The record no longer matches its recorded hash
+                </p>
+              )}
+              {record.verifiedNow === null && (
+                <p className="text-[12.5px] font-semibold text-[#8a8271]">
+                  The record was read back, but could not be re-verified.
+                </p>
+              )}
+
+              <div className="mt-3 divide-y divide-[#1f211c]/5 border-y border-[#1f211c]/8">
+                {record.canonicalHash && (
+                  <DossierRow
+                    label="Canonical hash"
+                    value={shortHash(record.canonicalHash)}
+                    mono
+                    copy={record.canonicalHash}
+                  />
+                )}
+                {record.manifestUri && (
+                  <DossierRow
+                    label="Location"
+                    value={record.manifestUri}
+                    mono
+                    copy={record.manifestUri}
+                  />
+                )}
+              </div>
+
+              {steps.length > 0 && (
+                <div className="mt-4">
+                  <h3 className="text-[10px] font-semibold tracking-[0.2em] text-[#8a8271] uppercase">
+                    Steps on record
+                  </h3>
+                  <ol className="mt-2 space-y-2">
+                    {steps.map((step, i) => (
+                      <li
+                        key={step.metadata?.node_id ?? i}
+                        className="border border-[#1f211c]/10 bg-white px-3 py-2"
+                      >
+                        <p className="flex flex-wrap items-baseline gap-x-2">
+                          <span className="text-[12px] font-semibold">
+                            {step.model ?? step.step_type ?? "step"}
+                          </span>
+                          {step.provider && (
+                            <span className="text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+                              {step.provider.replace(/_/g, "") || step.provider}
+                            </span>
+                          )}
+                        </p>
+                        {step.prompt && (
+                          <p className="mt-0.5 line-clamp-2 font-serif text-[11.5px] leading-4 text-[#8a8271] italic">
+                            &ldquo;{step.prompt}&rdquo;
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              <details className="mt-4 group">
+                <summary className="cursor-pointer text-[11px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase transition-colors hover:text-[#1f211c]">
+                  Raw record
+                </summary>
+                <pre className="mt-2 max-h-64 overflow-auto border border-[#1f211c]/10 bg-white p-3 font-mono text-[10.5px] leading-4 text-[#4c4a41]">
+                  {JSON.stringify(record.manifest, null, 2)}
+                </pre>
+              </details>
+
+              <p className="mt-4 border-t border-[#1f211c]/8 pt-3 font-serif text-[12px] leading-5 text-[#8a8271] italic">
+                This document lives beside the media in Backblaze B2. Delete
+                every row in our database and it would still tell the whole
+                story.
+              </p>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

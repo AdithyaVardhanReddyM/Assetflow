@@ -130,10 +130,26 @@ async def read_manifest(run: Run) -> dict[str, Any]:
         raise StorageError(f"Could not read the manifest: {type(exc).__name__}") from exc
 
     document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+
+    # Recompute the canonical hash from the bytes just fetched, rather than
+    # trusting the flag recorded at run time — this call's whole claim is that
+    # the record in the bucket is *still* intact.
+    verified_now: bool | None = None
+    try:
+        from genblaze_core.models.manifest import Manifest
+
+        manifest = Manifest.model_validate(document)
+        verified_now = manifest.verify_hash() and (
+            run.manifest_hash is None or manifest.canonical_hash == run.manifest_hash
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable manifest is "unverified", not a 500
+        log.warning("manifest.reverify_failed", error=f"{type(exc).__name__}: {exc}")
+
     return {
         "manifest_uri": run.manifest_uri,
         "canonical_hash": run.manifest_hash,
         "verified": {"true": True, "false": False}.get(run.manifest_verified or ""),
+        "verified_now": verified_now,
         "manifest": document,
     }
 

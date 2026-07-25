@@ -35,6 +35,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { LinkPendingIcon } from "./link-pending-icon";
 import { Toolbar, type ToolId } from "./toolbar";
 import { PromptBar, type PromptSpec } from "./prompt-bar";
 import { WorkflowCards, type WorkflowCard } from "./workflow-cards";
@@ -210,7 +211,7 @@ export function WorkflowHome({
             href="/assets"
             className="flex h-10 items-center gap-2 border border-[#1f211c]/8 bg-white/88 px-3.5 text-[13px] font-semibold text-[#4c4a41] shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md transition-colors hover:text-[#1f211c]"
           >
-            <FolderSimpleIcon className="size-4" />
+            <LinkPendingIcon icon={<FolderSimpleIcon className="size-4" />} />
             Assets
           </Link>
           <div className="grid size-10 place-items-center rounded-full border border-[#1f211c]/8 bg-white/88 shadow-[0_14px_36px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md">

@@ -127,6 +127,121 @@ async def get_asset(
     return _serialize(await _get_owned(session, asset_id, user))
 
 
+def _upstream_closure(
+    graph: dict[str, Any], start: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, int], list[str]] | None:
+    """Nodes reachable upstream of `start` in a graph snapshot.
+
+    Returns (nodes_by_id, node_id -> depth, BFS order starting at `start`),
+    or None when the start node is not in the snapshot.
+    """
+    nodes = {n.get("id"): n for n in graph.get("nodes", []) if n.get("id")}
+    if start not in nodes:
+        return None
+
+    parents: dict[str, list[str]] = {}
+    for edge in graph.get("edges", []):
+        src, dst = edge.get("source"), edge.get("target")
+        if src in nodes and dst in nodes:
+            parents.setdefault(dst, []).append(src)
+
+    depth = {start: 0}
+    order = [start]
+    frontier = [start]
+    while frontier:
+        step_out: list[str] = []
+        for nid in frontier:
+            for src in parents.get(nid, []):
+                if src not in depth:
+                    depth[src] = depth[nid] + 1
+                    order.append(src)
+                    step_out.append(src)
+        frontier = step_out
+    return nodes, depth, order
+
+
+async def _build_chain(
+    session: Session, run: Run, asset: Asset
+) -> dict[str, Any] | None:
+    """The asset's upstream hops, read off the run's graph snapshot.
+
+    The snapshot is the graph that actually ran, so walking its edges backward
+    from the asset's node gives the true derivation — including nodes whose
+    canvas has since been edited or deleted.
+    """
+    closure = _upstream_closure(run.graph_snapshot or {}, asset.node_id or "")
+    if closure is None:
+        return None
+    nodes, depth, order = closure
+    if len(order) == 1:
+        # Nothing upstream — the flat lineage block already tells the story.
+        return None
+
+    steps = {
+        s.node_id: s
+        for s in (
+            await session.execute(select(RunStep).where(RunStep.run_id == run.id))
+        ).scalars()
+    }
+    produced: dict[str, list[Asset]] = {}
+    for row in (
+        await session.execute(select(Asset).where(Asset.run_id == run.id))
+    ).scalars():
+        if row.node_id:
+            produced.setdefault(row.node_id, []).append(row)
+
+    # Upload nodes reference a library asset by id instead of producing one.
+    upload_refs: dict[str, str] = {}
+    for nid in order:
+        data = nodes[nid].get("data") or {}
+        if nodes[nid].get("kind") == "input.upload" and data.get("asset_id"):
+            try:
+                upload_refs[nid] = str(uuid.UUID(str(data["asset_id"])))
+            except ValueError:
+                continue
+    uploads: dict[str, Asset] = {}
+    if upload_refs:
+        rows = await session.execute(
+            select(Asset).where(
+                Asset.tenant_id == run.tenant_id,
+                Asset.id.in_([uuid.UUID(a) for a in set(upload_refs.values())]),
+            )
+        )
+        uploads = {str(a.id): a for a in rows.scalars()}
+
+    hops: list[dict[str, Any]] = []
+    for nid in order:
+        node = nodes[nid]
+        data = node.get("data") or {}
+        step = steps.get(nid)
+        outputs = produced.get(nid, [])
+        if not outputs and nid in upload_refs:
+            ref = uploads.get(upload_refs[nid])
+            outputs = [ref] if ref is not None else []
+        hops.append(
+            {
+                "node_id": nid,
+                "kind": node.get("kind"),
+                "depth": depth[nid],
+                "title": data.get("title") or data.get("label"),
+                "text": data.get("text") if node.get("kind") == "input.text" else None,
+                "provider": step.provider if step else None,
+                "model": step.model if step else None,
+                "prompt": step.prompt if step else None,
+                "step_type": step.step_type if step else None,
+                "assets": [_serialize(a) for a in outputs],
+            }
+        )
+    return {
+        "hops": hops,
+        "edges": [
+            {"source": e.get("source"), "target": e.get("target")}
+            for e in (run.graph_snapshot or {}).get("edges", [])
+            if e.get("source") in depth and e.get("target") in depth
+        ],
+    }
+
+
 @router.get("/{asset_id}/provenance")
 async def get_provenance(
     asset_id: uuid.UUID, session: Session, user: CurrentUser
@@ -137,6 +252,7 @@ async def get_provenance(
         "asset": _serialize(asset),
         "manifest_uri": asset.manifest_uri,
         "lineage": None,
+        "chain": None,
     }
     if asset.run_id is None:
         return body
@@ -158,13 +274,21 @@ async def get_provenance(
         "parent_run_id": str(run.parent_run_id) if run and run.parent_run_id else None,
         "manifest_uri": run.manifest_uri if run else None,
         "manifest_hash": run.manifest_hash if run else None,
+        # Tri-state: null means "not applicable" (local storage), which is
+        # different from "verification failed".
+        "manifest_verified": {"true": True, "false": False}.get(
+            (run.manifest_verified if run else None) or ""
+        ),
         "node_id": asset.node_id,
         "provider": step.provider if step else None,
         "model": step.model if step else None,
         "prompt": step.prompt if step else None,
         "params": step.params if step else None,
+        "step_type": step.step_type if step else None,
         "cost_usd": step.cost_usd if step else None,
     }
+    if run is not None:
+        body["chain"] = await _build_chain(session, run, asset)
     return body
 
 

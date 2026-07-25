@@ -20,6 +20,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { LinkPendingIcon } from "./link-pending-icon";
 
 export type SaveState = "saved" | "saving" | "error";
 
@@ -141,7 +142,7 @@ export function TopBar({
           </BarTooltip>
           <BarTooltip label="Asset library">
             <Link href="/assets" aria-label="Asset library" className={iconBtn}>
-              <FolderSimpleIcon className="size-4" />
+              <LinkPendingIcon icon={<FolderSimpleIcon className="size-4" />} />
             </Link>
           </BarTooltip>
         </div>

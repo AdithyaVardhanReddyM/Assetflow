@@ -271,6 +271,7 @@ def _summarize(results: list[Any]) -> dict[str, Any]:
         "manifest_hash": getattr(manifest, "canonical_hash", None),
         "manifest_uri": getattr(manifest, "manifest_uri", None),
         "manifest_verified": verified,
+        "b2_prefix": settings.b2_prefix if settings.storage_mode.value == "b2" else None,
         "total_cost_usd": round(sum(costs), 6) if costs else None,
     }
 
@@ -680,6 +681,13 @@ async def _finish(
 
     rows = await _persist_assets(session, run, results)
     summary = _summarize(results)
+
+    # Each asset keeps its own pointer to the run manifest: the run row is
+    # deletable (assets.run_id goes null on delete), and the trail must
+    # survive the index forgetting the run.
+    if summary.get("manifest_uri"):
+        for row in rows:
+            row.manifest_uri = summary["manifest_uri"]
 
     step_rows = await session.execute(select(RunStep).where(RunStep.run_id == run.id))
     steps = list(step_rows.scalars())
