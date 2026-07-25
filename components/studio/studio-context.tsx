@@ -10,8 +10,10 @@
 
 import * as React from "react";
 
+import type { TakeEditSpec } from "@/lib/studio/camera-edit";
 import type { Catalog } from "@/lib/studio/catalog";
 import type { AssetPreview, NodeGeneration } from "@/lib/studio/graph";
+import type { LayerizeResult } from "@/lib/studio/magic-text";
 
 export type RunScope = "node" | "chain";
 
@@ -36,10 +38,43 @@ export type StudioContextValue = {
   /** "Run" vs "Run from here" — the latter walks the connected chain downstream. */
   runFrom: (id: string, scope: RunScope) => void;
   /**
+   * Re-generate a node's displayed take through a hidden edit model — the
+   * expand modal's Camera and Light tabs. Runs `spec` on `assetId` under the
+   * node's own id — the document is untouched, and the result arrives as a
+   * normal generation in this node's carousel. The spec is already in the
+   * model's vocabulary (`poseParams` / `lightDirective`).
+   */
+  editTake: (id: string, assetId: string, spec: TakeEditSpec) => void;
+  /**
+   * Magic Text (the expand modal's Text tab). `layerizeAsset` decomposes a
+   * take into editable text blocks (bills per call — the panel caches per
+   * asset); `fetchAssetBlob` proxies bytes through the API so a canvas can
+   * draw them untainted (B2 sends no CORS headers); `registerTextEdit`
+   * indexes the composited edit as a generation of the node — it lands in
+   * the carousel immediately and re-hydrates from `/results` on reload.
+   */
+  layerizeAsset: (
+    assetId: string,
+  ) => Promise<{ ok: true; result: LayerizeResult } | { ok: false; error: string }>;
+  fetchAssetBlob: (assetId: string) => Promise<Blob | null>;
+  registerTextEdit: (
+    nodeId: string,
+    image: Blob,
+    baseAssetId: string,
+  ) => Promise<boolean>;
+  /**
    * Save a node's generated result to disk. Without `generation` this is the
    * node's latest result; with one (a carousel pick) it saves that take.
    */
   downloadNode: (id: string, generation?: NodeGeneration) => void;
+  /**
+   * Re-sign one asset's preview URL and swap it in wherever the canvas holds
+   * it. Called by a well whose media failed to load — B2 links are presigned
+   * for an hour, so a canvas left open outlives its own previews. Resolves
+   * false when no *different* URL came back, which is the well's signal that
+   * the asset is genuinely unreachable rather than merely expired.
+   */
+  refreshMedia: (nodeId: string, assetId: string) => Promise<boolean>;
 };
 
 const StudioContext = React.createContext<StudioContextValue | null>(null);

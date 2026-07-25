@@ -182,42 +182,49 @@ export function VoicePicker({
         if (!next) setQuery("");
       }}
     >
-      <PopoverTrigger
-        render={
-          <button
-            type="button"
-            className="nodrag flex w-full items-center gap-2 border border-[#1f211c]/14 bg-[#f7f4ee]/60 px-2.5 py-2 text-left transition-colors hover:border-[#1f211c]/30"
-          >
-            <MicrophoneIcon className="size-3.5 shrink-0 text-[#8a8271]" weight="fill" />
-            <span className="min-w-0 flex-1">
-              <span className="flex min-w-0 items-baseline gap-1.5">
-                <span className="truncate text-[12.5px] font-medium text-[#1f211c]">
-                  {selectedMeta?.name ?? selected?.label ?? selected?.value ?? "Select…"}
+      {/* The preview control sits *beside* the trigger, not inside it: one
+          button inside another is invalid HTML, and previewing the current
+          voice should not also open the list. */}
+      <div className="nodrag flex w-full items-center border border-[#1f211c]/14 bg-[#f7f4ee]/60 transition-colors focus-within:border-[#1f211c]/30 hover:border-[#1f211c]/30">
+        <PopoverTrigger
+          render={
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left outline-none"
+            >
+              <MicrophoneIcon className="size-3.5 shrink-0 text-[#8a8271]" weight="fill" />
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <span className="truncate text-[12.5px] font-medium text-[#1f211c]">
+                    {selectedMeta?.name ?? selected?.label ?? selected?.value ?? "Select…"}
+                  </span>
+                  {selectedMeta?.tagline ? (
+                    <span className="truncate text-[11px] text-[#a09a88]">
+                      {selectedMeta.tagline}
+                    </span>
+                  ) : null}
                 </span>
-                {selectedMeta?.tagline ? (
-                  <span className="truncate text-[11px] text-[#a09a88]">
-                    {selectedMeta.tagline}
+                {selectedTags.length ? (
+                  <span className="mt-0.5 block truncate text-[10.5px] tracking-[0.01em] text-[#a09a88]">
+                    {selectedTags.join(" · ")}
                   </span>
                 ) : null}
               </span>
-              {selectedTags.length ? (
-                <span className="mt-0.5 block truncate text-[10.5px] tracking-[0.01em] text-[#a09a88]">
-                  {selectedTags.join(" · ")}
-                </span>
-              ) : null}
-            </span>
-            <PreviewButton voiceId={selectedId} url={selectedMeta?.preview_url ?? null} />
-            <CaretDownIcon className="size-3 shrink-0 text-[#a09a88]" />
-          </button>
-        }
-      />
+              <CaretDownIcon className="size-3 shrink-0 text-[#a09a88]" />
+            </button>
+          }
+        />
+        <span className="shrink-0 pr-2 pl-1">
+          <PreviewButton voiceId={selectedId} url={selectedMeta?.preview_url ?? null} />
+        </span>
+      </div>
       <PopoverContent
         align="start"
         side="bottom"
         sideOffset={8}
-        // Deliberately wider than the node it hangs off — three tags and a
-        // description per row need the room, and the popover is portalled so
-        // it is not clipped by the card.
+        // Deliberately wider than the node it hangs off — a name, a tagline and
+        // three tags per row need the room, and the popover is portalled so it
+        // is not clipped by the card.
         className="nodrag nowheel w-80 gap-0 border border-[#1f211c]/10 bg-white/97 p-0 shadow-[0_24px_60px_-16px_rgba(31,33,28,0.35)] ring-0 backdrop-blur-xl"
       >
         <div className="flex items-center gap-2 border-b border-[#1f211c]/8 px-2.5 py-2">
@@ -231,30 +238,41 @@ export function VoicePicker({
           />
         </div>
 
-        <div className="thin-scrollbar max-h-72 overflow-y-auto p-1">
+        <div
+          role="listbox"
+          aria-label="Voices"
+          className="thin-scrollbar max-h-72 overflow-y-auto p-1"
+        >
           {visible.length ? (
             visible.map((option) => {
               const meta = byId[option.value];
               const tags = voiceTags(meta);
               const isSelected = option.value === selectedId;
               return (
-                <button
+                // A div, not a button: the preview control is a real button and
+                // nesting one inside another is invalid HTML (React says so at
+                // hydration). `option` carries the semantics the element lost.
+                <div
                   key={option.value}
-                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  tabIndex={0}
                   onClick={() => {
                     onChange(option.value);
                     setOpen(false);
                   }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
                   className={cn(
-                    "flex w-full items-start gap-2.5 px-2 py-2 text-left transition-colors",
-                    isSelected ? "bg-[#f7f4ee]" : "hover:bg-[#f7f4ee]/70",
+                    "flex w-full cursor-pointer items-center gap-2.5 px-2 py-2 text-left transition-colors outline-none",
+                    isSelected ? "bg-[#f7f4ee]" : "hover:bg-[#f7f4ee]/70 focus-visible:bg-[#f7f4ee]/70",
                   )}
                 >
-                  <PreviewButton
-                    voiceId={option.value}
-                    url={meta?.preview_url ?? null}
-                    className="mt-0.5"
-                  />
+                  <PreviewButton voiceId={option.value} url={meta?.preview_url ?? null} />
                   <span className="min-w-0 flex-1">
                     <span className="flex min-w-0 items-baseline gap-1.5">
                       <span className="truncate text-[12.5px] font-medium text-[#1f211c]">
@@ -264,6 +282,8 @@ export function VoicePicker({
                         <span className="truncate text-[11px] text-[#a09a88]">{meta.tagline}</span>
                       ) : null}
                     </span>
+                    {/* Tags carry the useful part of the description — tone,
+                        accent, age — so the prose itself is redundant here. */}
                     {tags.length ? (
                       <span className="mt-1 flex flex-wrap gap-1">
                         {tags.map((tag) => (
@@ -276,13 +296,8 @@ export function VoicePicker({
                         ))}
                       </span>
                     ) : null}
-                    {meta?.description ? (
-                      <span className="mt-1 line-clamp-2 block text-[11px] leading-4 text-[#a09a88]">
-                        {meta.description}
-                      </span>
-                    ) : null}
                   </span>
-                </button>
+                </div>
               );
             })
           ) : (

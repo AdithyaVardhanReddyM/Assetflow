@@ -102,3 +102,52 @@ export async function fetchAssetPreviews(
   for (const asset of results) if (asset) out[asset.id] = asset;
   return out;
 }
+
+export type AudioPeaks = {
+  /** RMS envelope, 0..1, normalised so the loudest bucket is 1. */
+  peaks: number[];
+  /** ffprobe's duration — more reliable than a VBR mp3's element metadata. */
+  durationSec: number;
+};
+
+/**
+ * The waveform envelope for a stored audio asset.
+ *
+ * Decoded server-side because the bucket is private and B2 serves no CORS
+ * headers, so the browser cannot read the bytes to decode them itself. Results
+ * are memoised per asset: bytes behind an asset never change, and a canvas can
+ * hold the same clip in several places (a node's well and its carousel).
+ */
+const peaksCache = new Map<string, Promise<AudioPeaks | null>>();
+
+export function fetchAudioPeaks(
+  assetId: string,
+  auth: { token: string | null; userId: string | null },
+): Promise<AudioPeaks | null> {
+  const hit = peaksCache.get(assetId);
+  if (hit) return hit;
+
+  const inflight = (async (): Promise<AudioPeaks | null> => {
+    try {
+      const res = await fetch(`${API_URL}/v1/assets/${assetId}/peaks`, {
+        headers: authHeaders(auth.token, auth.userId),
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { peaks?: number[]; duration_sec?: number };
+      return {
+        peaks: Array.isArray(body.peaks) ? body.peaks : [],
+        durationSec: typeof body.duration_sec === "number" ? body.duration_sec : 0,
+      };
+    } catch {
+      // The player falls back to a browser decode, then to flat bars.
+      return null;
+    }
+  })();
+
+  peaksCache.set(assetId, inflight);
+  // A transport failure should not poison the cache for the whole session.
+  void inflight.then((result) => {
+    if (!result?.peaks.length) peaksCache.delete(assetId);
+  });
+  return inflight;
+}

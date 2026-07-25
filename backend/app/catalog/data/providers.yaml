@@ -373,6 +373,96 @@ providers:
             group: advanced
             options: [{value: webp}, {value: png}, {value: jpeg}]
 
+      # Camera-angle regeneration behind the image expand modal's Camera tab —
+      # never in the palette (hidden): the modal builds the whole node itself,
+      # feeding the displayed take back in as `image_ref` with the sphere
+      # widget's params. Qwen-Image-Edit-2509 + Lightning + the multi-angle
+      # LoRA; param names/ranges are the model's own schema (replicate.com,
+      # 2026-07). `vertical_tilt` really is three states (-1 bird's-eye, 0
+      # level, 1 worm's-eye) — the modal's continuous elevation quantizes.
+      - id: qwen/qwen-edit-multiangle
+        label: Camera Angles
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        hidden: true
+        expected_duration_sec: 10
+        est_cost_usd: 0.03
+        output_media_type: image/webp
+        requires_prompt: false
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          # Upstream's docs say positive "rotates left", but its own example
+          # predictions show positive orbiting the camera to the viewer's
+          # right (front-facing input + 90 → left profile, nose frame-right).
+          # The widget's azimuth maps through unflipped.
+          - {name: rotate_degrees, type: integer, label: Rotation, unit: "°", default: 0, min: -90, max: 90, step: 1}
+          - {name: vertical_tilt, type: integer, label: Tilt, default: 0, min: -1, max: 1, step: 1}
+          - {name: move_forward, type: integer, label: Zoom in, default: 0, min: 0, max: 10, step: 1}
+          - {name: use_wide_angle, type: boolean, label: Wide angle, default: false, group: advanced}
+          # Match the source take's frame rather than forcing a ratio.
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: match_input_image
+            group: advanced
+            options:
+              - {value: match_input_image, label: Match input}
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+          # True = 4-step Lightning preset; the modal is an iteration surface,
+          # so fast is the house default.
+          - {name: go_fast, type: boolean, label: Fast preset, default: true, group: advanced}
+          - name: output_format
+            type: enum
+            label: Format
+            default: webp
+            group: advanced
+            options: [{value: webp}, {value: png}, {value: jpg}]
+
+      # Relight, behind the image expand modal's Light tab — hidden like the
+      # camera model above and driven the same way (synthetic run, node's own
+      # id). Qwen-Image-Edit-2509 + the dx8152 relight LoRA behind Replicate's
+      # proxy app; there are no lighting *params* — direction, color and
+      # intensity travel as a bilingual directive in the prompt, composed by
+      # the panel (`lightDirective` in lib/studio/relight.ts).
+      - id: qwen-edit-apps/qwen-image-edit-plus-lora-relight
+        label: Relight
+        modality: image
+        adapter: app.engine.genblaze_adapters:replicate_provider
+        hidden: true
+        expected_duration_sec: 10
+        est_cost_usd: 0.03
+        output_media_type: image/webp
+        requires_prompt: false
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          # The proxy's own default strength for this LoRA (its README's 0.9).
+          - {name: lora_scale, type: number, label: Light strength, default: 0.9, min: 0, max: 4, step: 0.05, group: advanced}
+          - {name: go_fast, type: boolean, label: Fast preset, default: true, group: advanced}
+          - name: aspect_ratio
+            type: enum
+            label: Aspect ratio
+            default: match_input_image
+            group: advanced
+            options:
+              - {value: match_input_image, label: Match input}
+              - {value: "1:1"}
+              - {value: "16:9"}
+              - {value: "9:16"}
+              - {value: "4:3"}
+              - {value: "3:4"}
+          - name: output_format
+            type: enum
+            label: Format
+            default: webp
+            group: advanced
+            options: [{value: webp}, {value: png}, {value: jpg}]
+
       # Sora 2 pairs synced audio with the clip. Duration is a fixed enum
       # upstream (4/8/12s); `aspect_ratio` travels as the canvas's ratio pair
       # and the factory folds it into Sora's landscape/portrait vocabulary.

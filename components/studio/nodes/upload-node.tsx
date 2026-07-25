@@ -24,6 +24,7 @@ import type { StudioNode, UploadNodeData } from "@/lib/studio/graph";
 import { accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { OutputPort } from "./ports";
+import { LoadingWell } from "./run-well";
 import {
   BarButton,
   BarDivider,
@@ -49,6 +50,7 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
   const wire = data.wire as unknown as UploadNodeData;
   const asset = data.asset;
   const uploading = data.uploading ?? false;
+  const loading = Boolean(data.hydrating) && !asset && !uploading;
   const accent = accentFor(asset?.modality ?? "any");
 
   const [expanded, setExpanded] = React.useState(false);
@@ -66,15 +68,25 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
         onChange={(v) => updateNode(id, { title: v || null })}
       />
 
-      <NodeCard selected={selected} className="group overflow-hidden">
+      {/* The card must not clip: the output connector sits a clear 40px off its
+          right edge, so `overflow-hidden` belongs on the media well below —
+          which is the only child that has anything to overflow. */}
+      <NodeCard selected={selected} className="group">
         <OutputPort modality={asset?.modality ?? "any"} className="top-4" />
 
-        <div className="relative flex min-h-44 items-center justify-center bg-[#faf8f4]">
+        <div className="relative flex min-h-44 items-center justify-center overflow-hidden bg-[#faf8f4]">
           {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
           {uploading ? (
             <div className="flex flex-col items-center gap-2 py-10 text-center">
               <SpinnerIcon className="size-5 animate-spin text-[#8a8271]" />
               <p className="text-[12px] text-[#a09a88]">Uploading to B2…</p>
+            </div>
+          ) : loading ? (
+            // This node has a file — its presigned preview is simply still
+            // being minted. Offering "choose a file" here would invite the
+            // user to replace something they cannot see.
+            <div className="py-10">
+              <LoadingWell />
             </div>
           ) : asset ? (
             <>
@@ -136,7 +148,9 @@ export function UploadNode({ id, data, selected }: NodeProps<StudioNode>) {
         </div>
       </NodeCard>
 
-      {!asset && !uploading ? (
+      {/* Only a node that really has no file — one whose preview is still in
+          flight has one, and warning about it would be wrong for a second. */}
+      {!asset && !uploading && !loading ? (
         <p className="mt-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[#a9743f]">
           <WarningIcon className="size-3.5 shrink-0" weight="fill" />
           No file attached yet

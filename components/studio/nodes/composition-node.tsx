@@ -62,7 +62,7 @@ import { useStudio } from "../studio-context";
 import { CompositionIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { LanePort, OutputPort } from "./ports";
 import { ROLE_ICON, ROLE_LABEL } from "./roles";
-import { RunBeam, RunWell, isRunBusy } from "./run-well";
+import { LoadingWell, RunBeam, RunWell, isRunBusy } from "./run-well";
 import {
   BarButton,
   FloatingBar,
@@ -214,6 +214,7 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
     duplicateNode,
     runFrom,
     downloadNode,
+    refreshMedia,
   } = useStudio();
 
   const videoTrack = compositeVideoTrack(data.wire);
@@ -370,6 +371,9 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
 
   const clipCount = tracks.reduce((n, t) => n + t.clips.length, 0);
 
+  /** Still fetching this node's last render — see the note on the generate node. */
+  const loading = Boolean(data.hydrating) && !data.run;
+
   const [expanded, setExpanded] = React.useState(false);
   // A settled render only — a busy or failed well has nothing to blow up.
   const expandMedia =
@@ -390,14 +394,21 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
 
         {/* Preview well — the same 16:9 card a video node previews into.
             While rendering it wears the prompt bar's border beam. */}
-        <RunBeam active={isRunBusy(data.run)}>
+        <RunBeam active={isRunBusy(data.run) || loading}>
           <div
             className="group relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
             style={{ height: WELL_HEIGHT }}
           >
-            <RunWell run={data.run} modality="video" />
+            <RunWell
+              run={data.run}
+              modality="video"
+              assetId={data.history?.[0]?.assetId}
+              onStale={(assetId) => refreshMedia(id, assetId)}
+            />
             {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
-            {data.run ? null : (
+            {data.run ? null : loading ? (
+              <LoadingWell />
+            ) : (
               <div className="flex flex-col items-center gap-2.5 px-3 text-center">
                 <span
                   className="grid size-10 place-items-center"

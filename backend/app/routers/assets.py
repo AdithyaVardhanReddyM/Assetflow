@@ -189,6 +189,139 @@ async def get_content(
     return RedirectResponse(presign(asset.b2_key or asset.url), status_code=307)
 
 
+# --- audio peaks ------------------------------------------------------------
+
+#: Buckets the server computes per clip. The canvas draws far fewer bars than
+#: this and downsamples to whatever its width allows, so one cached array
+#: serves every node size without a re-decode.
+_PEAK_BUCKETS = 400
+#: Samples to decode across the whole clip, whatever its length. Peak envelopes
+#: need nothing like full rate — this keeps a ten-minute track's analysis the
+#: same cost as a two-second one.
+_PEAK_TARGET_SAMPLES = 120_000
+#: ``asset_id -> (peaks, duration_sec)``. Bytes behind an asset never change, so
+#: this needs no TTL; the cap is only there to bound a long-lived process.
+_PEAKS_CACHE_MAX = 256
+_peaks_cache: dict[str, tuple[list[float], float]] = {}
+
+
+def _probe_duration(target: str) -> float:
+    """Clip length in seconds via ffprobe, or 0.0 when it cannot be read."""
+    import subprocess
+
+    from genblaze_core.providers._ffmpeg_utils import resolve_ffmpeg
+
+    probe = resolve_ffmpeg("ffmpeg").replace("ffmpeg", "ffprobe")
+    try:
+        out = subprocess.run(
+            [
+                probe, "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                target,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        ).stdout.strip()
+        return max(0.0, float(out))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0.0
+
+
+def _decode_peaks(target: str, duration: float) -> list[float]:
+    """RMS per bucket over the whole clip, normalised so the loudest bucket is 1.
+
+    Decodes to mono 16-bit PCM at whatever rate lands near
+    ``_PEAK_TARGET_SAMPLES`` for this duration. Reading straight from the
+    presigned URL keeps the bytes out of this process's disk.
+    """
+    import array
+    import subprocess
+
+    from genblaze_core.providers._ffmpeg_utils import resolve_ffmpeg
+
+    rate = 4000 if duration <= 0 else int(min(8000, max(500, _PEAK_TARGET_SAMPLES / duration)))
+    try:
+        raw = subprocess.run(
+            [
+                resolve_ffmpeg("ffmpeg"), "-nostdin", "-v", "error",
+                "-i", target,
+                "-f", "s16le", "-ac", "1", "-ar", str(rate),
+                "-",
+            ],
+            capture_output=True,
+            timeout=60,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    # s16le is two bytes a sample; a trailing odd byte would break `array`.
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) - (len(raw) % 2)])
+    if not samples:
+        return []
+
+    per = max(1, len(samples) // _PEAK_BUCKETS)
+    peaks: list[float] = []
+    loudest = 0.0
+    for start in range(0, per * _PEAK_BUCKETS, per):
+        window = samples[start : start + per]
+        if not window:
+            break
+        total = 0
+        for value in window:
+            total += value * value
+        rms = (total / len(window)) ** 0.5
+        loudest = max(loudest, rms)
+        peaks.append(rms)
+
+    if loudest <= 0:
+        return [0.0] * len(peaks)
+    return [round(p / loudest, 4) for p in peaks]
+
+
+@router.get("/{asset_id}/peaks")
+async def get_peaks(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser, settings: SettingsDep
+) -> dict[str, Any]:
+    """The waveform envelope and true duration for an audio asset.
+
+    Computed here rather than in the browser because the bucket is private and
+    B2 sends no CORS headers, so the canvas cannot `fetch()` the bytes to decode
+    them itself (the same constraint that makes `/download` proxy). Returns
+    empty peaks rather than an error when ffmpeg cannot read the clip — the
+    player falls back to a flat bar rather than losing its transport controls.
+    """
+    asset = await _get_owned(session, asset_id, user)
+
+    if not (asset.media_type or "").startswith("audio/"):
+        raise NotFound(f"Asset {asset_id} is not audio.")
+
+    key = str(asset_id)
+    hit = _peaks_cache.get(key)
+    if hit is None:
+        if settings.storage_mode is StorageMode.LOCAL:
+            target = asset.url
+        else:
+            from app.engine.manifests import presign
+
+            target = presign(asset.b2_key or asset.url)
+
+        duration = _probe_duration(target)
+        peaks = _decode_peaks(target, duration)
+        hit = (peaks, duration)
+        if peaks:
+            if len(_peaks_cache) >= _PEAKS_CACHE_MAX:
+                _peaks_cache.pop(next(iter(_peaks_cache)))
+            _peaks_cache[key] = hit
+
+    peaks, duration = hit
+    return {"peaks": peaks, "duration_sec": duration}
+
+
 _EXT_BY_MEDIA_TYPE = {
     "video/mp4": ".mp4",
     "image/png": ".png",

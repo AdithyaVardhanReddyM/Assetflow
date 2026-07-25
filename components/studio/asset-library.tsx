@@ -19,8 +19,10 @@ import Image from "next/image";
 import { UserButton, useAuth } from "@clerk/nextjs";
 import {
   ArrowLeftIcon,
+  ArrowSquareOutIcon,
   CaretDownIcon,
   CheckIcon,
+  CopyIcon,
   DownloadSimpleIcon,
   FileTextIcon,
   ImageSquareIcon,
@@ -33,6 +35,7 @@ import {
   VideoCameraIcon,
   WarningCircleIcon,
   WaveformIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -44,8 +47,11 @@ import { downloadResult } from "@/lib/studio/runs-client";
 import {
   deleteLibraryAsset,
   fetchLibrary,
+  fetchProvenance,
+  type AssetProvenance,
   type LibraryAsset,
 } from "@/lib/studio/library-client";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -175,6 +181,16 @@ export function AssetLibrary() {
   const [deletedIds, setDeletedIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [downloadingId, setDownloadingId] = React.useState<string | null>(null);
 
+  /** The asset whose dossier is open in the drawer. */
+  const [inspecting, setInspecting] = React.useState<LibraryAsset | null>(null);
+  /**
+   * Fetched dossiers, kept per asset id — lineage rows never change once a run
+   * has finished, so reopening a card should not refetch.
+   */
+  const [dossiers, setDossiers] = React.useState<
+    Record<string, AssetProvenance | "loading" | "error">
+  >({});
+
   const authFor = React.useCallback(
     async () => ({
       token: await getToken().catch(() => null),
@@ -293,6 +309,27 @@ export function AssetLibrary() {
       }
     },
     [downloadingId, authFor],
+  );
+
+  const loadDossier = React.useCallback(
+    async (asset: LibraryAsset) => {
+      setDossiers((current) => ({ ...current, [asset.id]: "loading" }));
+      const dossier = await fetchProvenance(asset.id, await authFor());
+      setDossiers((current) => ({
+        ...current,
+        [asset.id]: dossier ?? "error",
+      }));
+    },
+    [authFor],
+  );
+
+  const inspect = React.useCallback(
+    (asset: LibraryAsset) => {
+      setInspecting(asset);
+      const known = dossiers[asset.id];
+      if (!known || known === "error") void loadDossier(asset);
+    },
+    [dossiers, loadDossier],
   );
 
   // --- render -------------------------------------------------------------
@@ -521,6 +558,7 @@ export function AssetLibrary() {
                       downloading={downloadingId === asset.id}
                       onDownload={() => void download(asset)}
                       onDelete={() => setPendingDelete(asset)}
+                      onInspect={() => inspect(asset)}
                     />
                   ))}
                 </div>
@@ -528,6 +566,20 @@ export function AssetLibrary() {
             )}
           </div>
         </div>
+
+        <ProvenanceDrawer
+          asset={inspecting}
+          dossier={inspecting ? (dossiers[inspecting.id] ?? "loading") : "loading"}
+          downloading={inspecting !== null && downloadingId === inspecting.id}
+          onClose={() => setInspecting(null)}
+          onRetry={() => inspecting && void loadDossier(inspecting)}
+          onDownload={() => inspecting && void download(inspecting)}
+          onDelete={() => {
+            if (!inspecting) return;
+            setPendingDelete(inspecting);
+            setInspecting(null);
+          }}
+        />
 
         <AlertDialog
           open={pendingDelete !== null}
@@ -614,12 +666,14 @@ function AssetCard({
   downloading,
   onDownload,
   onDelete,
+  onInspect,
 }: {
   asset: LibraryAsset;
   index: number;
   downloading: boolean;
   onDownload: () => void;
   onDelete: () => void;
+  onInspect: () => void;
 }) {
   const Icon = MODALITY_ICONS[asset.modality] ?? FileTextIcon;
   const meta = [
@@ -633,7 +687,8 @@ function AssetCard({
 
   return (
     <article
-      className="group relative mb-5 break-inside-avoid border border-[#1f211c]/8 bg-white shadow-[0_1px_2px_rgba(31,33,28,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-[#1f211c]/24 hover:shadow-[0_18px_44px_-16px_rgba(31,33,28,0.28)] animate-[studio-rise_0.6s_cubic-bezier(0.32,0.72,0,1)_both]"
+      onClick={onInspect}
+      className="group relative mb-5 cursor-pointer break-inside-avoid border border-[#1f211c]/8 bg-white shadow-[0_1px_2px_rgba(31,33,28,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-[#1f211c]/24 hover:shadow-[0_18px_44px_-16px_rgba(31,33,28,0.28)] animate-[studio-rise_0.6s_cubic-bezier(0.32,0.72,0,1)_both]"
       style={{ animationDelay: `${Math.min(index * 35, 420)}ms` }}
     >
       <CardMedia asset={asset} />
@@ -643,7 +698,10 @@ function AssetCard({
         <button
           type="button"
           aria-label="Download"
-          onClick={onDownload}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDownload();
+          }}
           className="grid size-8 place-items-center bg-[#1f211c]/85 text-[#f7f4ee] backdrop-blur-sm transition-colors hover:bg-[#1f211c]"
         >
           {downloading ? (
@@ -655,7 +713,10 @@ function AssetCard({
         <button
           type="button"
           aria-label="Remove from library"
-          onClick={onDelete}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
           className="grid size-8 place-items-center bg-[#1f211c]/85 text-[#f7f4ee] backdrop-blur-sm transition-colors hover:bg-[#a33d2f]"
         >
           <TrashSimpleIcon className="size-4" />
@@ -773,7 +834,10 @@ function AudioPlate({ asset }: { asset: LibraryAsset }) {
     return heights;
   }, [asset.id]);
 
-  const toggle = () => {
+  // Stop propagation on both: the card behind this plate opens the provenance
+  // drawer on click, and pressing play is not a request to see the dossier.
+  const toggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
     const el = ref.current;
     if (!el) return;
     if (el.paused) void el.play().catch(() => {});
@@ -781,6 +845,7 @@ function AudioPlate({ asset }: { asset: LibraryAsset }) {
   };
 
   const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
     const el = ref.current;
     if (!el || !Number.isFinite(el.duration)) return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -846,6 +911,448 @@ function TextPlate({ asset }: { asset: LibraryAsset }) {
       <span className="text-[11px] font-semibold tracking-[0.16em] text-[#8a8271] uppercase">
         {asset.mediaType.split("/")[1] ?? "file"}
       </span>
+    </div>
+  );
+}
+
+// --- the provenance drawer ------------------------------------------------
+
+function copyText(label: string, value: string) {
+  navigator.clipboard
+    .writeText(value)
+    .then(() => toast.success(`${label} copied.`))
+    .catch(() => toast.error(`Couldn't copy the ${label.toLowerCase()}.`));
+}
+
+function shortHash(value: string): string {
+  return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value;
+}
+
+function formatWhenFull(iso: string | null): string | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return null;
+  return new Date(then).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function formatParamValue(value: unknown): string {
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return text.length > 72 ? `${text.slice(0, 72)}…` : text;
+}
+
+/**
+ * The dossier: where a file came from, spelled out as a chain of custody.
+ * Prompt in serif — the human's voice — then the model, the run, and the
+ * cryptographic receipts, each a link on one vertical rail.
+ */
+function ProvenanceDrawer({
+  asset,
+  dossier,
+  downloading,
+  onClose,
+  onRetry,
+  onDownload,
+  onDelete,
+}: {
+  asset: LibraryAsset | null;
+  dossier: AssetProvenance | "loading" | "error";
+  downloading: boolean;
+  onClose: () => void;
+  onRetry: () => void;
+  onDownload: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <Sheet open={asset !== null} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        className="w-full overflow-y-auto rounded-none border-l border-[#1f211c]/12 bg-[#f7f4ee] p-0 text-[#1f211c] shadow-[-24px_0_60px_-32px_rgba(31,33,28,0.35)] data-[side=right]:sm:max-w-[440px]"
+      >
+        {asset && (
+          <>
+            {/* Masthead — the same overline + rule motif as the shelf. */}
+            <div className="flex items-center justify-between border-b border-[#1f211c]/8 px-5 py-4">
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] font-semibold tracking-[0.22em] text-[#8a8271] uppercase">
+                  Provenance
+                </span>
+                <span
+                  aria-hidden
+                  className="h-px w-14 bg-gradient-to-r from-[#1f211c]/18 to-transparent"
+                />
+              </div>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={onClose}
+                className="grid size-7 place-items-center text-[#4c4a41] transition-colors hover:bg-[#1f211c]/6 hover:text-[#1f211c]"
+              >
+                <XIcon className="size-4" />
+              </button>
+            </div>
+
+            <DrawerMedia asset={asset} />
+
+            <div className="border-b border-[#1f211c]/8 px-5 py-4">
+              <SheetTitle className="font-sans text-[15px] leading-snug font-medium tracking-normal text-[#1f211c]">
+                {displayName(asset)}
+              </SheetTitle>
+              <p className="mt-1 text-[11.5px] text-[#8a8271] tabular-nums">
+                {[
+                  asset.kind === "generated" ? "Generated" : "Uploaded",
+                  asset.width && asset.height ? `${asset.width}×${asset.height}` : null,
+                  formatDuration(asset.durationSec),
+                  formatBytes(asset.sizeBytes),
+                  formatWhenFull(asset.createdAt),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+
+              <div className="mt-3.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onDownload}
+                  className="flex h-9 items-center gap-2 bg-[#1f211c] px-3.5 text-[12.5px] font-semibold text-[#f7f4ee] transition-colors hover:bg-[#1f211c]/88"
+                >
+                  {downloading ? (
+                    <Spinner className="size-3.5" />
+                  ) : (
+                    <DownloadSimpleIcon className="size-3.5" />
+                  )}
+                  Download
+                </button>
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white px-3.5 text-[12.5px] font-semibold text-[#4c4a41] transition-colors hover:border-[#a33d2f]/50 hover:text-[#a33d2f]"
+                >
+                  <TrashSimpleIcon className="size-3.5" />
+                  Remove
+                </button>
+              </div>
+            </div>
+
+            <div className="px-5 py-5">
+              {dossier === "loading" && <DossierSkeleton />}
+
+              {dossier === "error" && (
+                <div className="text-[12.5px] leading-6 text-[#8a8271]">
+                  Couldn&rsquo;t load the provenance record.{" "}
+                  <button
+                    type="button"
+                    onClick={onRetry}
+                    className="font-semibold text-[#4c4a41] underline underline-offset-2 hover:text-[#1f211c]"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+
+              {typeof dossier === "object" && (
+                <Dossier asset={asset} dossier={dossier} />
+              )}
+            </div>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function DrawerMedia({ asset }: { asset: LibraryAsset }) {
+  if (!asset.previewUrl) return null;
+  switch (asset.modality) {
+    case "image":
+      return (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={asset.previewUrl}
+          alt={displayName(asset)}
+          className="block max-h-[320px] w-full border-b border-[#1f211c]/8 bg-[#eceadf] object-contain"
+        />
+      );
+    case "video":
+      return (
+        <video
+          src={asset.previewUrl}
+          controls
+          playsInline
+          preload="metadata"
+          className="block max-h-[320px] w-full border-b border-[#1f211c]/8 bg-[#1f211c]"
+        />
+      );
+    case "audio":
+      return (
+        <div className="border-b border-[#1f211c]/8">
+          <AudioPlate asset={asset} />
+        </div>
+      );
+    default:
+      return (
+        <div className="border-b border-[#1f211c]/8">
+          <TextPlate asset={asset} />
+        </div>
+      );
+  }
+}
+
+/** One link on the custody rail. */
+function CustodySection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="relative pl-6">
+      <span
+        aria-hidden
+        className="absolute top-[3px] -left-[5.5px] size-2.5 border border-[#f7f4ee] bg-[#1f211c]"
+      />
+      <h3 className="text-[10px] font-semibold tracking-[0.2em] text-[#8a8271] uppercase">
+        {title}
+      </h3>
+      <div className="mt-2">{children}</div>
+    </li>
+  );
+}
+
+function DossierRow({
+  label,
+  value,
+  mono,
+  copy,
+  href,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  /** Full text handed to the clipboard — display may be truncated. */
+  copy?: string;
+  href?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1">
+      <span className="shrink-0 text-[11px] text-[#8a8271]">{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        {href ? (
+          <Link
+            href={href}
+            className={cn(
+              "truncate text-[12px] font-medium underline decoration-[#1f211c]/25 underline-offset-2 hover:decoration-[#1f211c]",
+              mono && "font-mono text-[11px]",
+            )}
+          >
+            {value}
+          </Link>
+        ) : (
+          <span
+            title={copy ?? value}
+            className={cn(
+              "truncate text-[12px] font-medium",
+              mono && "font-mono text-[11px] tracking-tight",
+            )}
+          >
+            {value}
+          </span>
+        )}
+        {copy && (
+          <button
+            type="button"
+            aria-label={`Copy ${label.toLowerCase()}`}
+            onClick={() => copyText(label, copy)}
+            className="grid size-6 shrink-0 place-items-center text-[#8a8271] transition-colors hover:bg-[#1f211c]/6 hover:text-[#1f211c]"
+          >
+            <CopyIcon className="size-3.5" />
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function Dossier({
+  asset,
+  dossier,
+}: {
+  asset: LibraryAsset;
+  dossier: AssetProvenance;
+}) {
+  const lineage = dossier.lineage;
+  const manifestUri = lineage?.manifestUri ?? dossier.manifestUri;
+  const params = lineage?.params
+    ? Object.entries(lineage.params).filter(([, v]) => v !== null && v !== "")
+    : [];
+
+  return (
+    <>
+      <ol className="space-y-7 border-l border-[#1f211c]/14">
+        {/* The human's part — serif, like every human voice on the canvas. */}
+        {lineage?.prompt && (
+          <CustodySection title="Prompt">
+            <p className="font-serif text-[15px] leading-6 text-[#1f211c] italic">
+              &ldquo;{lineage.prompt}&rdquo;
+            </p>
+          </CustodySection>
+        )}
+
+        {lineage && (lineage.model || params.length > 0) && (
+          <CustodySection title="Model">
+            {lineage.model && (
+              <p className="flex flex-wrap items-baseline gap-x-2">
+                <span className="text-[13px] font-semibold">{lineage.model}</span>
+                {lineage.provider && (
+                  <span className="text-[10.5px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+                    {lineage.provider}
+                  </span>
+                )}
+              </p>
+            )}
+            {params.length > 0 && (
+              <div className="mt-2 divide-y divide-[#1f211c]/5 border-y border-[#1f211c]/8">
+                {params.map(([key, value]) => (
+                  <DossierRow
+                    key={key}
+                    label={key}
+                    value={formatParamValue(value)}
+                    copy={
+                      typeof value === "object"
+                        ? JSON.stringify(value)
+                        : String(value)
+                    }
+                  />
+                ))}
+              </div>
+            )}
+            {lineage.costUsd !== null && lineage.costUsd > 0 && (
+              <p className="mt-2 text-[11.5px] text-[#8a8271] tabular-nums">
+                ${lineage.costUsd.toFixed(4)} to generate
+              </p>
+            )}
+          </CustodySection>
+        )}
+
+        {lineage && (
+          <CustodySection title="Run">
+            <div className="divide-y divide-[#1f211c]/5">
+              <DossierRow
+                label="Run"
+                value={lineage.runId.slice(0, 8)}
+                mono
+                copy={lineage.runId}
+              />
+              {lineage.nodeId && (
+                <DossierRow label="Node" value={lineage.nodeId} mono />
+              )}
+              {lineage.parentRunId && (
+                <DossierRow
+                  label="Continues"
+                  value={lineage.parentRunId.slice(0, 8)}
+                  mono
+                  copy={lineage.parentRunId}
+                />
+              )}
+            </div>
+            {lineage.workflowId && (
+              <Link
+                href={`/workflow/${lineage.workflowId}`}
+                className="mt-2.5 inline-flex h-8 items-center gap-1.5 border border-[#1f211c]/14 bg-white px-3 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+              >
+                <ArrowSquareOutIcon className="size-3.5" />
+                Open the canvas it came from
+              </Link>
+            )}
+          </CustodySection>
+        )}
+
+        {asset.kind === "generated" && !lineage && (
+          <CustodySection title="Run">
+            <p className="text-[12.5px] leading-6 text-[#8a8271]">
+              The run behind this file is no longer indexed here. Its manifest
+              in storage still holds the full record.
+            </p>
+          </CustodySection>
+        )}
+
+        {asset.kind === "upload" && (
+          <CustodySection title="Origin">
+            <p className="text-[12.5px] leading-6 text-[#4c4a41]">
+              Uploaded by you
+              {formatWhenFull(asset.createdAt)
+                ? ` on ${formatWhenFull(asset.createdAt)}`
+                : ""}
+              .
+            </p>
+          </CustodySection>
+        )}
+
+        {(asset.sha256 || lineage?.manifestHash || manifestUri) && (
+          <CustodySection title="Integrity">
+            <div className="divide-y divide-[#1f211c]/5">
+              {asset.sha256 && (
+                <DossierRow
+                  label="SHA-256"
+                  value={shortHash(asset.sha256)}
+                  mono
+                  copy={asset.sha256}
+                />
+              )}
+              {lineage?.manifestHash && (
+                <DossierRow
+                  label="Manifest hash"
+                  value={shortHash(lineage.manifestHash)}
+                  mono
+                  copy={lineage.manifestHash}
+                />
+              )}
+              {manifestUri && (
+                <DossierRow
+                  label="Manifest"
+                  value={manifestUri}
+                  mono
+                  copy={manifestUri}
+                />
+              )}
+            </div>
+          </CustodySection>
+        )}
+      </ol>
+
+      <p className="mt-7 border-t border-[#1f211c]/8 pt-4 font-serif text-[13px] leading-6 text-[#8a8271] italic">
+        The canonical record lives beside the file in storage — this page could
+        vanish and the trail would still hold.
+      </p>
+    </>
+  );
+}
+
+function DossierSkeleton() {
+  return (
+    <div className="animate-pulse space-y-7 border-l border-[#1f211c]/10">
+      {[3, 2, 3].map((rows, section) => (
+        <div key={section} className="relative pl-6">
+          <span
+            aria-hidden
+            className="absolute top-[3px] -left-[5.5px] size-2.5 bg-[#1f211c]/15"
+          />
+          <div className="h-2 w-16 bg-[#1f211c]/8" />
+          <div className="mt-3 space-y-2">
+            {Array.from({ length: rows }, (_, i) => (
+              <div
+                key={i}
+                className="h-2.5 bg-[#1f211c]/5"
+                style={{ width: `${88 - i * 22}%` }}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

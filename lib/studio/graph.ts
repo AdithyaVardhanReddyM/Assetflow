@@ -228,6 +228,13 @@ export type FlowNodeData = {
    * workflow's run history and advanced by run events, never saved in `wire`.
    */
   history?: NodeGeneration[];
+  /**
+   * True while the canvas is still fetching what this node already holds — its
+   * past generations, or an upload's presigned preview. Neither is saved in the
+   * graph, so both arrive a moment after mount; without this a node with a
+   * shelf of results reads as an untouched one for the length of that fetch.
+   */
+  hydrating?: boolean;
 };
 
 /** One generated result of a node — a carousel entry. */

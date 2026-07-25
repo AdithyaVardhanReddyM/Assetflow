@@ -203,16 +203,21 @@ export async function startRun(
  * Recent generations per node (newest first) from every prior run of this
  * workflow — what puts yesterday's image back in its node, and fills the
  * carousel of earlier takes, when the canvas is reopened.
+ *
+ * `null` means the request itself failed, which is not the same as a workflow
+ * that has never been run: the caller retries the first and not the second. A
+ * failure treated as "no results" is exactly the bug where a node with
+ * generations reopens looking brand new.
  */
 export async function fetchWorkflowResults(
   workflowId: string,
   auth: ApiAuth,
-): Promise<Record<string, NodeGeneration[]>> {
+): Promise<Record<string, NodeGeneration[]> | null> {
   try {
     const res = await fetch(`${API_URL}/v1/workflows/${workflowId}/results`, {
       headers: authHeaders(auth.token, auth.userId),
     });
-    if (!res.ok) return {};
+    if (!res.ok) return null;
     const body = (await res.json()) as {
       results: {
         node_id: string;
@@ -240,7 +245,7 @@ export async function fetchWorkflowResults(
     }
     return out;
   } catch {
-    return {};
+    return null;
   }
 }
 

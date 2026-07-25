@@ -24,6 +24,7 @@ export type LibraryAsset = {
   durationSec: number | null;
   runId: string | null;
   filename: string | null;
+  sha256: string | null;
   createdAt: string | null;
 };
 
@@ -39,6 +40,7 @@ type AssetRow = {
   duration_sec: number | null;
   run_id: string | null;
   filename: string | null;
+  sha256: string | null;
   created_at: string | null;
 };
 
@@ -84,8 +86,83 @@ function toAsset(row: AssetRow): LibraryAsset {
     durationSec: row.duration_sec,
     runId: row.run_id,
     filename: row.filename,
+    sha256: row.sha256,
     createdAt: row.created_at,
   };
+}
+
+// --- provenance -----------------------------------------------------------
+
+export type AssetLineage = {
+  runId: string;
+  workflowId: string | null;
+  parentRunId: string | null;
+  /** The run's manifest in B2 — the canonical record of how this was made. */
+  manifestUri: string | null;
+  manifestHash: string | null;
+  nodeId: string | null;
+  provider: string | null;
+  model: string | null;
+  prompt: string | null;
+  params: Record<string, unknown> | null;
+  costUsd: number | null;
+};
+
+export type AssetProvenance = {
+  /** The asset's own manifest pointer, when it has one distinct from the run's. */
+  manifestUri: string | null;
+  /** Null for uploads and for rows whose run has been forgotten. */
+  lineage: AssetLineage | null;
+};
+
+type LineageRow = {
+  run_id: string;
+  workflow_id: string | null;
+  parent_run_id: string | null;
+  manifest_uri: string | null;
+  manifest_hash: string | null;
+  node_id: string | null;
+  provider: string | null;
+  model: string | null;
+  prompt: string | null;
+  params: Record<string, unknown> | null;
+  cost_usd: number | null;
+};
+
+export async function fetchProvenance(
+  id: string,
+  auth: ApiAuth,
+): Promise<AssetProvenance | null> {
+  try {
+    const res = await fetch(`${API_URL}/v1/assets/${id}/provenance`, {
+      headers: authHeaders(auth.token, auth.userId),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      manifest_uri: string | null;
+      lineage: LineageRow | null;
+    };
+    return {
+      manifestUri: body.manifest_uri,
+      lineage: body.lineage
+        ? {
+            runId: body.lineage.run_id,
+            workflowId: body.lineage.workflow_id,
+            parentRunId: body.lineage.parent_run_id,
+            manifestUri: body.lineage.manifest_uri,
+            manifestHash: body.lineage.manifest_hash,
+            nodeId: body.lineage.node_id,
+            provider: body.lineage.provider,
+            model: body.lineage.model,
+            prompt: body.lineage.prompt,
+            params: body.lineage.params,
+            costUsd: body.lineage.cost_usd,
+          }
+        : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function deleteLibraryAsset(id: string, auth: ApiAuth): Promise<boolean> {

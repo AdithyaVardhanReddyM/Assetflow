@@ -52,7 +52,12 @@ import {
   outputRole,
   rolesCompatible,
 } from "@/lib/studio/node-ui";
-import { StudioProvider, type RunScope } from "./studio-context";
+import { isStepKind } from "@/lib/studio/runs-client";
+import {
+  StudioProvider,
+  type RunScope,
+  type StudioContextValue,
+} from "./studio-context";
 import {
   CommentLayer,
   type CommentDraft,
@@ -94,12 +99,27 @@ export type CanvasProps = {
   runStates: Record<string, NodeRunState>;
   /** Recent generations per node (newest first) — the carousel entries. */
   histories: Record<string, NodeGeneration[]>;
+  /**
+   * The two things the graph does not store are still on their way. Nodes that
+   * were on the document at open shimmer rather than show an empty state,
+   * because whether they hold anything is exactly what is being fetched.
+   */
+  hydratingResults: boolean;
+  hydratingUploads: boolean;
+  /** Re-sign one asset's expired preview URL — see the note on the context. */
+  onRefreshMedia: (nodeId: string, assetId: string) => Promise<boolean>;
   apiRef: React.RefObject<CanvasApi | null>;
   onGraphChange: (graph: Graph) => void;
   onZoomChange: (zoom: number) => void;
   onInteract: () => void;
   onUpload: (file: File) => Promise<AssetPreview | null>;
   onRun: (nodeId: string, scope: RunScope) => void;
+  /** Re-generate a node's displayed take via a hidden edit model — see the context. */
+  onEditTake: StudioContextValue["editTake"];
+  /** Magic Text plumbing — see the context for what each one does. */
+  onLayerize: StudioContextValue["layerizeAsset"];
+  onFetchAssetBlob: StudioContextValue["fetchAssetBlob"];
+  onRegisterTextEdit: StudioContextValue["registerTextEdit"];
   /** Save a node's generated result (a specific carousel take, or latest) to disk. */
   onDownload: (nodeId: string, generation?: NodeGeneration) => void;
   panMode: boolean;
@@ -119,12 +139,19 @@ function CanvasInner({
   assets,
   runStates,
   histories,
+  hydratingResults,
+  hydratingUploads,
+  onRefreshMedia,
   apiRef,
   onGraphChange,
   onZoomChange,
   onInteract,
   onUpload,
   onRun,
+  onEditTake,
+  onLayerize,
+  onFetchAssetBlob,
+  onRegisterTextEdit,
   onDownload,
   panMode,
   fitOnMount,
@@ -220,6 +247,37 @@ function CanvasInner({
       }),
     );
   }, [histories, setNodes]);
+
+  /**
+   * The nodes this document opened with. Only they can be waiting on anything:
+   * a node placed since was made here, and its well is empty because it *is*
+   * empty — shimmering at it would promise a result that is not coming.
+   */
+  const openedWith = React.useMemo(
+    () => new Set(initialGraph.nodes.map((n) => n.id)),
+    [initialGraph],
+  );
+
+  // A node that already holds results must not read as an untouched one for
+  // the length of the fetch that goes looking for them.
+  React.useEffect(() => {
+    setNodes((current) =>
+      current.map((n) => {
+        const waiting =
+          openedWith.has(n.id) &&
+          (isStepKind(n.data.kind)
+            ? hydratingResults
+            : n.data.kind === "input.upload"
+              ? hydratingUploads && typeof n.data.wire.asset_id === "string"
+              : false);
+        // undefined rather than false, so an unchanged node keeps its identity
+        // and React Flow does not re-render every card on the canvas.
+        const hydrating = waiting || undefined;
+        if (n.data.hydrating === hydrating) return n;
+        return { ...n, data: { ...n.data, hydrating } };
+      }),
+    );
+  }, [hydratingResults, hydratingUploads, openedWith, setNodes]);
 
   // Report the document upward on every change. React Flow mutates position
   // during a drag, so this fires often — the shell debounces before saving.
@@ -592,7 +650,12 @@ function CanvasInner({
       duplicateNode,
       pickFileFor,
       runFrom: onRun,
+      editTake: onEditTake,
+      layerizeAsset: onLayerize,
+      fetchAssetBlob: onFetchAssetBlob,
+      registerTextEdit: onRegisterTextEdit,
       downloadNode: onDownload,
+      refreshMedia: onRefreshMedia,
     }),
     [
       catalog,
@@ -603,7 +666,12 @@ function CanvasInner({
       duplicateNode,
       pickFileFor,
       onRun,
+      onEditTake,
+      onLayerize,
+      onFetchAssetBlob,
+      onRegisterTextEdit,
       onDownload,
+      onRefreshMedia,
     ],
   );
 

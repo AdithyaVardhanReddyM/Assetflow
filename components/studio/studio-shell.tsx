@@ -38,10 +38,17 @@ import {
   downloadResult,
   fetchRunAssets,
   fetchWorkflowResults,
+  isStepKind,
   startRun,
   stepNodes,
   streamRun,
 } from "@/lib/studio/runs-client";
+import { type TakeEditSpec, buildTakeEditGraph } from "@/lib/studio/camera-edit";
+import {
+  fetchAssetBlob as fetchAssetBlobApi,
+  registerTextEdit as registerTextEditApi,
+  requestLayerize,
+} from "@/lib/studio/magic-text";
 import { saveWorkflow } from "@/app/workflow/actions";
 import {
   addComment,
@@ -56,6 +63,17 @@ import { TopBar, type SaveState } from "./top-bar";
 import { PromptBar, type PromptSpec } from "./prompt-bar";
 
 const SAVE_DEBOUNCE_MS = 800;
+
+/**
+ * Hydration — the previews and past generations the graph does not store — is
+ * retried rather than attempted once. A single failed request used to be
+ * indistinguishable from an empty workflow, which is how a node full of
+ * generations could reopen looking like a fresh one.
+ */
+const HYDRATE_ATTEMPTS = 3;
+const HYDRATE_BACKOFF_MS = 600;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function StudioShell({
   workflowId,
@@ -115,6 +133,17 @@ export function StudioShell({
   // --- previews -----------------------------------------------------------
 
   /**
+   * The upload previews on this document, still being fetched. Nodes wear the
+   * loading shimmer while it is true rather than the "choose a file" empty
+   * state, which is a lie about a node that has a file.
+   */
+  const [hydratingUploads, setHydratingUploads] = React.useState(() =>
+    initialGraph.nodes.some(
+      (n) => n.kind === "input.upload" && typeof n.data.asset_id === "string",
+    ),
+  );
+
+  /**
    * The graph stores only `asset_id`; the presigned URLs behind uploads expire,
    * so they are minted fresh on open. Guarded by id rather than run on mount so
    * an unstable `getToken` identity cannot turn this into a refetch loop.
@@ -130,16 +159,32 @@ export function StudioShell({
       .filter((n) => n.kind === "input.upload")
       .map((n) => n.data.asset_id)
       .filter((v): v is string => typeof v === "string");
+    // `hydratingUploads` was seeded from this same condition, so a document
+    // with nothing to resolve is already showing its nodes as settled.
     if (!ids.length) return;
 
-    let live = true;
+    // Deliberately no unmount guard. Under StrictMode this effect mounts,
+    // tears down and mounts again; a `live` flag would drop the answer to the
+    // first fetch while the latch above silences the second, and every upload
+    // node would sit empty until a reload. A late setState on an unmounted
+    // tree is a no-op, which is the cheaper failure by far.
     void (async () => {
-      const resolved = await fetchAssetPreviews(ids, await authFor());
-      if (live) setAssets(resolved);
+      let pending = ids;
+      const found: Record<string, AssetPreview> = {};
+      for (let attempt = 0; attempt < HYDRATE_ATTEMPTS && pending.length; attempt += 1) {
+        if (attempt) await wait(HYDRATE_BACKOFF_MS * attempt);
+        const resolved = await fetchAssetPreviews(pending, await authFor());
+        if (Object.keys(resolved).length) {
+          Object.assign(found, resolved);
+          pending = pending.filter((id) => !found[id]);
+          setAssets({ ...found });
+        }
+      }
+      // Nothing came back at all — release the latch so reopening this canvas
+      // (or a StrictMode remount) tries again rather than latching failure in.
+      if (!Object.keys(found).length) resolvedFor.current = null;
+      setHydratingUploads(false);
     })();
-    return () => {
-      live = false;
-    };
   }, [workflowId, initialGraph, authFor, authLoaded]);
 
   // --- persistence --------------------------------------------------------
@@ -381,6 +426,16 @@ export function StudioShell({
   const activeStream = React.useRef<(() => void) | null>(null);
   React.useEffect(() => () => activeStream.current?.(), []);
 
+  /**
+   * The workflow's past generations, still being fetched. Every step node on
+   * the document shimmers while it is true: which nodes have results is
+   * precisely what this request is on its way to find out, so the alternative
+   * is showing "your image will appear here" over an image that exists.
+   */
+  const [hydratingResults, setHydratingResults] = React.useState(() =>
+    initialGraph.nodes.some((n) => isStepKind(n.kind)),
+  );
+
   // Re-hydrate results when the canvas opens: the graph stores no run output,
   // so yesterday's image comes back from the workflow's run history.
   const hydratedFor = React.useRef<string | null>(null);
@@ -389,41 +444,111 @@ export function StudioShell({
     // caller's identity 404s, and the latch would swallow the retry.
     if (!authLoaded || hydratedFor.current === workflowId) return;
     hydratedFor.current = workflowId;
-    let live = true;
+    // No unmount guard, for the reason spelled out on the preview effect.
     void (async () => {
-      const results = await fetchWorkflowResults(workflowId, await authFor());
-      if (!live || !Object.keys(results).length) return;
-      // Anything a run produced in this session outranks the fetched history.
-      setHistories((current) => ({ ...results, ...current }));
-      const latest: Record<string, NodeResult> = {};
-      for (const [nodeId, generations] of Object.entries(results)) {
-        const r = generations[0];
-        if (!r) continue;
-        latest[nodeId] = {
-          assetId: r.assetId,
-          url: r.url,
-          mediaType: r.mediaType,
-          text: r.text ?? null,
-        };
+      let results: Record<string, NodeGeneration[]> | null = null;
+      for (let attempt = 0; attempt < HYDRATE_ATTEMPTS; attempt += 1) {
+        if (attempt) await wait(HYDRATE_BACKOFF_MS * attempt);
+        // null is a failed request; {} is a workflow that has never been run.
+        results = await fetchWorkflowResults(workflowId, await authFor());
+        if (results) break;
       }
-      nodeResults.current = { ...latest, ...nodeResults.current };
-      setRunStates((current) => {
-        const next = { ...current };
-        for (const [nodeId, r] of Object.entries(latest)) {
-          if (next[nodeId]) continue; // a live run outranks history
-          next[nodeId] = {
-            status: "succeeded",
-            progress: 1,
-            output: { url: r.url, mediaType: r.mediaType, text: r.text },
+      if (!results) hydratedFor.current = null; // let a remount try again
+      const found = results;
+      if (found && Object.keys(found).length) {
+        // Anything a run produced in this session outranks the fetched history.
+        setHistories((current) => ({ ...found, ...current }));
+        const latest: Record<string, NodeResult> = {};
+        for (const [nodeId, generations] of Object.entries(found)) {
+          const r = generations[0];
+          if (!r) continue;
+          latest[nodeId] = {
+            assetId: r.assetId,
+            url: r.url,
+            mediaType: r.mediaType,
+            text: r.text ?? null,
           };
         }
-        return next;
-      });
+        nodeResults.current = { ...latest, ...nodeResults.current };
+        setRunStates((current) => {
+          const next = { ...current };
+          for (const [nodeId, r] of Object.entries(latest)) {
+            if (next[nodeId]) continue; // a live run outranks history
+            next[nodeId] = {
+              status: "succeeded",
+              progress: 1,
+              output: { url: r.url, mediaType: r.mediaType, text: r.text },
+            };
+          }
+          return next;
+        });
+      }
+      // Last, so no node blinks through its empty state on the way to its
+      // result — these land in one batch with the state above.
+      setHydratingResults(false);
     })();
-    return () => {
-      live = false;
-    };
-  }, [workflowId, authFor, authLoaded]);
+  }, [workflowId, authFor, authLoaded, initialGraph]);
+
+  /**
+   * Current histories and run states, readable from a callback that must not
+   * be rebuilt every time a run event lands — a changing `refreshMedia` would
+   * churn the whole node context mid-run.
+   */
+  const historiesRef = React.useRef(histories);
+  const runStatesRef = React.useRef(runStates);
+  React.useEffect(() => {
+    historiesRef.current = histories;
+    runStatesRef.current = runStates;
+  });
+
+  /**
+   * Mint a fresh preview URL for one asset and swap it in wherever this canvas
+   * is holding the stale one. Called by a well whose media failed to load: B2
+   * links are presigned for an hour, and a canvas left open outlives them.
+   */
+  const refreshMedia = React.useCallback(
+    async (nodeId: string, assetId: string): Promise<boolean> => {
+      const stale =
+        historiesRef.current[nodeId]?.find((g) => g.assetId === assetId)?.url ??
+        runStatesRef.current[nodeId]?.output?.url ??
+        null;
+
+      const resolved = await fetchAssetPreviews([assetId], await authFor());
+      const fresh = resolved[assetId]?.url ?? null;
+      // The same link back means the signature was never the problem — the
+      // object itself is unreachable, and swapping it in would only loop.
+      if (!fresh || fresh === stale) return false;
+
+      setHistories((current) => {
+        const existing = current[nodeId];
+        if (!existing?.some((g) => g.assetId === assetId)) return current;
+        return {
+          ...current,
+          [nodeId]: existing.map((g) =>
+            g.assetId === assetId ? { ...g, url: fresh } : g,
+          ),
+        };
+      });
+      setRunStates((current) => {
+        const existing = current[nodeId];
+        // Only the take that failed: a run that has moved on since owns the
+        // well now, and rewriting its URL would drag the old one back.
+        if (!existing?.output || (stale !== null && existing.output.url !== stale)) {
+          return current;
+        }
+        return {
+          ...current,
+          [nodeId]: { ...existing, output: { ...existing.output, url: fresh } },
+        };
+      });
+      const result = nodeResults.current[nodeId];
+      if (result && (result.assetId === assetId || result.url === stale)) {
+        nodeResults.current[nodeId] = { ...result, url: fresh };
+      }
+      return true;
+    },
+    [authFor],
+  );
 
   const patchRunState = React.useCallback(
     (nodeId: string, patch: Partial<NodeRunState>) => {
@@ -594,19 +719,13 @@ export function StudioShell({
     [patchRunState, prependGeneration, resolveRunOutputs],
   );
 
-  const onRun = React.useCallback(
-    async (nodeId: string, scope: "node" | "chain") => {
-      const built = buildRunGraph(graphRef.current, nodeId, scope, nodeResults.current);
-      if (!built.ok) {
-        toast.error(built.error);
-        return;
-      }
-      const steps = stepNodes(built.graph);
-      if (!steps.length) {
-        toast.error("Nothing to run here yet — connect a generate node.");
-        return;
-      }
-
+  /**
+   * Start a run and feed its events back onto the canvas — the shared tail of
+   * every way a run begins. `stepIds` are the nodes that will exist as steps:
+   * they flip to pending immediately (and back, if the request is refused).
+   */
+  const launchRun = React.useCallback(
+    async (runGraph: Graph, stepIds: string[]) => {
       // The graph travels inline with the request, so a pending debounce does
       // not need to land first — but flush it anyway: what runs should be what
       // a reload would reopen.
@@ -619,17 +738,17 @@ export function StudioShell({
       activeStream.current?.();
       setRunStates((current) => {
         const next = { ...current };
-        for (const step of steps) next[step.id] = { status: "pending" };
+        for (const id of stepIds) next[id] = { status: "pending" };
         return next;
       });
 
       const auth = await authFor();
-      const started = await startRun(built.graph, workflowId, auth);
+      const started = await startRun(runGraph, workflowId, auth);
       if (!started.ok) {
         toast.error(started.error);
         setRunStates((current) => {
           const next = { ...current };
-          for (const step of steps) delete next[step.id];
+          for (const id of stepIds) delete next[id];
           return next;
         });
         return;
@@ -640,6 +759,101 @@ export function StudioShell({
       );
     },
     [authFor, flushSave, onRunEvent, workflowId],
+  );
+
+  const onRun = React.useCallback(
+    async (nodeId: string, scope: "node" | "chain") => {
+      const built = buildRunGraph(graphRef.current, nodeId, scope, nodeResults.current);
+      if (!built.ok) {
+        toast.error(built.error);
+        return;
+      }
+      const steps = stepNodes(built.graph);
+      if (!steps.length) {
+        toast.error("Nothing to run here yet — connect a generate node.");
+        return;
+      }
+      await launchRun(
+        built.graph,
+        steps.map((s) => s.id),
+      );
+    },
+    [launchRun],
+  );
+
+  /**
+   * Regenerate one node's displayed take through a hidden edit model (camera
+   * pose, relight) — the runs the expand modal's edit tabs start.
+   * Deliberately not a document edit: the node keeps its own model, and the
+   * take travels back in as a synthetic upload under the node's own id, so
+   * the result lands in this node's carousel and re-hydrates there on reopen
+   * like any other generation.
+   */
+  const onEditTake = React.useCallback(
+    async (nodeId: string, assetId: string, spec: TakeEditSpec) => {
+      const node = graphRef.current.nodes.find((n) => n.id === nodeId);
+      if (!node) return;
+      const title = typeof node.data.title === "string" ? node.data.title : null;
+      const graph = buildTakeEditGraph(
+        { id: node.id, position: node.position, title },
+        assetId,
+        spec,
+      );
+      await launchRun(graph, [nodeId]);
+    },
+    [launchRun],
+  );
+
+  // --- magic text ---------------------------------------------------------
+
+  const onLayerize = React.useCallback(
+    async (assetId: string) => requestLayerize(assetId, await authFor()),
+    [authFor],
+  );
+
+  const onFetchAssetBlob = React.useCallback(
+    async (assetId: string) => fetchAssetBlobApi(assetId, await authFor()),
+    [authFor],
+  );
+
+  /**
+   * Index a composited text edit as this node's newest generation. No run is
+   * in flight, so the node's carousel and result state advance directly —
+   * the same shape a `run.completed` event would have left them in.
+   */
+  const onRegisterTextEdit = React.useCallback(
+    async (nodeId: string, image: Blob, baseAssetId: string): Promise<boolean> => {
+      const registered = await registerTextEditApi(
+        image,
+        { workflowId, nodeId, baseAssetId },
+        await authFor(),
+      );
+      if (!registered) return false;
+      prependGeneration(nodeId, {
+        assetId: registered.assetId,
+        url: registered.url,
+        mediaType: "image/png",
+        width: registered.width,
+        height: registered.height,
+        createdAt: registered.createdAt,
+      });
+      nodeResults.current[nodeId] = {
+        assetId: registered.assetId,
+        url: registered.url,
+        mediaType: "image/png",
+        text: null,
+      };
+      setRunStates((current) => ({
+        ...current,
+        [nodeId]: {
+          status: "succeeded",
+          progress: 1,
+          output: { url: registered.url, mediaType: "image/png", text: null },
+        },
+      }));
+      return true;
+    },
+    [authFor, prependGeneration, workflowId],
   );
 
   /** Save a node's result to disk — the Download button on result nodes. */
@@ -675,6 +889,9 @@ export function StudioShell({
               assets={assets}
               runStates={runStates}
               histories={histories}
+              hydratingResults={hydratingResults}
+              hydratingUploads={hydratingUploads}
+              onRefreshMedia={refreshMedia}
               onDownload={(id, generation) => void onDownload(id, generation)}
               apiRef={canvas}
               onGraphChange={onGraphChange}
@@ -682,6 +899,10 @@ export function StudioShell({
               onInteract={() => setTouched(true)}
               onUpload={onUpload}
               onRun={onRun}
+              onEditTake={onEditTake}
+              onLayerize={onLayerize}
+              onFetchAssetBlob={onFetchAssetBlob}
+              onRegisterTextEdit={onRegisterTextEdit}
               panMode={tool === "hand"}
               fitOnMount={initialGraph.nodes.length > 0}
               comments={comments}

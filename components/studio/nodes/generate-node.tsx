@@ -16,11 +16,15 @@ import {
   useUpdateNodeInternals,
 } from "@xyflow/react";
 import {
+  CameraIcon,
   CaretDownIcon,
   CopyIcon,
   DownloadSimpleIcon,
+  InfoIcon,
+  LightbulbIcon,
   LightningIcon,
   PlayIcon,
+  TextTIcon,
   TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -48,7 +52,7 @@ import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icon
 import { ModelLogo } from "../model-logos";
 import { ModelMenuList } from "../model-menu";
 import { OutputPort, PortRail } from "./ports";
-import { RunBeam, RunWell, isRunBusy } from "./run-well";
+import { LoadingWell, RunBeam, RunWell, isRunBusy } from "./run-well";
 import {
   PRESET_COPY,
   PRESET_ICON,
@@ -82,9 +86,19 @@ import {
   DetailChip,
   ExpandButton,
   ExpandDetails,
+  ExpandHeader,
+  ExpandSection,
+  ExpandSectionLabel,
   NodeExpandModal,
   timeAgo,
 } from "./expand-modal";
+import {
+  CAMERA_EDIT_MODEL,
+  CAMERA_EDIT_PROVIDER,
+} from "@/lib/studio/camera-edit";
+import { CameraAnglesPanel } from "./camera-angles";
+import { MagicTextPanel, MagicTextStage, useMagicText } from "./magic-text";
+import { RelightPanel } from "./relight";
 
 /**
  * The card is inscribed in this box: a landscape node is MAX_WIDTH across, a
@@ -276,8 +290,16 @@ function sourceThumb(node: { data: FlowNodeData } | undefined): ExpandInput | nu
 }
 
 export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
-  const { catalog, updateNode, deleteNode, duplicateNode, runFrom, downloadNode } =
-    useStudio();
+  const {
+    catalog,
+    updateNode,
+    deleteNode,
+    duplicateNode,
+    runFrom,
+    editTake,
+    downloadNode,
+    refreshMedia,
+  } = useStudio();
   const wire = data.wire as unknown as GenerateNodeData;
 
   const model = findModel(catalog, wire.provider, wire.model);
@@ -378,6 +400,12 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     ? undefined
     : ((pinnedId ? history.find((g) => g.assetId === pinnedId) : undefined) ??
       history[0]);
+  /**
+   * Nothing to show *yet* — the canvas is still fetching this node's past
+   * generations. Distinct from having none, which is what the empty state is
+   * for; a node with a result must never spend that fetch claiming to be new.
+   */
+  const loading = Boolean(data.hydrating) && !history.length && !data.run;
   const wellRun: NodeRunState | undefined = displayed
     ? {
         status: "succeeded",
@@ -432,6 +460,33 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             modality === "video" || Boolean(displayed.mediaType?.startsWith("video/")),
         }
       : null;
+  /**
+   * Which aside section is open, or null with the column collapsed to its
+   * headers. The edit tools (Camera, Text, Light) need a *stored* still — the
+   * take travels back in by asset id, so a mid-run URL with no asset row
+   * behind it (or a video) has nothing to edit. A character sheet's take is
+   * three fixed panels, not a scene to orbit — no edit tools.
+   */
+  const [expandPanel, setExpandPanel] = React.useState<
+    "details" | "camera" | "text" | "light" | null
+  >("details");
+  const togglePanel = React.useCallback(
+    (panel: "details" | "camera" | "text" | "light") =>
+      setExpandPanel((current) => (current === panel ? null : panel)),
+    [],
+  );
+  const editAssetId =
+    expandMedia && !expandMedia.isVideo && modality === "image" && !preset
+      ? (displayed?.assetId ?? null)
+      : null;
+
+  const magic = useMagicText({
+    assetId: editAssetId,
+    nodeId: id,
+    // The new take arrives in the carousel as the newest generation; closing
+    // lets the node show it (the pin resets to newest on arrival).
+    onSaved: () => setExpanded(false),
+  });
 
   // A model driven entirely by its ports has nothing to describe, so it shows
   // neither the text box nor the port that would fill it.
@@ -585,15 +640,24 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
         />
 
         {/* Preview well — the card's own shape, not a frame matted inside one.
-            While generating it wears the prompt bar's border beam. */}
-        <RunBeam active={isRunBusy(data.run)}>
+            While generating it wears the prompt bar's border beam, and while
+            the canvas is still fetching what this node holds, the same one. */}
+        <RunBeam active={isRunBusy(data.run) || loading}>
           <div
             className="group relative flex items-center justify-center overflow-hidden bg-[#faf8f4]"
             style={{ height: shape.well }}
           >
-            <RunWell run={wellRun} modality={modality} onMediaSize={onMediaSize} />
+            <RunWell
+              run={wellRun}
+              modality={modality}
+              assetId={displayed?.assetId}
+              onMediaSize={onMediaSize}
+              onStale={(assetId) => refreshMedia(id, assetId)}
+            />
             {expandMedia ? <ExpandButton onClick={() => setExpanded(true)} /> : null}
-            {wellRun ? null : (
+            {wellRun ? null : loading ? (
+              <LoadingWell />
+            ) : (
               <div className="flex flex-col items-center gap-2.5 px-3 text-center">
                 <span
                   className="grid size-10 place-items-center"
@@ -760,43 +824,164 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
       ) : null}
 
       {expandMedia ? (
-        <NodeExpandModal open={expanded} onOpenChange={setExpanded} media={expandMedia}>
-          <ExpandDetails
-            heading={timeAgo(displayed?.createdAt) ?? kindLabel}
-            onDownload={() => downloadNode(id, displayed ?? undefined)}
-            prompt={(promptDriven ? drivenText : (wire.prompt ?? "")) || null}
-            inputs={inputThumbs}
-            chips={
-              <>
-                {model ? (
-                  <DetailChip>
-                    <ModelLogo
-                      provider={model.provider}
-                      modelId={model.id}
-                      label={model.label}
-                      size="sm"
-                    />
-                    <span className="max-w-36 truncate">{model.label}</span>
-                  </DetailChip>
-                ) : null}
-                {(model?.params ?? [])
-                  .filter((p) => (p.group ?? "basic") !== "body")
-                  .map((param) => {
-                    const text = formatParamValue(param, (wire.params ?? {})[param.name]);
-                    if (text === "—") return null;
-                    return (
-                      <DetailChip key={param.name}>
-                        {/* A bare "On" says nothing — booleans keep their name. */}
-                        {param.type === "boolean"
-                          ? `${param.label ?? param.name} ${text}`
-                          : text}
-                      </DetailChip>
-                    );
-                  })}
-              </>
+        <NodeExpandModal
+          open={expanded}
+          onOpenChange={setExpanded}
+          media={expandMedia}
+          // The Text tool edits on the image itself, so its editor takes over
+          // the media pane once a layerize has landed.
+          stage={
+            expandPanel === "text" &&
+            editAssetId &&
+            magic.phase.name === "ready" &&
+            magic.result &&
+            magic.blocks ? (
+              <MagicTextStage
+                result={magic.result}
+                blocks={magic.blocks}
+                revision={magic.revision}
+                selectedId={magic.selectedId}
+                onSelect={magic.select}
+                onTextChange={magic.setText}
+                onPatchBlock={magic.patchBlock}
+              />
+            ) : undefined
+          }
+        >
+          {(() => {
+            const detailProps = {
+              prompt: (promptDriven ? drivenText : (wire.prompt ?? "")) || null,
+              inputs: inputThumbs,
+              chips: (
+                <>
+                  {model ? (
+                    <DetailChip>
+                      <ModelLogo
+                        provider={model.provider}
+                        modelId={model.id}
+                        label={model.label}
+                        size="sm"
+                      />
+                      <span className="max-w-36 truncate">{model.label}</span>
+                    </DetailChip>
+                  ) : null}
+                  {(model?.params ?? [])
+                    .filter((p) => (p.group ?? "basic") !== "body")
+                    .map((param) => {
+                      const text = formatParamValue(
+                        param,
+                        (wire.params ?? {})[param.name],
+                      );
+                      if (text === "—") return null;
+                      return (
+                        <DetailChip key={param.name}>
+                          {/* A bare "On" says nothing — booleans keep their name. */}
+                          {param.type === "boolean"
+                            ? `${param.label ?? param.name} ${text}`
+                            : text}
+                        </DetailChip>
+                      );
+                    })}
+                </>
+              ),
+            };
+            const when = timeAgo(displayed?.createdAt);
+            const size = dims ? `${dims.w} × ${dims.h} px` : null;
+
+            // Nothing to edit — the fact sheet is the whole column.
+            if (!editAssetId) {
+              return (
+                <ExpandDetails
+                  heading={when ?? kindLabel}
+                  onDownload={() => downloadNode(id, displayed ?? undefined)}
+                  footer={size}
+                  {...detailProps}
+                />
+              );
             }
-            footer={dims ? `${dims.w} × ${dims.h} px` : null}
-          />
+
+            const layers = magic.phase.name === "ready" ? magic.blocks : null;
+            return (
+              <div className="flex min-h-full flex-col">
+                <ExpandHeader
+                  title={kindLabel}
+                  meta={[when, size].filter(Boolean).join(" · ") || null}
+                  onDownload={() => downloadNode(id, displayed ?? undefined)}
+                />
+
+                <ExpandSection
+                  first
+                  icon={<InfoIcon className="size-4" />}
+                  label="Details"
+                  hint="Prompt, model and settings"
+                  open={expandPanel === "details"}
+                  onToggle={() => togglePanel("details")}
+                >
+                  <ExpandDetails padded={false} {...detailProps} />
+                </ExpandSection>
+
+                <ExpandSectionLabel>Edit this take</ExpandSectionLabel>
+
+                <ExpandSection
+                  icon={<CameraIcon className="size-4" weight="fill" />}
+                  label="Camera"
+                  hint="Orbit and reframe the shot"
+                  open={expandPanel === "camera"}
+                  onToggle={() => togglePanel("camera")}
+                >
+                  <CameraAnglesPanel
+                    imageUrl={expandMedia.url}
+                    busy={isRunBusy(data.run)}
+                    onGenerate={(params) => {
+                      // The modal steps aside so the node can wear the run:
+                      // the beam while it generates, then the new take — which
+                      // arrives in the carousel like any other generation.
+                      setExpanded(false);
+                      editTake(id, editAssetId, {
+                        provider: CAMERA_EDIT_PROVIDER,
+                        model: CAMERA_EDIT_MODEL,
+                        prompt: null,
+                        params,
+                      });
+                    }}
+                  />
+                </ExpandSection>
+
+                <ExpandSection
+                  icon={<TextTIcon className="size-4" weight="bold" />}
+                  label="Text"
+                  hint={
+                    layers
+                      ? `${layers.length} editable ${layers.length === 1 ? "layer" : "layers"}`
+                      : "Retype the type, keep the look"
+                  }
+                  dot={magic.dirty}
+                  open={expandPanel === "text"}
+                  onToggle={() => togglePanel("text")}
+                >
+                  <MagicTextPanel api={magic} />
+                </ExpandSection>
+
+                <ExpandSection
+                  icon={<LightbulbIcon className="size-4" weight="fill" />}
+                  label="Light"
+                  hint="Move and color the light"
+                  open={expandPanel === "light"}
+                  onToggle={() => togglePanel("light")}
+                >
+                  <RelightPanel
+                    imageUrl={expandMedia.url}
+                    busy={isRunBusy(data.run)}
+                    onGenerate={(spec) => {
+                      // Same exit as the camera tool: the node wears the run.
+                      setExpanded(false);
+                      editTake(id, editAssetId, spec);
+                    }}
+                  />
+                </ExpandSection>
+              </div>
+            );
+          })()}
         </NodeExpandModal>
       ) : null}
     </div>
