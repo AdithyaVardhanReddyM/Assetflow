@@ -46,13 +46,16 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DOT_COLOR, DOT_GAP } from "@/lib/studio/node-ui";
 import { downloadResult } from "@/lib/studio/runs-client";
+import { uploadAsset } from "@/lib/studio/assets-client";
 import {
   deleteLibraryAsset,
   fetchLibrary,
   fetchProvenance,
   fetchRunManifest,
+  searchLibrary,
   type AssetProvenance,
   type LibraryAsset,
+  type LibrarySearch,
   type LineageChain,
   type LineageHop,
   type RunManifestRecord,
@@ -236,6 +239,87 @@ export function AssetLibrary() {
     void load();
   }, [authLoaded, load]);
 
+  // --- server search ------------------------------------------------------
+
+  /**
+   * Hybrid results for the current query, or null when the query is empty or
+   * the search failed. Failure falls back to the in-memory filter below — a
+   * degraded shelf beats an error wall, and the two are the same gesture.
+   */
+  const [results, setResults] = React.useState<LibrarySearch | null>(null);
+  const [searching, setSearching] = React.useState(false);
+  const searchAbort = React.useRef<AbortController | null>(null);
+
+  React.useEffect(() => {
+    const q = query.trim();
+    searchAbort.current?.abort();
+    // An empty query needs no reset here: everything downstream (the results
+    // memo, the spinner) gates on the query itself, so stale state is inert.
+    if (!q) return;
+    const controller = new AbortController();
+    searchAbort.current = controller;
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      const found = await searchLibrary(q, await authFor(), {
+        modality,
+        kind,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      setResults(found);
+      setSearching(false);
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query, modality, kind, authFor]);
+
+  // --- uploads ------------------------------------------------------------
+
+  const uploadInput = React.useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = React.useState(0);
+
+  const onFilesChosen = React.useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      event.target.value = "";
+      if (!files.length) return;
+      setUploading((n) => n + files.length);
+      const auth = await authFor();
+      for (const file of files) {
+        const stored = await uploadAsset(file, auth);
+        setUploading((n) => n - 1);
+        if (!stored) {
+          toast.error(`Couldn't upload ${file.name}.`);
+          continue;
+        }
+        // Synthesized from the upload response so the card appears now; the
+        // next full load replaces it with the server's own row. Enrichment
+        // (caption, tags) runs in the background and shows up via search.
+        const row: LibraryAsset = {
+          id: stored.id,
+          kind: "upload",
+          previewUrl: stored.url,
+          mediaType: stored.mediaType,
+          modality: stored.modality,
+          sizeBytes: file.size,
+          width: stored.width,
+          height: stored.height,
+          durationSec: null,
+          runId: null,
+          filename: stored.filename,
+          sha256: null,
+          createdAt: new Date().toISOString(),
+        };
+        setAssets((current) =>
+          current.some((a) => a.id === row.id) ? current : [row, ...current],
+        );
+      }
+    },
+    [authFor],
+  );
+
   // --- filtering pipeline -------------------------------------------------
 
   const living = React.useMemo(
@@ -281,6 +365,16 @@ export function AssetLibrary() {
   }, [living, query, modality, kind, sort]);
 
   const filtersActive = query.trim() !== "" || modality !== "all" || kind !== "all";
+
+  /**
+   * Server results with deletions applied. Null falls the page back to the
+   * in-memory filter above — the same search box, just less clever about it.
+   */
+  const liveResults = React.useMemo(() => {
+    if (!results || !query.trim()) return null;
+    const alive = (rows: LibraryAsset[]) => rows.filter((a) => !deletedIds.has(a.id));
+    return { semantic: alive(results.semantic), keyword: alive(results.keyword) };
+  }, [results, query, deletedIds]);
 
   // --- actions ------------------------------------------------------------
 
@@ -427,7 +521,11 @@ export function AssetLibrary() {
             <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
               {/* Search */}
               <label className="flex h-9 w-full max-w-[280px] items-center gap-2 border border-[#1f211c]/14 bg-white px-3 transition-colors focus-within:border-[#1f211c]/40">
-                <MagnifyingGlassIcon className="size-4 shrink-0 text-[#8a8271]" />
+                {searching && query.trim() ? (
+                  <Spinner className="size-4 shrink-0 text-[#8a8271]" />
+                ) : (
+                  <MagnifyingGlassIcon className="size-4 shrink-0 text-[#8a8271]" />
+                )}
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
@@ -470,6 +568,27 @@ export function AssetLibrary() {
               </div>
 
               <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => uploadInput.current?.click()}
+                  disabled={uploading > 0}
+                  className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white px-3 text-[13px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c] disabled:pointer-events-none disabled:opacity-60"
+                >
+                  {uploading > 0 ? (
+                    <Spinner className="size-3.5" />
+                  ) : (
+                    <UploadSimpleIcon className="size-3.5" />
+                  )}
+                  {uploading > 0 ? "Uploading…" : "Upload"}
+                </button>
+                <input
+                  ref={uploadInput}
+                  type="file"
+                  accept="image/*,video/*,audio/*"
+                  multiple
+                  hidden
+                  onChange={(e) => void onFilesChosen(e)}
+                />
                 <RailMenu
                   label={KIND_LABELS[kind]}
                   active={kind !== "all"}
@@ -531,7 +650,51 @@ export function AssetLibrary() {
               />
             )}
 
-            {state === "ready" && living.length > 0 && visible.length === 0 && (
+            {/* Hybrid search results — two claims, two sections. */}
+            {state === "ready" &&
+              liveResults &&
+              (liveResults.semantic.length === 0 && liveResults.keyword.length === 0 ? (
+                <EmptyRoom
+                  title="No matches"
+                  body={`Nothing in your library answers to “${query.trim()}”.`}
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => setQuery("")}
+                      className="flex h-9 items-center border border-[#1f211c]/14 bg-white px-4 text-[13px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+                    >
+                      Clear search
+                    </button>
+                  }
+                />
+              ) : (
+                <div className="flex flex-col gap-10">
+                  {liveResults.semantic.length > 0 && (
+                    <ResultSection
+                      label="Best matches"
+                      hint="ranked by meaning"
+                      assets={liveResults.semantic}
+                      downloadingId={downloadingId}
+                      onDownload={(a) => void download(a)}
+                      onDelete={setPendingDelete}
+                      onInspect={inspect}
+                    />
+                  )}
+                  {liveResults.keyword.length > 0 && (
+                    <ResultSection
+                      label="Also mentions"
+                      hint="matched your words"
+                      assets={liveResults.keyword}
+                      downloadingId={downloadingId}
+                      onDownload={(a) => void download(a)}
+                      onDelete={setPendingDelete}
+                      onInspect={inspect}
+                    />
+                  )}
+                </div>
+              ))}
+
+            {state === "ready" && !liveResults && living.length > 0 && visible.length === 0 && (
               <EmptyRoom
                 title="No matches"
                 body={
@@ -555,7 +718,7 @@ export function AssetLibrary() {
               />
             )}
 
-            {state === "ready" && visible.length > 0 && (
+            {state === "ready" && !liveResults && visible.length > 0 && (
               <>
                 {filtersActive && (
                   <p className="mb-4 text-[12px] text-[#8a8271] tabular-nums">
@@ -670,6 +833,54 @@ function RailMenu<T extends string>({
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// --- search sections --------------------------------------------------------
+
+/** One band of search results: overline, rule, and the same masonry of cards. */
+function ResultSection({
+  label,
+  hint,
+  assets,
+  downloadingId,
+  onDownload,
+  onDelete,
+  onInspect,
+}: {
+  label: string;
+  hint: string;
+  assets: LibraryAsset[];
+  downloadingId: string | null;
+  onDownload: (asset: LibraryAsset) => void;
+  onDelete: (asset: LibraryAsset) => void;
+  onInspect: (asset: LibraryAsset) => void;
+}) {
+  return (
+    <section>
+      <div className="mb-4 flex items-baseline gap-3">
+        <h2 className="text-[11px] font-semibold tracking-[0.22em] text-[#4c4a41] uppercase">
+          {label}
+        </h2>
+        <span aria-hidden className="h-px w-16 self-center bg-gradient-to-r from-[#1f211c]/18 to-transparent" />
+        <span className="text-[11.5px] text-[#8a8271]">
+          {hint} · {assets.length}
+        </span>
+      </div>
+      <div className="columns-1 gap-5 sm:columns-2 lg:columns-3 xl:columns-4">
+        {assets.map((asset, index) => (
+          <AssetCard
+            key={asset.id}
+            asset={asset}
+            index={index}
+            downloading={downloadingId === asset.id}
+            onDownload={() => onDownload(asset)}
+            onDelete={() => onDelete(asset)}
+            onInspect={() => onInspect(asset)}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1070,6 +1281,25 @@ function ProvenanceDrawer({
                   .filter(Boolean)
                   .join(" · ")}
               </p>
+
+              {/* Enrichment rides on search rows; a browse row simply has none. */}
+              {asset.caption && (
+                <p className="mt-2 font-serif text-[13px] leading-6 text-[#4c4a41] italic">
+                  {asset.caption}
+                </p>
+              )}
+              {(asset.tags?.length ?? 0) > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {asset.tags!.slice(0, 8).map((tag) => (
+                    <span
+                      key={tag}
+                      className="border border-[#1f211c]/10 bg-white px-1.5 py-0.5 text-[10.5px] font-semibold text-[#8a8271]"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
 
               <div className="mt-3.5 flex items-center gap-2">
                 <button

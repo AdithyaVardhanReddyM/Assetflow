@@ -19,6 +19,7 @@ dependencies = [
     "structlog>=24",
     "orjson>=3.10",
     "pyyaml>=6",
+    "pgvector>=0.5.0",
 ]
 
 [project.optional-dependencies]

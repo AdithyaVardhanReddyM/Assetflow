@@ -560,4 +560,11 @@ async def register_text_edit(
     await session.commit()
     await session.refresh(edit_asset)
     log.info("magic_text.edit_registered", tenant=tenant_id, node=node_id)
+
+    # The edit is a real library asset; index it like any other generation.
+    # (The layerize base/cutout above are deliberately not enriched — they are
+    # editor scaffolding, and captioning them would fill search with copies.)
+    from app.services.enrich import schedule_enrichment
+
+    schedule_enrichment(edit_asset.id)
     return edit_asset

@@ -40,12 +40,14 @@ import {
   toFlow,
 } from "@/lib/studio/graph";
 import {
+  ASSET_DRAG_TYPE,
   type CreateToolId,
   DOT_COLOR,
   DOT_GAP,
   NODE_BLUEPRINTS,
   NODE_SIZE,
   avoidOverlap,
+  avoidOverlapGroup,
   blueprintData,
   modalitiesCompatible,
   outputModality,
@@ -80,6 +82,15 @@ export type CanvasApi = {
   uploadFiles: (files: File[], at?: { x: number; y: number }) => void;
   /** Opens the file picker; chosen files each land as a new upload node. */
   openFilePicker: () => void;
+  /** Place an upload node pointing at a library asset. False when the canvas is full. */
+  addLibraryAsset: (asset: AssetPreview, at?: { x: number; y: number }) => boolean;
+  /**
+   * Drop a whole graph onto the canvas — the chain Reconstruct rebuilt out of
+   * another workflow's history. Its nodes arrive selected and framed, so what
+   * just landed is obvious on a canvas that already had work on it. False when
+   * it does not fit.
+   */
+  insertGraph: (graph: Graph, at?: { x: number; y: number }) => boolean;
   zoomIn: () => void;
   zoomOut: () => void;
   resetZoom: () => void;
@@ -112,6 +123,8 @@ export type CanvasProps = {
   onGraphChange: (graph: Graph) => void;
   onZoomChange: (zoom: number) => void;
   onInteract: () => void;
+  /** Something dropped on the canvas did not fit. The shell owns the message. */
+  onCanvasFull: () => void;
   onUpload: (file: File) => Promise<AssetPreview | null>;
   onRun: (nodeId: string, scope: RunScope) => void;
   /** Re-generate a node's displayed take via a hidden edit model — see the context. */
@@ -146,6 +159,7 @@ function CanvasInner({
   onGraphChange,
   onZoomChange,
   onInteract,
+  onCanvasFull,
   onUpload,
   onRun,
   onEditTake,
@@ -480,9 +494,105 @@ function CanvasInner({
           at: { x: base.x + i * 40, y: base.y + i * 40 },
         });
         if (id) void attachUpload(file, id);
+        else onCanvasFull();
       });
     },
-    [placeNode, attachUpload, viewportCentre],
+    [placeNode, attachUpload, viewportCentre, onCanvasFull],
+  );
+
+  /**
+   * An asset that is already in the library needs a node, not an upload — the
+   * bytes are in B2 and the row exists, so this only points at it.
+   */
+  const addLibraryAsset = React.useCallback(
+    (asset: AssetPreview, at?: { x: number; y: number }) => {
+      const id = placeNode("upload", { at });
+      if (!id) return false;
+      // Into the same store canvas-side uploads use, so the preview survives
+      // the effect that re-reads `assetMap` onto its node.
+      setUploaded((current) => ({ ...current, [asset.id]: asset }));
+      setNodes((current) =>
+        current.map((n) =>
+          n.id === id
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  asset,
+                  wire: {
+                    ...n.data.wire,
+                    asset_id: asset.id,
+                    title: asset.filename ?? null,
+                  },
+                },
+              }
+            : n,
+        ),
+      );
+      onInteract();
+      return true;
+    },
+    [placeNode, setNodes, onInteract],
+  );
+
+  // --- inserting a rebuilt graph ------------------------------------------
+
+  const insertGraph = React.useCallback(
+    (graph: Graph, at?: { x: number; y: number }) => {
+      const current = nodesRef.current;
+      if (!graph.nodes.length || current.length + graph.nodes.length > MAX_NODES) {
+        return false;
+      }
+
+      const incoming = toFlow(graph);
+      // The fragment arrives positioned relative to (0,0), so its extent is
+      // read off the far edge of its widest node rather than assumed.
+      const width = Math.max(
+        ...incoming.nodes.map((n) => n.position.x + NODE_SIZE[n.data.kind].width),
+      );
+      const height = Math.max(
+        ...incoming.nodes.map((n) => n.position.y + NODE_SIZE[n.data.kind].height),
+      );
+      const centre = at ?? viewportCentre();
+      const base = {
+        x: Math.round(centre.x - width / 2),
+        y: Math.round(centre.y - height / 2),
+      };
+      const placed = incoming.nodes.map((n) => ({
+        ...n,
+        selected: true,
+        position: {
+          x: Math.round(base.x + n.position.x),
+          y: Math.round(base.y + n.position.y),
+        },
+      }));
+      const delta = avoidOverlapGroup(
+        placed.map((n) => n.position),
+        current.map((n) => n.position),
+      );
+      for (const node of placed) {
+        node.position = { x: node.position.x + delta.x, y: node.position.y + delta.y };
+      }
+
+      nodesRef.current = [...current.map((n) => ({ ...n, selected: false })), ...placed];
+      setNodes(nodesRef.current);
+      setEdges((existing) => [...existing, ...incoming.edges]);
+      onInteract();
+      // Frame what just arrived. A rebuilt chain can be wider than the
+      // viewport, and landing it off-screen would read as nothing happening.
+      window.setTimeout(
+        () =>
+          rf.fitView({
+            nodes: placed.map((n) => ({ id: n.id })),
+            duration: 320,
+            padding: 0.3,
+            maxZoom: 1,
+          }),
+        0,
+      );
+      return true;
+    },
+    [setNodes, setEdges, viewportCentre, onInteract, rf],
   );
 
   const onFilesChosen = React.useCallback(
@@ -619,13 +729,15 @@ function CanvasInner({
         uploadTarget.current = null;
         fileInput.current?.click();
       },
+      addLibraryAsset,
+      insertGraph,
       zoomIn: () => rf.zoomIn({ duration: 180 }),
       zoomOut: () => rf.zoomOut({ duration: 180 }),
       resetZoom: () => rf.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 220 }),
       fitView: () => rf.fitView({ duration: 260, padding: 0.25, maxZoom: 1 }),
       isEmpty: () => nodes.length === 0,
     }),
-    [placeNode, uploadFiles, rf, nodes.length],
+    [placeNode, uploadFiles, addLibraryAsset, insertGraph, rf, nodes.length],
   );
 
   // --- drag and drop ------------------------------------------------------
@@ -633,11 +745,26 @@ function CanvasInner({
   const onDrop = React.useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
+      const at = rf.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+
+      // A drag out of the library panel carries a row, not a file: the bytes
+      // are already in B2, so this places a node that points at them.
+      const dragged = event.dataTransfer?.getData(ASSET_DRAG_TYPE);
+      if (dragged) {
+        try {
+          const asset = JSON.parse(dragged) as AssetPreview;
+          if (asset?.id && !addLibraryAsset(asset, at)) onCanvasFull();
+        } catch {
+          // A malformed payload is not something the user can act on.
+        }
+        return;
+      }
+
       const files = Array.from(event.dataTransfer?.files ?? []);
       if (!files.length) return;
-      uploadFiles(files, rf.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      uploadFiles(files, at);
     },
-    [uploadFiles, rf],
+    [uploadFiles, addLibraryAsset, onCanvasFull, rf],
   );
 
   const studio = React.useMemo(

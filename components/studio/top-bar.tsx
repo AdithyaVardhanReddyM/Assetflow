@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import {
   ArrowUUpLeftIcon,
@@ -20,7 +19,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { LinkPendingIcon } from "./link-pending-icon";
 
 export type SaveState = "saved" | "saving" | "error";
 
@@ -59,6 +57,8 @@ export function TopBar({
   onZoomReset,
   onFitView,
   saveState,
+  libraryOpen,
+  onToggleLibrary,
 }: {
   visible: boolean;
   zoom: number;
@@ -67,9 +67,22 @@ export function TopBar({
   onZoomReset: () => void;
   onFitView: () => void;
   saveState: SaveState;
+  /** The library docks beside the canvas rather than navigating away — leaving
+   *  the workflow to fetch one asset is a round trip through a whole route. */
+  libraryOpen: boolean;
+  onToggleLibrary: () => void;
 }) {
   return (
-    <div className="fixed top-4 right-4 z-40 flex items-center gap-2">
+    <div
+      className={cn(
+        // Steps aside for the library rather than sitting under it — the button
+        // that opens the panel has to stay reachable to close it again. Below
+        // `sm` the panel is effectively full-width, so there is nowhere to step.
+        "fixed top-4 right-4 z-40 flex items-center gap-2",
+        "transition-transform duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        libraryOpen && "sm:-translate-x-[380px]",
+      )}
+    >
       <div
         className={cn(
           "flex items-center gap-2 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
@@ -141,9 +154,15 @@ export function TopBar({
             </span>
           </BarTooltip>
           <BarTooltip label="Asset library">
-            <Link href="/assets" aria-label="Asset library" className={iconBtn}>
-              <LinkPendingIcon icon={<FolderSimpleIcon className="size-4" />} />
-            </Link>
+            <button
+              type="button"
+              aria-label="Asset library"
+              aria-expanded={libraryOpen}
+              onClick={onToggleLibrary}
+              className={cn(iconBtn, libraryOpen && "bg-[#1f211c] text-[#f7f4ee] hover:bg-[#1f211c] hover:text-[#f7f4ee]")}
+            >
+              <FolderSimpleIcon className="size-4" />
+            </button>
           </BarTooltip>
         </div>
       </div>

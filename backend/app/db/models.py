@@ -13,8 +13,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -23,7 +25,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -70,12 +72,21 @@ class AssetKind(StrEnum):
     GENERATED = "generated"
 
 
+class EnrichmentStatus(StrEnum):
+    PENDING = "pending"
+    DONE = "done"
+    FAILED = "failed"
+
+
 # `create_type=False`: Drizzle creates these types via `pnpm db:push`.
 _values = lambda enum_cls: [m.value for m in enum_cls]  # noqa: E731
 
 _run_status = ENUM(RunStatus, name="run_status", create_type=False, values_callable=_values)
 _step_status = ENUM(StepStatus, name="step_status", create_type=False, values_callable=_values)
 _asset_kind = ENUM(AssetKind, name="asset_kind", create_type=False, values_callable=_values)
+_enrichment_status = ENUM(
+    EnrichmentStatus, name="enrichment_status", create_type=False, values_callable=_values
+)
 
 
 def _pk() -> Mapped[uuid.UUID]:
@@ -236,10 +247,51 @@ class Asset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AssetEnrichment(Base):
+    """Derived, searchable metadata — the mirror of `assetEnrichment` in
+    db/schema.ts; see the rationale there.
+
+    `search_text` is database-generated and never written from here;
+    `Computed` keeps it out of every INSERT this mirror emits.
+    """
+
+    __tablename__ = "asset_enrichment"
+
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[EnrichmentStatus] = mapped_column(
+        _enrichment_status, nullable=False, default=EnrichmentStatus.PENDING
+    )
+
+    caption: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    ocr_text: Mapped[str | None] = mapped_column(Text)
+    palette: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    prompt: Mapped[str | None] = mapped_column(Text)
+
+    search_doc: Mapped[str | None] = mapped_column(Text)
+    search_text: Mapped[str | None] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('english', coalesce(search_doc, ''))")
+    )
+    embedding: Mapped[Any | None] = mapped_column(Vector(1024))
+
+    model: Mapped[str | None] = mapped_column(Text)
+    sidecar_key: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 __all__ = [
     "Asset",
+    "AssetEnrichment",
     "AssetKind",
     "Base",
+    "EnrichmentStatus",
     "Run",
     "RunEvent",
     "RunStatus",
@@ -255,4 +307,5 @@ EXPECTED_TABLES: dict[str, type[Base]] = {
     "run_steps": RunStep,
     "run_events": RunEvent,
     "assets": Asset,
+    "asset_enrichment": AssetEnrichment,
 }

@@ -746,6 +746,14 @@ async def _finish(
         steps=len(steps), assets=len(rows),
     )
 
+    # After finalize, never before: enrichment is search metadata, and the
+    # user watching the canvas has already been handed their result. Each task
+    # opens its own session — this one closes with the run.
+    from app.services.enrich import schedule_enrichment
+
+    for row in rows:
+        schedule_enrichment(row.id)
+
 
 async def _load_asset_refs(
     session: AsyncSession, run: Run, plan: ExecutionPlan

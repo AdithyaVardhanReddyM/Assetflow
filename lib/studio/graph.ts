@@ -69,6 +69,13 @@ export type UploadNodeData = {
   title: string | null;
 };
 
+/**
+ * Where a node came from, when it was not drawn here — set by Reconstruct,
+ * which rebuilds a chain out of another workflow's run history under fresh ids.
+ * `GET /v1/workflows/{id}/results` follows it to hand the copy its old takes.
+ */
+export type NodeOrigin = { workflow_id: string; node_id: string };
+
 export type GenerateNodeData = {
   provider: string;
   model: string;
@@ -77,6 +84,7 @@ export type GenerateNodeData = {
   params: Record<string, unknown>;
   fallback_models: string[];
   expected_duration_sec?: number | null;
+  origin?: NodeOrigin | null;
   /**
    * Specialized flavor of this node ("character_sheet") — mirrors `preset` in
    * schema.py. The compiler shapes the prompt and locks params off it; the
@@ -124,6 +132,7 @@ export type CompositeNodeData = {
   timeline_sec: number;
   video: CompositeTrack;
   tracks: CompositeTrack[];
+  origin?: NodeOrigin | null;
 };
 
 /**

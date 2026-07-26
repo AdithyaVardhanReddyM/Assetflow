@@ -24,6 +24,7 @@
 import { relations, sql } from "drizzle-orm";
 import {
   bigserial,
+  customType,
   doublePrecision,
   index,
   integer,
@@ -35,6 +36,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from "drizzle-orm/pg-core";
 
 export const runStatus = pgEnum("run_status", [
@@ -57,6 +59,19 @@ export const stepStatus = pgEnum("step_status", [
 ]);
 
 export const assetKind = pgEnum("asset_kind", ["upload", "generated"]);
+
+export const enrichmentStatus = pgEnum("enrichment_status", [
+  "pending",
+  "done",
+  "failed",
+]);
+
+/** Postgres `tsvector`, which drizzle-orm has no built-in column type for. */
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 const timestamps = {
   createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -300,6 +315,65 @@ export const assets = pgTable(
   ],
 );
 
+/**
+ * Derived, searchable metadata — one row per asset, filled by a background
+ * pass after the asset lands (vision caption/tags/OCR for visual media, the
+ * generation prompt for everything born from one).
+ *
+ * A table of its own rather than columns on `assets`: enrichment is async and
+ * retryable, so it needs a status the hot row shouldn't carry, and the vector
+ * column drags in an extension dependency that the core table shouldn't have.
+ *
+ * `searchDoc` is the assembled text (caption + tags + OCR + prompt +
+ * filename) written by the service; both search representations derive from
+ * it — `searchText` is generated *in the database* so the tsvector can never
+ * drift from the document, and `embedding` is Jina's read of the same text.
+ * The same JSON also lands beside the object in B2 (`sidecarKey`): the bucket
+ * holds the metadata of record, this table is the queryable index over it.
+ */
+export const assetEnrichment = pgTable(
+  "asset_enrichment",
+  {
+    assetId: uuid()
+      .primaryKey()
+      .references(() => assets.id, { onDelete: "cascade" }),
+    tenantId: text().notNull(),
+    status: enrichmentStatus().notNull().default("pending"),
+
+    caption: text(),
+    /** String array. */
+    tags: jsonb().notNull().default([]),
+    /** Text read out of the pixels — what makes brand assets findable. */
+    ocrText: text(),
+    /** Dominant colors as hex strings. */
+    palette: jsonb().notNull().default([]),
+    /** Denormalized from the producing run step at enrich time. */
+    prompt: text(),
+
+    searchDoc: text(),
+    searchText: tsvector().generatedAlwaysAs(
+      sql`to_tsvector('english', coalesce(search_doc, ''))`,
+    ),
+    /** jina-embeddings-v3 of `searchDoc`; null when no key was configured. */
+    embedding: vector({ dimensions: 1024 }),
+
+    /** Which vision model produced the caption — provenance for the metadata. */
+    model: text(),
+    /** B2 key of the enrichment JSON written beside the asset's object. */
+    sidecarKey: text(),
+    error: text(),
+    ...timestamps,
+  },
+  (t) => [
+    index("asset_enrichment_tenant_status_idx").on(t.tenantId, t.status),
+    index("asset_enrichment_search_idx").using("gin", t.searchText),
+    index("asset_enrichment_embedding_idx").using(
+      "hnsw",
+      t.embedding.op("vector_cosine_ops"),
+    ),
+  ],
+);
+
 // --- relations ------------------------------------------------------------
 
 export const workflowsRelations = relations(workflows, ({ many }) => ({
@@ -334,6 +408,17 @@ export const runEventsRelations = relations(runEvents, ({ one }) => ({
 
 export const assetsRelations = relations(assets, ({ one }) => ({
   run: one(runs, { fields: [assets.runId], references: [runs.id] }),
+  enrichment: one(assetEnrichment, {
+    fields: [assets.id],
+    references: [assetEnrichment.assetId],
+  }),
+}));
+
+export const assetEnrichmentRelations = relations(assetEnrichment, ({ one }) => ({
+  asset: one(assets, {
+    fields: [assetEnrichment.assetId],
+    references: [assets.id],
+  }),
 }));
 
 // --- inferred types -------------------------------------------------------
@@ -350,3 +435,5 @@ export type RunEvent = typeof runEvents.$inferSelect;
 export type NewRunEvent = typeof runEvents.$inferInsert;
 export type Asset = typeof assets.$inferSelect;
 export type NewAsset = typeof assets.$inferInsert;
+export type AssetEnrichment = typeof assetEnrichment.$inferSelect;
+export type NewAssetEnrichment = typeof assetEnrichment.$inferInsert;

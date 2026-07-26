@@ -58,6 +58,23 @@ class Edge(BaseModel):
     target_handle: str
 
 
+class NodeOrigin(BaseModel):
+    """Where a rebuilt node came from, when it was not drawn here.
+
+    `POST /v1/assets/{id}/reconstruct` reads a graph out of another workflow's
+    run history and mints fresh node ids for the copy — reusing the originals
+    would collide the moment the same chain is brought back twice. That leaves
+    nothing tying the copy to the runs that filled it, so the pointer is stored
+    on the node: `GET /v1/workflows/{id}/results` follows it to hand a rebuilt
+    node the takes it already had.
+    """
+
+    #: Not a UUID: this is a pointer, and a workflow that has since been
+    #: deleted must not fail the document that names it.
+    workflow_id: str = Field(max_length=64)
+    node_id: NodeId
+
+
 class TextNodeData(BaseModel):
     text: str = Field(default="", max_length=4000)
 
@@ -84,6 +101,8 @@ class GenerateNodeData(BaseModel):
     preset: Literal["character_sheet"] | None = None
     #: Canvas-only caption; never sent to a provider.
     title: str | None = Field(default=None, max_length=120)
+    #: Set only on a node rebuilt from another workflow's history.
+    origin: NodeOrigin | None = None
 
 
 #: The video track's handle. Fixed, because a composition has exactly one
@@ -194,6 +213,8 @@ class CompositeNodeData(BaseModel):
     tracks: list[CompositeTrack] = Field(
         default_factory=_default_audio_tracks, max_length=MAX_AUDIO_TRACKS
     )
+    #: Set only on a node rebuilt from another workflow's history.
+    origin: NodeOrigin | None = None
 
     @model_validator(mode="after")
     def _normalize(self) -> CompositeNodeData:

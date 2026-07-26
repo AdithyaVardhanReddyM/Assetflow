@@ -1,19 +1,23 @@
-"""Asset library, lineage, and media serving."""
+"""Asset library, search, lineage, and media serving."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import RedirectResponse, StreamingResponse
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import cast as sa_cast
+from sqlalchemy import func, literal, or_, select
 
 from app.config import StorageMode
-from app.db.models import Asset, Run, RunStep
+from app.db.models import Asset, AssetEnrichment, Run, RunStep
 from app.deps import CurrentUser, Session, SettingsDep
 from app.errors import NotFound
+from app.services.reconstruct import build_reconstruction, upstream_closure
 from app.services.uploads import ingest_upload
 
 router = APIRouter(prefix="/v1/assets", tags=["assets"])
@@ -86,6 +90,7 @@ async def list_assets(
     user: CurrentUser,
     modality: str | None = Query(default=None),
     run_id: uuid.UUID | None = Query(default=None),
+    exclude_workflow_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -94,6 +99,19 @@ async def list_assets(
         stmt = stmt.where(Asset.modality == modality)
     if run_id:
         stmt = stmt.where(Asset.run_id == run_id)
+    if exclude_workflow_id:
+        # What the canvas's library panel asks for: everything *except* what
+        # this workflow already made. Uploads belong to no workflow and are
+        # named explicitly, because `NOT IN` over a NULL yields NULL and would
+        # quietly drop every one of them.
+        stmt = stmt.where(
+            or_(
+                Asset.run_id.is_(None),
+                Asset.run_id.not_in(
+                    select(Run.id).where(Run.workflow_id == exclude_workflow_id)
+                ),
+            )
+        )
     stmt = stmt.order_by(Asset.created_at.desc()).limit(limit).offset(offset)
 
     result = await session.execute(stmt)
@@ -102,6 +120,131 @@ async def list_assets(
         "limit": limit,
         "offset": offset,
     }
+
+
+# --- search -----------------------------------------------------------------
+
+#: Below this cosine similarity a "match" is noise wearing a ranking; the
+#: semantic section ends rather than padding itself. Measured, not guessed:
+#: with jina-v3's asymmetric tasks, unrelated queries score ≤0.15 against our
+#: documents and genuinely related ones ≥0.31 — 0.25 splits them with margin.
+SIMILARITY_FLOOR = 0.25
+
+
+class SearchBody(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    modality: str | None = None
+    kind: str | None = None
+    #: The canvas panel searches "everything but this workflow's own output".
+    exclude_workflow_id: uuid.UUID | None = None
+    limit: int = Field(default=12, ge=1, le=50)
+
+
+def _search_filters(stmt, body: SearchBody, tenant_id: str):
+    stmt = stmt.where(Asset.tenant_id == tenant_id)
+    if body.modality:
+        stmt = stmt.where(Asset.modality == body.modality)
+    if body.kind in ("upload", "generated"):
+        from app.db.models import AssetKind
+
+        stmt = stmt.where(Asset.kind == AssetKind(body.kind))
+    if body.exclude_workflow_id:
+        # Same shape as list_assets: uploads (run_id null) always pass —
+        # NOT IN over a NULL would silently drop every one of them.
+        stmt = stmt.where(
+            or_(
+                Asset.run_id.is_(None),
+                Asset.run_id.not_in(
+                    select(Run.id).where(Run.workflow_id == body.exclude_workflow_id)
+                ),
+            )
+        )
+    return stmt
+
+
+def _search_row(asset: Asset, enrichment: AssetEnrichment | None) -> dict[str, Any]:
+    return {
+        **_serialize(asset),
+        "caption": enrichment.caption if enrichment else None,
+        "tags": list(enrichment.tags or []) if enrichment else [],
+    }
+
+
+@router.post("/search")
+async def search_assets(
+    body: SearchBody, session: Session, user: CurrentUser
+) -> dict[str, Any]:
+    """Hybrid search: a semantic section and a keyword section, separately.
+
+    Two sections rather than one fused ranking on purpose — "close in meaning"
+    and "contains your words" are different claims, and showing them apart
+    means neither can bury the other. The keyword section excludes whatever
+    the semantic section already surfaced.
+    """
+    from app.services.embeddings import DIMENSIONS, embed_query, vector_literal
+
+    # Jina's round trip runs while the keyword query holds the DB session —
+    # one session cannot run two queries at once, but it can overlap the API.
+    embed_task = asyncio.create_task(embed_query(body.query))
+
+    needle = f"%{body.query.strip()}%"
+    ts = func.websearch_to_tsquery("english", literal(body.query))
+    keyword_stmt = _search_filters(
+        select(Asset, AssetEnrichment)
+        .outerjoin(AssetEnrichment, AssetEnrichment.asset_id == Asset.id)
+        .where(
+            or_(
+                # Enriched rows match on the generated tsvector; rows the
+                # backfill has not reached yet still match by filename.
+                AssetEnrichment.search_text.op("@@")(ts),
+                Asset.filename.ilike(needle),
+            )
+        )
+        .order_by(
+            func.coalesce(func.ts_rank(AssetEnrichment.search_text, ts), 0).desc(),
+            Asset.created_at.desc(),
+        )
+        # Overfetched: rows the semantic section claims are dropped below.
+        .limit(body.limit * 2),
+        body,
+        user.tenant_id,
+    )
+    keyword_rows = list((await session.execute(keyword_stmt)).all())
+
+    semantic: list[dict[str, Any]] = []
+    vector = await embed_task
+    if vector is not None:
+        from pgvector.sqlalchemy import Vector
+
+        # The vector rides as a text literal under a cast: asyncpg has no
+        # codec for the vector OID, and text→vector is Postgres's own parse.
+        query_vec = sa_cast(literal(vector_literal(vector)), Vector(DIMENSIONS))
+        distance = AssetEnrichment.embedding.cosine_distance(query_vec)
+        semantic_stmt = _search_filters(
+            select(Asset, AssetEnrichment, distance.label("distance"))
+            .join(AssetEnrichment, AssetEnrichment.asset_id == Asset.id)
+            .where(AssetEnrichment.embedding.is_not(None))
+            .order_by(distance)
+            .limit(body.limit),
+            body,
+            user.tenant_id,
+        )
+        for asset, enrichment, dist in (await session.execute(semantic_stmt)).all():
+            similarity = 1.0 - float(dist)
+            if similarity < SIMILARITY_FLOOR:
+                break  # ordered by distance — everything after is worse
+            semantic.append(
+                {**_search_row(asset, enrichment), "similarity": round(similarity, 3)}
+            )
+
+    claimed = {row["id"] for row in semantic}
+    keyword = [
+        _search_row(asset, enrichment)
+        for asset, enrichment in keyword_rows
+        if str(asset.id) not in claimed
+    ][: body.limit]
+
+    return {"query": body.query, "semantic": semantic, "keyword": keyword}
 
 
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -127,39 +270,6 @@ async def get_asset(
     return _serialize(await _get_owned(session, asset_id, user))
 
 
-def _upstream_closure(
-    graph: dict[str, Any], start: str
-) -> tuple[dict[str, dict[str, Any]], dict[str, int], list[str]] | None:
-    """Nodes reachable upstream of `start` in a graph snapshot.
-
-    Returns (nodes_by_id, node_id -> depth, BFS order starting at `start`),
-    or None when the start node is not in the snapshot.
-    """
-    nodes = {n.get("id"): n for n in graph.get("nodes", []) if n.get("id")}
-    if start not in nodes:
-        return None
-
-    parents: dict[str, list[str]] = {}
-    for edge in graph.get("edges", []):
-        src, dst = edge.get("source"), edge.get("target")
-        if src in nodes and dst in nodes:
-            parents.setdefault(dst, []).append(src)
-
-    depth = {start: 0}
-    order = [start]
-    frontier = [start]
-    while frontier:
-        step_out: list[str] = []
-        for nid in frontier:
-            for src in parents.get(nid, []):
-                if src not in depth:
-                    depth[src] = depth[nid] + 1
-                    order.append(src)
-                    step_out.append(src)
-        frontier = step_out
-    return nodes, depth, order
-
-
 async def _build_chain(
     session: Session, run: Run, asset: Asset
 ) -> dict[str, Any] | None:
@@ -169,7 +279,7 @@ async def _build_chain(
     from the asset's node gives the true derivation — including nodes whose
     canvas has since been edited or deleted.
     """
-    closure = _upstream_closure(run.graph_snapshot or {}, asset.node_id or "")
+    closure = upstream_closure(run.graph_snapshot or {}, asset.node_id or "")
     if closure is None:
         return None
     nodes, depth, order = closure
@@ -290,6 +400,20 @@ async def get_provenance(
     if run is not None:
         body["chain"] = await _build_chain(session, run, asset)
     return body
+
+
+@router.get("/{asset_id}/reconstruct")
+async def get_reconstruction(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser
+) -> dict[str, Any]:
+    """The graph that made this asset, rebuilt for another canvas.
+
+    Read-only: it hands back a fragment with fresh node ids and its takes, and
+    the canvas decides where to put it. Nothing is written until the document
+    that received it saves.
+    """
+    asset = await _get_owned(session, asset_id, user)
+    return await build_reconstruction(session, asset=asset, tenant_id=user.tenant_id)
 
 
 @router.get("/{asset_id}/content")

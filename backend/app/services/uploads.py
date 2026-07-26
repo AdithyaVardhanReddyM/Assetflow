@@ -207,4 +207,11 @@ async def ingest_upload(
     await session.commit()
     await session.refresh(asset)
     log.info("upload.stored", tenant=tenant_id, key=b2_key, bytes=size)
+
+    # Caption/tag/embed in the background — the upload response never waits on
+    # a vision model. The dedupe path above skips this on purpose: the earlier
+    # ingest already enriched (or is enriching) those bytes.
+    from app.services.enrich import schedule_enrichment
+
+    schedule_enrichment(asset.id)
     return asset, True

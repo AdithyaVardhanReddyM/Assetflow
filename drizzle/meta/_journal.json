@@ -22,6 +22,20 @@
       "when": 1784805619474,
       "tag": "0002_wealthy_katie_power",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785040649618,
+      "tag": "0003_pgvector-extension",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785040703285,
+      "tag": "0004_big_stepford_cuckoos",
+      "breakpoints": true
     }
   ]
 }

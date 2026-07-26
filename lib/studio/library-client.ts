@@ -10,6 +10,7 @@
 
 import { API_URL } from "./catalog";
 import { type ApiAuth, authHeaders } from "./assets-client";
+import { type Graph, type NodeGeneration, parseGraph } from "./graph";
 
 export type LibraryAsset = {
   id: string;
@@ -26,6 +27,11 @@ export type LibraryAsset = {
   filename: string | null;
   sha256: string | null;
   createdAt: string | null;
+  /** Enrichment, present on search results only. */
+  caption?: string | null;
+  tags?: string[];
+  /** Cosine similarity, semantic search hits only. */
+  similarity?: number;
 };
 
 type AssetRow = {
@@ -42,6 +48,9 @@ type AssetRow = {
   filename: string | null;
   sha256: string | null;
   created_at: string | null;
+  caption?: string | null;
+  tags?: string[];
+  similarity?: number;
 };
 
 const PAGE = 200;
@@ -49,14 +58,26 @@ const PAGE = 200;
  *  longer first paint. */
 const WINDOW = PAGE * 2;
 
-export async function fetchLibrary(auth: ApiAuth): Promise<LibraryAsset[] | null> {
+export async function fetchLibrary(
+  auth: ApiAuth,
+  opts: {
+    /** Leave out everything this workflow's own runs produced — the canvas
+     *  panel is for bringing in work from *elsewhere*. Uploads belong to no
+     *  workflow and are never excluded. */
+    excludeWorkflowId?: string;
+  } = {},
+): Promise<LibraryAsset[] | null> {
   const headers = authHeaders(auth.token, auth.userId);
+  const exclude = opts.excludeWorkflowId
+    ? `&exclude_workflow_id=${encodeURIComponent(opts.excludeWorkflowId)}`
+    : "";
   const out: LibraryAsset[] = [];
   try {
     for (let offset = 0; offset < WINDOW; offset += PAGE) {
-      const res = await fetch(`${API_URL}/v1/assets?limit=${PAGE}&offset=${offset}`, {
-        headers,
-      });
+      const res = await fetch(
+        `${API_URL}/v1/assets?limit=${PAGE}&offset=${offset}${exclude}`,
+        { headers },
+      );
       if (!res.ok) return offset === 0 ? null : out;
       const body = (await res.json()) as { items: AssetRow[] };
       out.push(...body.items.map(toAsset));
@@ -88,7 +109,61 @@ function toAsset(row: AssetRow): LibraryAsset {
     filename: row.filename,
     sha256: row.sha256,
     createdAt: row.created_at,
+    caption: row.caption ?? null,
+    tags: row.tags ?? [],
+    similarity: row.similarity,
   };
+}
+
+// --- search ----------------------------------------------------------------
+
+export type LibrarySearch = {
+  /** Ranked by meaning — the "Best matches" section. */
+  semantic: LibraryAsset[];
+  /** Ranked by wording, excluding what semantic already claimed. */
+  keyword: LibraryAsset[];
+};
+
+/**
+ * Hybrid search over the enrichment index. Null on failure (offline, aborted),
+ * which callers show as an error state — an empty result is `{[], []}`.
+ */
+export async function searchLibrary(
+  query: string,
+  auth: ApiAuth,
+  opts: {
+    modality?: string;
+    kind?: string;
+    excludeWorkflowId?: string;
+    limit?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<LibrarySearch | null> {
+  try {
+    const res = await fetch(`${API_URL}/v1/assets/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(auth.token, auth.userId),
+      },
+      signal: opts.signal,
+      body: JSON.stringify({
+        query,
+        modality: opts.modality && opts.modality !== "all" ? opts.modality : null,
+        kind: opts.kind && opts.kind !== "all" ? opts.kind : null,
+        exclude_workflow_id: opts.excludeWorkflowId ?? null,
+        limit: opts.limit ?? 12,
+      }),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { semantic: AssetRow[]; keyword: AssetRow[] };
+    return {
+      semantic: (body.semantic ?? []).map(toAsset),
+      keyword: (body.keyword ?? []).map(toAsset),
+    };
+  } catch {
+    return null;
+  }
 }
 
 // --- provenance -----------------------------------------------------------
@@ -267,6 +342,100 @@ export async function fetchRunManifest(
     };
   } catch {
     return null;
+  }
+}
+
+// --- reconstruction --------------------------------------------------------
+
+export type Reconstruction = {
+  /** The rebuilt chain, positioned relative to (0,0) for the caller to place. */
+  graph: Graph;
+  /** Inherited takes, keyed by the *new* node id — the carousels arrive full. */
+  results: Record<string, NodeGeneration[]>;
+  /** Sources whose library rows are gone; their nodes come back empty. */
+  missingAssets: string[];
+  nodeCount: number;
+};
+
+export type ReconstructionResult =
+  | { ok: true; data: Reconstruction }
+  /** `reason` distinguishes "nothing to rebuild" from "too big to place". */
+  | { ok: false; reason: "no_run" | "no_graph" | "too_large" | "error"; nodeCount: number };
+
+type GenerationRow = {
+  asset_id: string;
+  url: string | null;
+  media_type: string | null;
+  text: string | null;
+  width: number | null;
+  height: number | null;
+  created_at: string | null;
+};
+
+/**
+ * The graph that made an asset, ready to drop onto the current canvas.
+ *
+ * Walked on the server: a chain crosses a run boundary at every take edit and
+ * every library asset used as an input, and resolving those here would be one
+ * round trip per hop.
+ */
+export async function fetchReconstruction(
+  assetId: string,
+  auth: ApiAuth,
+): Promise<ReconstructionResult> {
+  try {
+    const res = await fetch(`${API_URL}/v1/assets/${assetId}/reconstruct`, {
+      headers: authHeaders(auth.token, auth.userId),
+    });
+    if (!res.ok) return { ok: false, reason: "error", nodeCount: 0 };
+    const body = (await res.json()) as {
+      available: boolean;
+      reason?: string;
+      graph?: unknown;
+      results?: Record<string, GenerationRow[]>;
+      missing_assets?: string[];
+      node_count?: number;
+    };
+    const nodeCount = body.node_count ?? 0;
+    if (!body.available || !body.graph) {
+      const reason = body.reason;
+      return {
+        ok: false,
+        reason:
+          reason === "no_run" || reason === "no_graph" || reason === "too_large"
+            ? reason
+            : "error",
+        nodeCount,
+      };
+    }
+    // Through the same parser the persistence boundary uses: a fragment that
+    // cannot be stored must not be placed on a canvas either.
+    const graph = parseGraph(body.graph);
+    if (!graph) return { ok: false, reason: "no_graph", nodeCount };
+
+    const results: Record<string, NodeGeneration[]> = {};
+    for (const [nodeId, rows] of Object.entries(body.results ?? {})) {
+      results[nodeId] = rows.map((r) => ({
+        assetId: r.asset_id,
+        url: r.url,
+        mediaType: r.media_type,
+        text: r.text,
+        width: r.width,
+        height: r.height,
+        createdAt: r.created_at,
+      }));
+    }
+    return {
+      ok: true,
+      data: {
+        graph,
+        results,
+        missingAssets: body.missing_assets ?? [],
+        nodeCount: nodeCount || graph.nodes.length,
+      },
+    };
+  } catch {
+    return { ok: false, reason: "error", nodeCount: 0 };
   }
 }
 

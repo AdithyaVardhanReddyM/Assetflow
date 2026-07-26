@@ -49,6 +49,12 @@ import {
   registerTextEdit as registerTextEditApi,
   requestLayerize,
 } from "@/lib/studio/magic-text";
+import {
+  type LibraryAsset,
+  fetchLibrary,
+  fetchReconstruction,
+  searchLibrary,
+} from "@/lib/studio/library-client";
 import { saveWorkflow } from "@/app/workflow/actions";
 import {
   addComment,
@@ -58,6 +64,7 @@ import {
 } from "@/app/workflow/comments";
 import { StudioCanvas, type CanvasApi } from "./canvas";
 import { CommentModeHint, type CommentsApi } from "./comment-layer";
+import { LibrarySidebar } from "./library-sidebar";
 import { Toolbar, type ToolId } from "./toolbar";
 import { TopBar, type SaveState } from "./top-bar";
 import { PromptBar, type PromptSpec } from "./prompt-bar";
@@ -878,6 +885,137 @@ export function StudioShell({
     [authFor, runStates],
   );
 
+  // --- the library panel ---------------------------------------------------
+
+  const [libraryOpen, setLibraryOpen] = React.useState(false);
+  /** null after a failed fetch, which the panel shows differently from empty. */
+  const [libraryAssets, setLibraryAssets] = React.useState<LibraryAsset[] | null>(null);
+  const [libraryLoading, setLibraryLoading] = React.useState(false);
+  const [reconstructing, setReconstructing] = React.useState<string | null>(null);
+
+  const loadLibrary = React.useCallback(async () => {
+    setLibraryLoading(true);
+    // Everything except what this canvas already made — the panel is for
+    // bringing work in from elsewhere.
+    const items = await fetchLibrary(await authFor(), { excludeWorkflowId: workflowId });
+    setLibraryAssets(items);
+    setLibraryLoading(false);
+  }, [authFor, workflowId]);
+
+  /** The panel's search, scoped like its listing: everything but this canvas. */
+  const searchPanelLibrary = React.useCallback(
+    async (query: string, modality: string) =>
+      searchLibrary(query, await authFor(), {
+        modality,
+        excludeWorkflowId: workflowId,
+        limit: 8,
+      }),
+    [authFor, workflowId],
+  );
+
+  const toggleLibrary = React.useCallback(() => {
+    const next = !libraryOpen;
+    setLibraryOpen(next);
+    // Fetched on first open rather than on mount: most canvas sessions never
+    // ask for it, and the list is only useful once it is on screen.
+    if (next && libraryAssets === null && !libraryLoading) void loadLibrary();
+  }, [libraryOpen, libraryAssets, libraryLoading, loadLibrary]);
+
+  /**
+   * Rebuild the graph that produced a library asset and drop it on the canvas.
+   *
+   * The takes come back with it: the fragment's nodes carry an `origin`, so
+   * the carousels are seeded now and `/results` re-fills them from the same
+   * pointer on the next reload.
+   */
+  const onReconstruct = React.useCallback(
+    async (asset: LibraryAsset) => {
+      setReconstructing(asset.id);
+      const result = await fetchReconstruction(asset.id, await authFor());
+      setReconstructing(null);
+
+      if (!result.ok) {
+        toast.error(
+          result.reason === "no_run"
+            ? "This one was uploaded, not generated — there's no graph behind it."
+            : result.reason === "no_graph"
+              ? "The run behind this asset didn't keep a graph."
+              : result.reason === "too_large"
+                ? `That chain is ${result.nodeCount} nodes — more than one workflow can hold.`
+                : "Couldn't rebuild that chain.",
+        );
+        return;
+      }
+
+      const { graph, results, missingAssets, nodeCount } = result.data;
+      if (!canvas.current?.insertGraph(graph)) {
+        toast.error(
+          `That chain needs ${nodeCount} nodes and this canvas can hold ${MAX_NODES}.`,
+        );
+        return;
+      }
+      setTouched(true);
+
+      // Upload nodes in the fragment point at assets this canvas has never
+      // resolved, and the graph stores only the id — without this they would
+      // sit empty until a reload went and fetched their previews.
+      const uploadIds = graph.nodes
+        .filter((n) => n.kind === "input.upload")
+        .map((n) => n.data.asset_id)
+        .filter((id): id is string => typeof id === "string");
+      if (uploadIds.length) {
+        void fetchAssetPreviews(uploadIds, await authFor()).then((resolved) => {
+          if (Object.keys(resolved).length) {
+            setAssets((current) => ({ ...current, ...resolved }));
+          }
+        });
+      }
+
+      // Same shape the reopen hydration leaves behind: the well shows the
+      // latest take, the carousel holds the rest.
+      if (Object.keys(results).length) {
+        setHistories((current) => ({ ...current, ...results }));
+        const latest: Record<string, NodeResult> = {};
+        for (const [nodeId, generations] of Object.entries(results)) {
+          const newest = generations[0];
+          if (!newest) continue;
+          latest[nodeId] = {
+            assetId: newest.assetId,
+            url: newest.url,
+            mediaType: newest.mediaType,
+            text: newest.text ?? null,
+          };
+        }
+        nodeResults.current = { ...nodeResults.current, ...latest };
+        setRunStates((current) => {
+          const next = { ...current };
+          for (const [nodeId, r] of Object.entries(latest)) {
+            next[nodeId] = {
+              status: "succeeded",
+              progress: 1,
+              output: { url: r.url, mediaType: r.mediaType, text: r.text },
+            };
+          }
+          return next;
+        });
+      }
+
+      toast.success(
+        `Rebuilt ${graph.nodes.length} ${graph.nodes.length === 1 ? "node" : "nodes"}.`,
+        missingAssets.length
+          ? {
+              description: `${missingAssets.length} source ${
+                missingAssets.length === 1 ? "file is" : "files are"
+              } no longer in your library, so ${
+                missingAssets.length === 1 ? "its node" : "those nodes"
+              } came back empty.`,
+            }
+          : undefined,
+      );
+    },
+    [authFor],
+  );
+
   return (
     <TooltipProvider>
       <div className="fixed inset-0 overflow-hidden bg-[#f7f4ee] text-[#1f211c]">
@@ -897,6 +1035,7 @@ export function StudioShell({
               onGraphChange={onGraphChange}
               onZoomChange={setZoom}
               onInteract={() => setTouched(true)}
+              onCanvasFull={() => toast.error(`A workflow can hold ${MAX_NODES} nodes.`)}
               onUpload={onUpload}
               onRun={onRun}
               onEditTake={onEditTake}
@@ -950,6 +1089,19 @@ export function StudioShell({
           onZoomReset={() => canvas.current?.resetZoom()}
           onFitView={() => canvas.current?.fitView()}
           saveState={saveState}
+          libraryOpen={libraryOpen}
+          onToggleLibrary={toggleLibrary}
+        />
+
+        <LibrarySidebar
+          open={libraryOpen}
+          onClose={() => setLibraryOpen(false)}
+          assets={libraryAssets}
+          loading={libraryLoading}
+          onRetry={() => void loadLibrary()}
+          onReconstruct={(asset) => void onReconstruct(asset)}
+          reconstructing={reconstructing}
+          onSearch={searchPanelLibrary}
         />
 
         {/* Same name as the home screen's, so it stays put across the
@@ -976,7 +1128,15 @@ export function StudioShell({
         {/* Prompt bar, docked. The home screen holds the same bar centre-stage
             under this name, which is what lets it glide down into the dock
             instead of one copy disappearing as another appears. */}
-        <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
+        <div
+          className={cn(
+            "pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4",
+            "transition-[padding] duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+            // Recentre in what is left of the canvas instead of running under
+            // the panel.
+            libraryOpen && "sm:pr-[396px]",
+          )}
+        >
           <div className="pointer-events-auto w-full max-w-[940px]">
             <ViewTransition name="studio-prompt-bar" share="morph">
               <div>

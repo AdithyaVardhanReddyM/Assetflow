@@ -20,6 +20,12 @@ from app.deps import CatalogDep, CurrentUser, Session
 from app.errors import NotFound
 from app.graph.compile import plan_graph
 from app.graph.schema import Graph
+from app.services.results import (
+    RESULTS_PER_NODE,
+    origin_generations,
+    read_origins,
+    serialize_generation,
+)
 from app.services.workflows import load_asset_refs
 
 router = APIRouter(prefix="/v1/workflows", tags=["workflows"])
@@ -110,11 +116,6 @@ async def get_workflow(
     return _serialize(await _get_owned(session, workflow_id, user))
 
 
-# Generations kept per node in the results payload. Newer ones win; anything
-# older is still in the assets table, just not in the canvas carousel.
-RESULTS_PER_NODE = 8
-
-
 @router.get("/{workflow_id}/results")
 async def workflow_results(
     workflow_id: uuid.UUID, session: Session, user: CurrentUser
@@ -122,10 +123,12 @@ async def workflow_results(
     """Recent generated assets per canvas node (newest first), across all of
     this workflow's runs. This is what re-hydrates result previews — and the
     per-node generation carousel — when a canvas is reopened; the graph itself
-    stores no run output."""
-    from app.engine.manifests import preview_url
+    stores no run output.
 
-    await _get_owned(session, workflow_id, user)
+    A node rebuilt from another workflow (`services/reconstruct.py`) has no runs
+    of its own here, so it also inherits its origin's takes — otherwise a chain
+    that arrived full of pictures would come back empty on the next reload."""
+    workflow = await _get_owned(session, workflow_id, user)
 
     stmt = (
         select(Asset)
@@ -138,31 +141,26 @@ async def workflow_results(
         )
         .order_by(Asset.node_id, Asset.created_at.desc())
     )
-    rows = (await session.execute(stmt)).scalars()
+    own: dict[str, list[Asset]] = {}
+    for asset in (await session.execute(stmt)).scalars():
+        own.setdefault(asset.node_id, []).append(asset)
 
-    per_node: dict[str, int] = {}
+    inherited = await origin_generations(
+        session, tenant_id=user.tenant_id, origins=read_origins(workflow.graph)
+    )
+
     results: list[dict[str, Any]] = []
-    for a in rows:
-        seen = per_node.get(a.node_id, 0)
-        if seen >= RESULTS_PER_NODE:
-            continue
-        per_node[a.node_id] = seen + 1
-        results.append(
-            {
-                "node_id": a.node_id,
-                "asset_id": str(a.id),
-                # From the URL, not b2_key: in local mode the key is a bare
-                # relative path while the URL is fetchable as-is.
-                "url": preview_url(a.url),
-                "media_type": a.media_type,
-                "modality": a.modality,
-                "text": (a.asset_metadata or {}).get("text"),
-                # The card takes the generation's shape, so the canvas needs
-                # the real pixel dimensions, not the requested ratio param.
-                "width": a.width,
-                "height": a.height,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
-            }
+    for node_id in {*own, *inherited}:
+        # Merged rather than one preferred over the other: a rebuilt node that
+        # has since been run here holds both its inherited takes and its new
+        # ones, and the carousel is ordered by when they were made.
+        takes = sorted(
+            {a.id: a for a in [*own.get(node_id, []), *inherited.get(node_id, [])]}.values(),
+            key=lambda a: a.created_at,
+            reverse=True,
+        )
+        results.extend(
+            serialize_generation(a, node_id=node_id) for a in takes[:RESULTS_PER_NODE]
         )
     return {"results": results}
 

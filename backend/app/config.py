@@ -83,6 +83,17 @@ class Settings(BaseSettings):
     local_media_dir: Path = BACKEND_DIR / ".data" / "media"
     local_media_base_url: str = "http://localhost:8000/media"
 
+    # --- enrichment + search ---
+    # Kill switch for the whole pipeline; enrichment failing must never take
+    # uploads or runs down with it, but off is still simpler than degraded.
+    enrich_enabled: bool = True
+    # Vision captioning/tagging goes through OpenRouter, so swapping models is
+    # a config change. Flash-Lite: cheapest multi-image vision that does JSON.
+    enrich_vision_model: str = "google/gemini-2.5-flash-lite"
+    # Jina embeddings ("jina-embeddings-v3"). Absent key degrades search to
+    # keyword-only and enrichment to text-without-vectors.
+    jina_api_key: str = ""
+
     # --- worker ---
     run_worker_in_process: bool = True
     worker_concurrency: int = 2

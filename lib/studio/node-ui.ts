@@ -365,6 +365,40 @@ export const NODE_SIZE: Record<NodeKind, { width: number; height: number }> = {
 };
 
 /**
+ * The drag payload the canvas accepts from the library panel. A custom type
+ * rather than `text/plain`, so a stray text drag from anywhere else on the page
+ * cannot be mistaken for an asset.
+ */
+export const ASSET_DRAG_TYPE = "application/x-assetflow-asset";
+
+/**
+ * How far a whole group has to move so none of its nodes lands on an existing
+ * one. Unlike `avoidOverlap`, every member shifts by the same delta: nudging
+ * them one at a time would pull an arriving graph's layout apart.
+ */
+export function avoidOverlapGroup(
+  positions: { x: number; y: number }[],
+  taken: { x: number; y: number }[],
+  step = 34,
+): { x: number; y: number } {
+  const delta = { x: 0, y: 0 };
+  let guard = 0;
+  while (
+    guard++ < 40 &&
+    positions.some((p) =>
+      taken.some(
+        (t) =>
+          Math.abs(t.x - (p.x + delta.x)) < 24 && Math.abs(t.y - (p.y + delta.y)) < 24,
+      ),
+    )
+  ) {
+    delta.x += step;
+    delta.y += step;
+  }
+  return delta;
+}
+
+/**
  * Nudge a new node when it would land exactly on an existing one — placing
  * three nodes from the toolbar without this stacks them invisibly.
  */
