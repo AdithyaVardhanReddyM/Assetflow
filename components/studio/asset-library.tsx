@@ -20,14 +20,17 @@ import { UserButton, useAuth } from "@clerk/nextjs";
 import {
   ArrowLeftIcon,
   ArrowSquareOutIcon,
+  ArrowsOutSimpleIcon,
   CaretDownIcon,
   CheckIcon,
   CopyIcon,
+  DatabaseIcon,
   DownloadSimpleIcon,
   FileTextIcon,
   ImageSquareIcon,
   MagnifyingGlassIcon,
   PauseIcon,
+  PencilSimpleIcon,
   PlayIcon,
   SealCheckIcon,
   SealWarningIcon,
@@ -43,7 +46,12 @@ import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { DOT_COLOR, DOT_GAP } from "@/lib/studio/node-ui";
 import { downloadResult } from "@/lib/studio/runs-client";
 import { uploadAsset } from "@/lib/studio/assets-client";
@@ -52,6 +60,7 @@ import {
   fetchLibrary,
   fetchProvenance,
   fetchRunManifest,
+  renameLibraryAsset,
   searchLibrary,
   type AssetProvenance,
   type LibraryAsset,
@@ -338,6 +347,12 @@ export function AssetLibrary() {
     [living],
   );
 
+  /** Distinct runs behind the shelf — uploads have no run and don't count. */
+  const runCount = React.useMemo(
+    () => new Set(living.map((a) => a.runId).filter(Boolean)).size,
+    [living],
+  );
+
   const visible = React.useMemo(() => {
     const needle = query.trim().toLowerCase();
     const out = living.filter((a) => {
@@ -418,6 +433,53 @@ export function AssetLibrary() {
     [downloadingId, authFor],
   );
 
+  /**
+   * Rename, applied everywhere the row is held — the shelf, the search
+   * sections, and the open drawer — before the request lands. A failure puts
+   * the old name back rather than leaving two truths on screen.
+   */
+  const rename = React.useCallback(
+    async (asset: LibraryAsset, next: string) => {
+      const trimmed = next.trim();
+      if (trimmed === (asset.filename ?? "")) return;
+
+      const apply = (filename: string | null) => {
+        setAssets((current) =>
+          current.map((a) => (a.id === asset.id ? { ...a, filename } : a)),
+        );
+        setResults((current) =>
+          current
+            ? {
+                semantic: current.semantic.map((a) =>
+                  a.id === asset.id ? { ...a, filename } : a,
+                ),
+                keyword: current.keyword.map((a) =>
+                  a.id === asset.id ? { ...a, filename } : a,
+                ),
+              }
+            : current,
+        );
+        setInspecting((current) =>
+          current && current.id === asset.id
+            ? { ...current, filename }
+            : current,
+        );
+      };
+
+      apply(trimmed || null);
+      const saved = await renameLibraryAsset(
+        asset.id,
+        trimmed,
+        await authFor(),
+      );
+      if (!saved) {
+        apply(asset.filename);
+        toast.error("Couldn't rename that.");
+      }
+    },
+    [authFor],
+  );
+
   const loadDossier = React.useCallback(
     async (asset: LibraryAsset) => {
       setDossiers((current) => ({ ...current, [asset.id]: "loading" }));
@@ -443,26 +505,20 @@ export function AssetLibrary() {
 
   return (
     <TooltipProvider>
-      <div className="relative min-h-dvh bg-[#f7f4ee] text-[#1f211c]">
-        {/* Same dots as the canvas — the library is a room in the same house. */}
+      {/* The room holds still — masthead and rail are furniture, only the shelf
+          moves. Same fixed frame the home screen uses. */}
+      <div className="fixed inset-0 flex flex-col overflow-hidden bg-[#f7f4ee] text-[#1f211c]">
+        {/* Same dots as the canvas — the library is a room in the same house,
+            held back a little because there's small type over them here and
+            nothing to drag around. */}
         <div
           aria-hidden
-          className="fixed inset-0"
+          className="absolute inset-0 opacity-55"
           style={{
             backgroundImage: `radial-gradient(${DOT_COLOR} 1px, transparent 1px)`,
             backgroundSize: `${DOT_GAP}px ${DOT_GAP}px`,
           }}
         />
-        {/* Warm bloom behind the masthead. */}
-        <div
-          aria-hidden
-          className="pointer-events-none fixed inset-0"
-          style={{
-            background:
-              "radial-gradient(640px 420px at 30% 8%, oklch(0.852 0.199 91.936 / 0.14), transparent 70%)",
-          }}
-        />
-
         {/* Chrome — logo home, workflows + avatar right, matching the home screen. */}
         <div className="fixed top-5 left-5 z-40 animate-[studio-drift-in_0.7s_cubic-bezier(0.32,0.72,0,1)_both]">
           <Link href="/workflow" aria-label="Back to workflows">
@@ -488,133 +544,223 @@ export function AssetLibrary() {
           </div>
         </div>
 
-        <div className="relative z-10 mx-auto max-w-[1440px] px-6 pt-28 pb-24 sm:px-10">
-          {/* Masthead */}
-          <header className="animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_both]">
-            <div className="flex items-center gap-3">
-              <span className="text-[11px] font-semibold tracking-[0.22em] text-[#8a8271] uppercase">
-                Library
-              </span>
-              <span aria-hidden className="h-px w-24 bg-gradient-to-r from-[#1f211c]/18 to-transparent" />
-            </div>
-            <h1 className="mt-3 text-[clamp(2rem,4vw,3rem)] leading-[1.05] font-medium tracking-[-0.02em]">
-              Everything you&rsquo;ve <span className="font-serif italic">made</span>
-            </h1>
-            <p className="mt-3 max-w-xl text-[13.5px] leading-6 text-[#8a8271]">
-              Every image, video, and sound across your workflows — each with its
-              provenance intact.
-              {state === "ready" && living.length > 0 && (
-                <span className="text-[#4c4a41]">
-                  {" "}
-                  {living.length} {living.length === 1 ? "piece" : "pieces"}
-                  {formatBytes(totalBytes) ? ` · ${formatBytes(totalBytes)}` : ""}.
-                </span>
-              )}
-            </p>
-          </header>
+        {/* Head — no plate, no tray, no seam. Type and controls sit straight on
+            the page in the same column as the cards below, and the only thing
+            holding them together is alignment. */}
+        <div className="relative z-20 shrink-0 pt-[74px] pb-6">
+          <div className="mx-auto w-full max-w-[1440px] px-6 sm:px-10">
+            {/* Masthead — a shelf label and its inventory. */}
+            <header className="flex flex-wrap items-end justify-between gap-x-10 gap-y-5 animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_both]">
+              <div className="min-w-0">
+                <h1 className="text-[clamp(1.75rem,3vw,2.125rem)] leading-none font-medium tracking-[-0.025em]">
+                  Library
+                </h1>
+                <p className="mt-2.5 max-w-[52ch] text-[13px] leading-5 text-[#6d6759]">
+                  Generated and uploaded media from every workflow, with
+                  provenance attached.
+                </p>
+              </div>
 
-          {/* Control rail — sticky so a long shelf stays sortable. */}
-          <div
-            className="sticky top-0 z-30 -mx-6 mt-8 border-y border-[#1f211c]/8 bg-[#f7f4ee]/86 px-6 py-3 backdrop-blur-md sm:-mx-10 sm:px-10 animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_80ms_both]"
-            style={{ transitionTimingFunction: EASE }}
-          >
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
-              {/* Search */}
-              <label className="flex h-9 w-full max-w-[280px] items-center gap-2 border border-[#1f211c]/14 bg-white px-3 transition-colors focus-within:border-[#1f211c]/40">
-                {searching && query.trim() ? (
-                  <Spinner className="size-4 shrink-0 text-[#8a8271]" />
-                ) : (
-                  <MagnifyingGlassIcon className="size-4 shrink-0 text-[#8a8271]" />
-                )}
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search your library…"
-                  className="w-full bg-transparent text-[13px] font-medium outline-none placeholder:text-[#8a8271]/70"
+              {/* Inventory. Held even while the shelf loads, so the figures
+                  arrive in place instead of shoving the masthead sideways. */}
+              <dl className="flex items-end gap-7 sm:gap-9">
+                <Stat
+                  value={living.length.toLocaleString()}
+                  label={living.length === 1 ? "piece" : "pieces"}
+                  pending={state !== "ready"}
                 />
-              </label>
+                <Stat
+                  value={formatBytes(totalBytes) ?? "0 KB"}
+                  label="stored"
+                  pending={state !== "ready"}
+                />
+                <Stat
+                  value={runCount.toLocaleString()}
+                  label={runCount === 1 ? "run" : "runs"}
+                  pending={state !== "ready"}
+                />
+              </dl>
+            </header>
 
-              {/* Modality tabs */}
-              <div className="flex items-center">
-                {MODALITY_TABS.map((tab) => {
-                  const active = modality === tab.id;
-                  const count = counts[tab.id === "all" ? "all" : tab.id] ?? 0;
-                  return (
+            {/* Control rail */}
+            <div
+              className="mt-5 animate-[studio-rise_0.7s_cubic-bezier(0.32,0.72,0,1)_80ms_both]"
+              style={{ transitionTimingFunction: EASE }}
+            >
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2.5">
+                {/* Search. The field states its own trick: every piece is
+                    embedded when it lands, so this reads content, not filenames.
+                    Saying so is the difference between a search box people type
+                    one word into and one they describe a shot to. It carries the
+                    primary border — the one control on the rail worth marking
+                    out, and the same amber the Meaning tag is set in. */}
+                <label className="flex h-9 min-w-[240px] flex-1 basis-[320px] items-center gap-2.5 border border-primary bg-white pr-1 pl-3 transition-colors focus-within:border-[#b08a2e]">
+                  {searching && query.trim() ? (
+                    <Spinner className="size-4 shrink-0 text-[#8a8271]" />
+                  ) : (
+                    <MagnifyingGlassIcon className="size-4 shrink-0 text-[#8a8271]" />
+                  )}
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Describe what you're looking for…"
+                    className="w-full bg-transparent text-[13px] font-medium outline-none placeholder:text-[#8a8271]/80"
+                  />
+                  {query.trim() ? (
                     <button
-                      key={tab.id}
                       type="button"
-                      onClick={() => setModality(tab.id)}
-                      className={cn(
-                        "flex h-9 items-center gap-1.5 px-3 text-[13px] font-semibold transition-colors duration-150",
-                        active
-                          ? "bg-[#1f211c] text-[#f7f4ee]"
-                          : "text-[#4c4a41] hover:bg-[#1f211c]/6 hover:text-[#1f211c]",
-                      )}
+                      onClick={() => setQuery("")}
+                      aria-label="Clear search"
+                      className="grid size-7 shrink-0 place-items-center text-[#8a8271] transition-colors hover:text-[#1f211c]"
                     >
-                      {tab.label}
-                      {state === "ready" && (
+                      <XIcon className="size-3.5" />
+                    </button>
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <button
+                            type="button"
+                            aria-label="How search works"
+                            className="flex h-6 shrink-0 items-center gap-1 px-1.5 text-[9.5px] font-semibold tracking-[0.14em] text-[#a58c46] uppercase transition-colors hover:bg-[#b08a2e]/10 hover:text-[#8a6f20]"
+                          >
+                            <SparkleIcon
+                              className="size-3 text-[#b08a2e]"
+                              weight="fill"
+                            />
+                            Meaning
+                          </button>
+                        }
+                      />
+                      <TooltipContent
+                        side="bottom"
+                        sideOffset={8}
+                        className="max-w-[290px] bg-[#1f211c] text-left text-[11.5px] leading-[1.45] text-[#f7f4ee]"
+                      >
+                        Everything here is described and embedded on arrival, so
+                        you can search for what&rsquo;s in a piece —
+                        &ldquo;waves at dusk&rdquo; finds the shot called
+                        IMG_0421. Word matches are listed underneath,
+                        separately.
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                </label>
+
+                {/* Modality tabs. Counts hold their slot while the shelf loads,
+                    so the group doesn't grow under the cursor. */}
+                <div className="flex h-9 items-center border border-[#1f211c]/12 bg-white/70">
+                  {MODALITY_TABS.map((tab) => {
+                    const active = modality === tab.id;
+                    const count =
+                      counts[tab.id === "all" ? "all" : tab.id] ?? 0;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setModality(tab.id)}
+                        aria-pressed={active}
+                        className={cn(
+                          "flex h-full items-center gap-1.5 px-3 text-[13px] font-semibold transition-colors duration-150",
+                          active
+                            ? "bg-[#1f211c] text-[#f7f4ee]"
+                            : "text-[#4c4a41] hover:bg-[#1f211c]/6 hover:text-[#1f211c]",
+                        )}
+                      >
+                        {tab.label}
                         <span
                           className={cn(
-                            "text-[11px] tabular-nums",
-                            active ? "text-[#f7f4ee]/60" : "text-[#8a8271]",
+                            "text-[10.5px] tabular-nums transition-opacity duration-300",
+                            active ? "text-[#f7f4ee]/55" : "text-[#8a8271]",
+                            state === "ready" ? "opacity-100" : "opacity-0",
                           )}
                         >
                           {count}
                         </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+                      </button>
+                    );
+                  })}
+                </div>
 
-              <div className="ml-auto flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => uploadInput.current?.click()}
-                  disabled={uploading > 0}
-                  className="flex h-9 items-center gap-2 border border-[#1f211c]/14 bg-white px-3 text-[13px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c] disabled:pointer-events-none disabled:opacity-60"
-                >
-                  {uploading > 0 ? (
-                    <Spinner className="size-3.5" />
-                  ) : (
-                    <UploadSimpleIcon className="size-3.5" />
-                  )}
-                  {uploading > 0 ? "Uploading…" : "Upload"}
-                </button>
-                <input
-                  ref={uploadInput}
-                  type="file"
-                  accept="image/*,video/*,audio/*"
-                  multiple
-                  hidden
-                  onChange={(e) => void onFilesChosen(e)}
-                />
-                <RailMenu
-                  label={KIND_LABELS[kind]}
-                  active={kind !== "all"}
+                {/* What the filters left standing, and the way back out. Lives
+                    next to the tabs that caused it rather than floating above
+                    the grid, where it read as a stray line of type. */}
+                {filtersActive && (
+                  <div className="flex items-center gap-2 pl-0.5">
+                    {!liveResults && (
+                      <span className="text-[12px] text-[#8a8271] tabular-nums">
+                        {visible.length} of {living.length}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuery("");
+                        setModality("all");
+                        setKind("all");
+                      }}
+                      className="flex h-7 items-center gap-1 px-1.5 text-[12px] font-semibold text-[#8a8271] transition-colors hover:bg-[#1f211c]/6 hover:text-[#1f211c]"
+                    >
+                      <XIcon className="size-3" />
+                      Reset
+                    </button>
+                  </div>
+                )}
+
+                {/* Right cluster: one action, then the quiet adjustments. The
+                    menus give up their borders so Upload is the only thing over
+                    here that looks pressable at a glance. */}
+                <div className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => uploadInput.current?.click()}
+                    disabled={uploading > 0}
+                    className="mr-1 flex h-9 items-center gap-2 border border-[#1f211c]/22 bg-white px-3.5 text-[13px] font-semibold text-[#1f211c] transition-colors hover:border-[#1f211c]/45 disabled:pointer-events-none disabled:opacity-60"
+                  >
+                    {uploading > 0 ? (
+                      <Spinner className="size-3.5 text-[#8a8271]" />
+                    ) : (
+                      <UploadSimpleIcon className="size-3.5 text-[#8a8271]" />
+                    )}
+                    {uploading > 0 ? "Uploading…" : "Upload"}
+                  </button>
+                  <input
+                    ref={uploadInput}
+                    type="file"
+                    accept="image/*,video/*,audio/*"
+                    multiple
+                    hidden
+                    onChange={(e) => void onFilesChosen(e)}
+                  />
+                  <RailMenu
+                    label={KIND_LABELS[kind]}
+                    active={kind !== "all"}
                   options={(["all", "generated", "upload"] as const).map((id) => ({
                     id,
                     label: KIND_LABELS[id],
                   }))}
-                  value={kind}
-                  onSelect={setKind}
-                />
-                <RailMenu
-                  label={SORT_LABELS[sort]}
-                  active={sort !== "newest"}
+                    value={kind}
+                    onSelect={setKind}
+                  />
+                  <RailMenu
+                    label={SORT_LABELS[sort]}
+                    active={sort !== "newest"}
                   options={(["newest", "oldest", "largest", "name"] as const).map((id) => ({
-                    id,
-                    label: SORT_LABELS[id],
-                  }))}
-                  value={sort}
-                  onSelect={setSort}
-                />
+                      id,
+                      label: SORT_LABELS[id],
+                    }))}
+                    value={sort}
+                    onSelect={setSort}
+                  />
+                </div>
               </div>
             </div>
           </div>
+        </div>
 
-          {/* Shelf */}
-          <div className="mt-8">
+        {/* Shelf — the only thing that moves. */}
+        <div className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <div className="mx-auto w-full max-w-[1440px] px-6 pt-3 pb-20 sm:px-10">
             {state === "loading" && <LoadingShelf />}
 
             {state === "offline" && (
@@ -720,11 +866,8 @@ export function AssetLibrary() {
 
             {state === "ready" && !liveResults && visible.length > 0 && (
               <>
-                {filtersActive && (
-                  <p className="mb-4 text-[12px] text-[#8a8271] tabular-nums">
-                    {visible.length} of {living.length}
-                  </p>
-                )}
+                {/* The count that used to sit here now rides the rail, beside
+                    the filters that produced it. */}
                 <div className="columns-1 gap-5 sm:columns-2 lg:columns-3 xl:columns-4">
                   {visible.map((asset, index) => (
                     <AssetCard
@@ -750,6 +893,7 @@ export function AssetLibrary() {
           onClose={() => setInspecting(null)}
           onRetry={() => inspecting && void loadDossier(inspecting)}
           onDownload={() => inspecting && void download(inspecting)}
+          onRename={(next) => inspecting && void rename(inspecting, next)}
           onDelete={() => {
             if (!inspecting) return;
             setPendingDelete(inspecting);
@@ -788,6 +932,39 @@ export function AssetLibrary() {
   );
 }
 
+// --- masthead inventory ---------------------------------------------------
+
+/**
+ * One reading off the shelf. Term sits under the figure, so scan the numbers.
+ * While the shelf loads the figure is an em dash at the same size — the block
+ * keeps its shape and the numbers arrive by fading, not by shoving.
+ */
+function Stat({
+  value,
+  label,
+  pending,
+}: {
+  value: string;
+  label: string;
+  pending?: boolean;
+}) {
+  return (
+    <div className="flex flex-col">
+      <dd
+        className={cn(
+          "order-1 text-[19px] leading-none font-medium tracking-[-0.01em] tabular-nums transition-[opacity,color] duration-500",
+          pending && "text-[#8a8271]/45",
+        )}
+      >
+        {pending ? "—" : value}
+      </dd>
+      <dt className="order-2 mt-1.5 text-[9.5px] font-semibold tracking-[0.18em] text-[#8a8271] uppercase">
+        {label}
+      </dt>
+    </div>
+  );
+}
+
 // --- rail menus -----------------------------------------------------------
 
 function RailMenu<T extends string>({
@@ -807,10 +984,10 @@ function RailMenu<T extends string>({
     <DropdownMenu>
       <DropdownMenuTrigger
         className={cn(
-          "flex h-9 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors",
+          "flex h-9 items-center gap-1.5 px-2.5 text-[13px] transition-colors data-[popup-open]:bg-[#1f211c]/8 data-[popup-open]:text-[#1f211c]",
           active
-            ? "border-[#1f211c]/32 bg-white text-[#1f211c]"
-            : "border-[#1f211c]/14 bg-white text-[#4c4a41] hover:border-[#1f211c]/32 hover:text-[#1f211c]",
+            ? "font-semibold text-[#1f211c] hover:bg-[#1f211c]/6"
+            : "font-medium text-[#6d6759] hover:bg-[#1f211c]/6 hover:text-[#1f211c]",
         )}
       >
         {label}
@@ -950,14 +1127,12 @@ function AssetCard({
       </div>
 
       <footer className="flex items-center gap-2.5 border-t border-[#1f211c]/8 px-3 py-2.5">
-        <span className="grid size-7 shrink-0 place-items-center bg-[#1f211c]/5 text-[#4c4a41]">
-          <Icon className="size-4" />
-        </span>
+        <Icon className="size-[22px] shrink-0 text-[#4c4a41]" />
         <div className="min-w-0">
           <p className="truncate text-[13px] leading-tight font-medium">{displayName(asset)}</p>
           <p className="mt-0.5 flex items-center gap-1 truncate text-[11px] leading-tight text-[#8a8271] tabular-nums">
             {asset.kind === "generated" ? (
-              <SparkleIcon className="size-3 shrink-0" />
+              <DatabaseIcon className="size-3 shrink-0" />
             ) : (
               <UploadSimpleIcon className="size-3 shrink-0" />
             )}
@@ -1219,6 +1394,7 @@ function ProvenanceDrawer({
   onClose,
   onRetry,
   onDownload,
+  onRename,
   onDelete,
   onInspect,
   getAuth,
@@ -1229,6 +1405,7 @@ function ProvenanceDrawer({
   onClose: () => void;
   onRetry: () => void;
   onDownload: () => void;
+  onRename: (name: string) => void;
   onDelete: () => void;
   /** Hop the drawer to another asset in the lineage chain. */
   onInspect: (asset: LibraryAsset) => void;
@@ -1243,17 +1420,12 @@ function ProvenanceDrawer({
       >
         {asset && (
           <>
-            {/* Masthead — the same overline + rule motif as the shelf. */}
+            {/* Masthead — the overline alone. The rule that used to trail off
+                beside it added nothing but a smudge at this width. */}
             <div className="flex items-center justify-between border-b border-[#1f211c]/8 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <span className="text-[11px] font-semibold tracking-[0.22em] text-[#8a8271] uppercase">
-                  Provenance
-                </span>
-                <span
-                  aria-hidden
-                  className="h-px w-14 bg-gradient-to-r from-[#1f211c]/18 to-transparent"
-                />
-              </div>
+              <span className="text-[11px] font-semibold tracking-[0.22em] text-[#8a8271] uppercase">
+                Provenance
+              </span>
               <button
                 type="button"
                 aria-label="Close"
@@ -1267,9 +1439,11 @@ function ProvenanceDrawer({
             <DrawerMedia asset={asset} />
 
             <div className="border-b border-[#1f211c]/8 px-5 py-4">
-              <SheetTitle className="font-sans text-[15px] leading-snug font-medium tracking-normal text-[#1f211c]">
-                {displayName(asset)}
-              </SheetTitle>
+              <RenameableTitle
+                key={asset.id}
+                asset={asset}
+                onRename={onRename}
+              />
               <p className="mt-1 text-[11.5px] text-[#8a8271] tabular-nums">
                 {[
                   asset.kind === "generated" ? "Generated" : "Uploaded",
@@ -1354,6 +1528,73 @@ function ProvenanceDrawer({
         )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * The name, editable in place. Only the library's label moves — the manifest
+ * keeps whatever the file was called when the run sealed it, which is the
+ * whole point of a sealed record.
+ */
+function RenameableTitle({
+  asset,
+  onRename,
+}: {
+  asset: LibraryAsset;
+  onRename: (name: string) => void;
+}) {
+  // Keyed by asset id at the call site, so hopping the drawer to another file
+  // starts a fresh title rather than carrying a half-typed name over.
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+
+  const commit = () => {
+    setEditing(false);
+    onRename(draft);
+  };
+
+  if (editing) {
+    return (
+      <div>
+        <SheetTitle className="sr-only">{displayName(asset)}</SheetTitle>
+        <input
+          ref={(el) => el?.select()}
+          autoFocus
+          value={draft}
+          maxLength={200}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          className="h-9 w-full border border-[#1f211c]/25 bg-white px-2.5 text-[15px] font-medium outline-none focus:border-[#1f211c]/55"
+        />
+        <p className="mt-1 text-[10.5px] text-[#8a8271]">
+          Enter to save · Esc to cancel · the sealed record keeps its own name
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group/name flex items-start gap-1.5">
+      <SheetTitle className="min-w-0 font-sans text-[15px] leading-snug font-medium tracking-normal text-[#1f211c]">
+        {displayName(asset)}
+      </SheetTitle>
+      <button
+        type="button"
+        aria-label="Rename"
+        title="Rename"
+        onClick={() => {
+          setDraft(asset.filename ?? displayName(asset));
+          setEditing(true);
+        }}
+        className="mt-px grid size-6 shrink-0 place-items-center text-[#8a8271] opacity-0 transition-[opacity,color] group-hover/name:opacity-100 hover:bg-[#1f211c]/6 hover:text-[#1f211c] focus-visible:opacity-100"
+      >
+        <PencilSimpleIcon className="size-3.5" />
+      </button>
+    </div>
   );
 }
 
@@ -1578,7 +1819,13 @@ function Dossier({
             Every hop with a file behind it is a door to that file's dossier. */}
         {chain && chain.hops.length > 1 && (
           <CustodySection title="Lineage">
-            <LineageRail chain={chain} currentId={asset.id} onInspect={onInspect} />
+            <LineagePanel
+              chain={chain}
+              currentId={asset.id}
+              title={displayName(asset)}
+              workflowId={lineage?.workflowId ?? null}
+              onInspect={onInspect}
+            />
           </CustodySection>
         )}
 
@@ -1700,19 +1947,185 @@ function Dossier({
 }
 
 /**
- * The derivation as a picture: hops grouped by distance from this file,
- * sources first, joined by a falling thread. Deliberately not a mini node
- * canvas — at drawer width the story reads top to bottom, like the rail.
+ * Lineage in the drawer: a miniature of the graph that made the file, on its
+ * own plate of canvas dots, with the room to read it one click away.
  */
-function LineageRail({
+function LineagePanel({
   chain,
   currentId,
+  title,
+  workflowId,
   onInspect,
 }: {
   chain: LineageChain;
   currentId: string;
+  /** The asset's display name, for the dialog's own heading. */
+  title: string;
+  workflowId: string | null;
   onInspect: (asset: LibraryAsset) => void;
 }) {
+  const [open, setOpen] = React.useState(false);
+  const sources = chain.hops.filter((hop) =>
+    hop.kind.startsWith("input."),
+  ).length;
+  const steps = chain.hops.length - sources;
+
+  return (
+    <div>
+      <div className="relative border border-[#1f211c]/10 bg-white">
+        {/* The same dots as the canvas this graph ran on, tightened — it is a
+            miniature of that room, not a diagram of it. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-60"
+          style={{
+            backgroundImage: `radial-gradient(${DOT_COLOR} 1px, transparent 1px)`,
+            backgroundSize: "13px 13px",
+          }}
+        />
+        <button
+          type="button"
+          aria-label="Expand the lineage graph"
+          title="Expand"
+          onClick={() => setOpen(true)}
+          className="absolute top-1.5 right-1.5 z-10 grid size-7 place-items-center border border-[#1f211c]/10 bg-white/85 text-[#4c4a41] backdrop-blur-sm transition-colors hover:border-[#1f211c]/30 hover:text-[#1f211c]"
+        >
+          <ArrowsOutSimpleIcon className="size-3.5" />
+        </button>
+        <div className="relative p-3">
+          <LineageGraph
+            chain={chain}
+            currentId={currentId}
+            scale="mini"
+            onInspect={onInspect}
+          />
+        </div>
+      </div>
+
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <p className="text-[11px] text-[#8a8271] tabular-nums">
+          {steps} {steps === 1 ? "step" : "steps"} · {sources}{" "}
+          {sources === 1 ? "source" : "sources"}
+        </p>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="flex h-7 items-center gap-1.5 border border-[#1f211c]/14 bg-white px-2.5 text-[11.5px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+        >
+          <ArrowsOutSimpleIcon className="size-3.5" />
+          Expand
+        </button>
+      </div>
+
+      {open && (
+        <LineageDialog
+          chain={chain}
+          currentId={currentId}
+          title={title}
+          workflowId={workflowId}
+          onOpenChange={setOpen}
+          onInspect={(asset) => {
+            setOpen(false);
+            onInspect(asset);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The same graph, given the room to be read. */
+function LineageDialog({
+  chain,
+  currentId,
+  title,
+  workflowId,
+  onOpenChange,
+  onInspect,
+}: {
+  chain: LineageChain;
+  currentId: string;
+  title: string;
+  workflowId: string | null;
+  onOpenChange: (open: boolean) => void;
+  onInspect: (asset: LibraryAsset) => void;
+}) {
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[88dvh] flex-col gap-0 overflow-hidden rounded-none border border-[#1f211c]/14 bg-[#f7f4ee] p-0 text-[#1f211c] sm:max-w-[min(960px,94vw)]">
+        <div className="shrink-0 border-b border-[#1f211c]/8 px-5 py-4 pr-12">
+          <DialogTitle className="font-sans text-[15px] font-medium tracking-normal">
+            How &ldquo;{title}&rdquo; was made
+          </DialogTitle>
+          <DialogDescription className="mt-1 text-[12px] leading-5 text-[#8a8271]">
+            Drawn from the graph snapshot the run actually executed — sources at
+            the top, this file at the bottom. Any piece with a file behind it
+            opens its own trail.
+          </DialogDescription>
+        </div>
+
+        <div
+          className="relative min-h-0 flex-1 overflow-auto px-6 py-8"
+          style={{
+            backgroundImage: `radial-gradient(${DOT_COLOR} 1px, transparent 1px)`,
+            backgroundSize: `${DOT_GAP}px ${DOT_GAP}px`,
+          }}
+        >
+          <LineageGraph
+            chain={chain}
+            currentId={currentId}
+            scale="full"
+            onInspect={onInspect}
+          />
+        </div>
+
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#1f211c]/8 px-5 py-3">
+          <p className="flex items-center gap-1.5 text-[11px] text-[#8a8271]">
+            <span aria-hidden className="inline-block h-px w-5 bg-[#b08a2e]" />
+            leads to this file
+          </p>
+          {workflowId && (
+            <Link
+              href={`/workflow/${workflowId}`}
+              className="flex h-8 items-center gap-1.5 border border-[#1f211c]/14 bg-white px-3 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+            >
+              <ArrowSquareOutIcon className="size-3.5" />
+              Open that workflow
+            </Link>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type GraphScale = "mini" | "full";
+
+/**
+ * The derivation as the graph it was: hops in rows by distance from this file,
+ * sources at the top, joined by the run snapshot's own edges.
+ *
+ * The threads are drawn from measured tiles rather than assumed from the
+ * layout — rows are laid out by flexbox and a hand-placed line would start
+ * lying the first time a level holds three nodes instead of one.
+ */
+function LineageGraph({
+  chain,
+  currentId,
+  scale,
+  onInspect,
+}: {
+  chain: LineageChain;
+  currentId: string;
+  scale: GraphScale;
+  onInspect: (asset: LibraryAsset) => void;
+}) {
+  const wrap = React.useRef<HTMLDivElement>(null);
+  const tiles = React.useRef(new Map<string, HTMLElement>());
+  const [threads, setThreads] = React.useState<
+    { key: string; d: string; lit: boolean }[]
+  >([]);
+
   const levels = React.useMemo(() => {
     const byDepth = new Map<number, LineageHop[]>();
     for (const hop of chain.hops) {
@@ -1721,28 +2134,101 @@ function LineageRail({
     return [...byDepth.entries()].sort((a, b) => b[0] - a[0]).map(([, hops]) => hops);
   }, [chain]);
 
+  /** The node that produced the file in the drawer — its inbound threads run gold. */
+  const outputNode = React.useMemo(
+    () => chain.hops.find((hop) => hop.depth === 0)?.nodeId ?? null,
+    [chain],
+  );
+
+  const measure = React.useCallback(() => {
+    const root = wrap.current;
+    if (!root) return;
+    const base = root.getBoundingClientRect();
+    const drawn: { key: string; d: string; lit: boolean }[] = [];
+    for (const edge of chain.edges) {
+      const from = tiles.current.get(edge.source);
+      const to = tiles.current.get(edge.target);
+      if (!from || !to) continue;
+      const a = from.getBoundingClientRect();
+      const b = to.getBoundingClientRect();
+      const x1 = a.left - base.left + a.width / 2;
+      const y1 = a.bottom - base.top;
+      const x2 = b.left - base.left + b.width / 2;
+      const y2 = b.top - base.top;
+      // Sideways or upward edges would draw over the tiles; the rows already
+      // say what order things happened in.
+      if (y2 <= y1) continue;
+      const bend = Math.max(10, Math.min(30, (y2 - y1) * 0.55));
+      drawn.push({
+        key: `${edge.source}->${edge.target}`,
+        d: `M${x1} ${y1} C${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`,
+        lit: edge.target === outputNode,
+      });
+    }
+    setThreads(drawn);
+  }, [chain, outputNode]);
+
+  React.useLayoutEffect(() => {
+    measure();
+    const root = wrap.current;
+    if (!root || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [measure, scale]);
+
   return (
-    <div>
-      {levels.map((hops, i) => (
-        <React.Fragment key={hops[0]?.depth ?? i}>
-          {i > 0 && (
-            <div aria-hidden className="flex flex-col items-center py-0.5">
-              <span className="h-3.5 w-px bg-[#1f211c]/25" />
-              <CaretDownIcon className="-mt-0.5 size-3 text-[#1f211c]/40" />
-            </div>
-          )}
-          <div className={cn("grid gap-2", hops.length > 1 && "grid-cols-2")}>
+    // Rows never wrap: a wrapped level is no longer a level. Wide graphs scroll
+    // sideways in the drawer and open properly in the dialog.
+    <div className="overflow-x-auto">
+      <div
+        ref={wrap}
+        className={cn(
+          "relative mx-auto flex min-w-max flex-col items-center",
+          scale === "mini" ? "gap-6" : "gap-11",
+        )}
+      >
+        <svg
+          aria-hidden
+          className="pointer-events-none absolute inset-0 size-full overflow-visible"
+        >
+          {threads.map((thread) => (
+            <path
+              key={thread.key}
+              d={thread.d}
+              fill="none"
+              strokeWidth={thread.lit ? 1.5 : 1}
+              stroke={
+                thread.lit ? "rgba(176,138,46,0.8)" : "rgba(31,33,28,0.24)"
+              }
+            />
+          ))}
+        </svg>
+
+        {levels.map((hops, i) => (
+          <div
+            key={hops[0]?.depth ?? i}
+            className={cn(
+              "relative flex items-stretch justify-center",
+              scale === "mini" ? "gap-3" : "gap-6",
+            )}
+          >
             {hops.map((hop) => (
-              <HopCard
+              <HopNode
                 key={hop.nodeId}
                 hop={hop}
                 currentId={currentId}
+                scale={scale}
                 onInspect={onInspect}
+                register={(el) => {
+                  if (el) tiles.current.set(hop.nodeId, el);
+                  else tiles.current.delete(hop.nodeId);
+                }}
               />
             ))}
           </div>
-        </React.Fragment>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
@@ -1766,15 +2252,20 @@ function hopLabel(hop: LineageHop): { name: string; detail: string } {
   }
 }
 
-function HopThumb({ hop }: { hop: LineageHop }) {
+function HopThumb({ hop, scale }: { hop: LineageHop; scale: GraphScale }) {
   const asset = hop.assets[0];
+  const box = cn(
+    "shrink-0 border border-[#1f211c]/10",
+    scale === "mini" ? "size-10" : "size-12",
+  );
+
   if (asset?.previewUrl && asset.modality === "image") {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
         src={asset.previewUrl}
         alt=""
-        className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#eceadf] object-cover"
+        className={cn(box, "bg-[#eceadf] object-cover")}
       />
     );
   }
@@ -1785,7 +2276,7 @@ function HopThumb({ hop }: { hop: LineageHop }) {
         muted
         playsInline
         preload="metadata"
-        className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#1f211c] object-cover"
+        className={cn(box, "bg-[#1f211c] object-cover")}
       />
     );
   }
@@ -1800,60 +2291,118 @@ function HopThumb({ hop }: { hop: LineageHop }) {
             ? UploadSimpleIcon
             : SparkleIcon;
   return (
-    <span className="grid size-10 shrink-0 place-items-center border border-[#1f211c]/10 bg-[#eceadf] text-[#8a8271]">
-      <Icon className="size-4" />
+    <span
+      className={cn(box, "grid place-items-center bg-[#eceadf] text-[#8a8271]")}
+    >
+      <Icon className={scale === "mini" ? "size-4" : "size-5"} />
     </span>
   );
 }
 
-function HopCard({
+/** Where a hop sits in the story, in three words or fewer. */
+function hopStanding(hop: LineageHop): string {
+  if (hop.depth === 0) return "this file";
+  return hop.kind.startsWith("input.") ? "source" : "step";
+}
+
+/** One node of the graph. The file it produced, if we still hold it, is a door. */
+function HopNode({
   hop,
   currentId,
+  scale,
+  register,
   onInspect,
 }: {
   hop: LineageHop;
   currentId: string;
+  scale: GraphScale;
+  /** Handed to the graph so it can measure this tile and thread the edges. */
+  register: (el: HTMLElement | null) => void;
   onInspect: (asset: LibraryAsset) => void;
 }) {
   const asset = hop.assets[0] ?? null;
   const target = asset && asset.id !== currentId ? asset : null;
   const { name, detail } = hopLabel(hop);
   const snippet = hop.kind === "input.text" ? (hop.text ?? "").trim() : "";
+  const current = hop.depth === 0;
+
+  const frame = cn(
+    "relative border bg-white transition-[border-color,box-shadow]",
+    current
+      ? "border-[#b08a2e]/55 shadow-[0_0_0_3px_rgba(176,138,46,0.11)]"
+      : "border-[#1f211c]/12",
+    target
+      ? "cursor-pointer hover:border-[#1f211c]/45 hover:shadow-[0_10px_26px_-14px_rgba(31,33,28,0.4)]"
+      : "cursor-default",
+  );
+
+  if (scale === "mini") {
+    return (
+      <button
+        ref={register}
+        type="button"
+        disabled={!target}
+        onClick={() => target && onInspect(target)}
+        title={
+          target
+            ? `${name} — follow this file's own trail`
+            : `${name} · ${snippet || detail}`
+        }
+        className={cn(frame, "flex w-[96px] flex-col items-center gap-1.5 p-2")}
+      >
+        <HopThumb hop={hop} scale="mini" />
+        <span className="line-clamp-2 text-center text-[10px] leading-tight font-semibold text-[#1f211c]">
+          {name}
+        </span>
+        <span
+          className={cn(
+            "text-[8.5px] font-semibold tracking-[0.14em] uppercase",
+            current ? "text-[#b08a2e]" : "text-[#a9a294]",
+          )}
+        >
+          {hopStanding(hop)}
+        </span>
+      </button>
+    );
+  }
 
   return (
     <button
+      ref={register}
       type="button"
       disabled={!target}
       onClick={() => target && onInspect(target)}
       title={target ? "Follow this file's own trail" : undefined}
-      className={cn(
-        "flex min-w-0 items-center gap-2.5 border bg-white p-2 text-left",
-        hop.depth === 0 ? "border-[#1f211c]/35" : "border-[#1f211c]/12",
-        target
-          ? "cursor-pointer transition-colors hover:border-[#1f211c]/50"
-          : "cursor-default",
-      )}
+      className={cn(frame, "flex w-[212px] flex-col gap-2.5 p-3 text-left")}
     >
-      <HopThumb hop={hop} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] font-semibold text-[#1f211c]">
-          {name}
-        </span>
-        {snippet ? (
-          <span className="block truncate font-serif text-[11.5px] text-[#8a8271] italic">
-            &ldquo;{snippet}&rdquo;
+      <span className="flex items-center gap-2.5">
+        <HopThumb hop={hop} scale="full" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12.5px] leading-tight font-semibold text-[#1f211c]">
+            {name}
           </span>
-        ) : (
-          <span className="block truncate text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+          <span className="mt-1 block truncate text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
             {detail}
+          </span>
+        </span>
+      </span>
+
+      {snippet && (
+        <span className="line-clamp-3 font-serif text-[11.5px] leading-5 text-[#8a8271] italic">
+          &ldquo;{snippet}&rdquo;
+        </span>
+      )}
+
+      <span className="flex items-baseline justify-between gap-2 border-t border-[#1f211c]/6 pt-2 text-[10px] font-semibold tracking-[0.14em] uppercase">
+        <span className={current ? "text-[#b08a2e]" : "text-[#a9a294]"}>
+          {hopStanding(hop)}
+        </span>
+        {hop.assets.length > 1 && (
+          <span className="text-[#8a8271] tabular-nums">
+            +{hop.assets.length - 1} more
           </span>
         )}
       </span>
-      {hop.assets.length > 1 && (
-        <span className="shrink-0 text-[10px] text-[#8a8271] tabular-nums">
-          +{hop.assets.length - 1}
-        </span>
-      )}
     </button>
   );
 }

@@ -247,6 +247,31 @@ async def search_assets(
     return {"query": body.query, "semantic": semantic, "keyword": keyword}
 
 
+class RenameBody(BaseModel):
+    """A new display name. Empty (or whitespace) clears it back to the
+    derived label the library falls back to."""
+
+    filename: str | None = Field(default=None, max_length=200)
+
+
+@router.patch("/{asset_id}")
+async def rename_asset(
+    asset_id: uuid.UUID, body: RenameBody, session: Session, user: CurrentUser
+) -> dict[str, Any]:
+    """Rename an asset in the library.
+
+    Only the library's own label moves. The stored object keeps its key, and
+    the provenance manifest keeps whatever name it recorded at the time — the
+    sealed record is a statement about the past and must not be edited.
+    """
+    asset = await _get_owned(session, asset_id, user)
+    name = (body.filename or "").strip()
+    asset.filename = name or None
+    await session.commit()
+    await session.refresh(asset)
+    return _serialize(asset)
+
+
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_asset(
     asset_id: uuid.UUID, session: Session, user: CurrentUser

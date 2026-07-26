@@ -439,6 +439,32 @@ export async function fetchReconstruction(
   }
 }
 
+/**
+ * Rename the library's label for an asset. Blank clears it, and the row falls
+ * back to its derived name. Nothing about the stored file or its sealed
+ * manifest moves — those record what was true when the run happened.
+ */
+export async function renameLibraryAsset(
+  id: string,
+  filename: string,
+  auth: ApiAuth,
+): Promise<LibraryAsset | null> {
+  try {
+    const res = await fetch(`${API_URL}/v1/assets/${id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(auth.token, auth.userId),
+      },
+      body: JSON.stringify({ filename }),
+    });
+    if (!res.ok) return null;
+    return toAsset((await res.json()) as AssetRow);
+  } catch {
+    return null;
+  }
+}
+
 export async function deleteLibraryAsset(id: string, auth: ApiAuth): Promise<boolean> {
   try {
     const res = await fetch(`${API_URL}/v1/assets/${id}`, {
