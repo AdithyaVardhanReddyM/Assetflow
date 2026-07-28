@@ -46,3 +46,4 @@ export const TextToSpeechIcon = assetIcon(
 export const MusicGenIcon = assetIcon("/music_gen.svg", "MusicGenIcon");
 export const LlmIcon = assetIcon("/llm.svg", "LlmIcon");
 export const CompositionIcon = assetIcon("/composition.svg", "CompositionIcon");
+export const AgentIcon = assetIcon("/agent.svg", "AgentIcon");

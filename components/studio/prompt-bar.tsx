@@ -20,7 +20,9 @@ import {
   SparkleIcon,
   SpeakerSimpleHighIcon,
   SpeakerSimpleSlashIcon,
+  StackIcon,
   TimerIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 
 import { BorderBeam } from "border-beam";
@@ -35,7 +37,7 @@ import {
   remapParams,
 } from "@/lib/studio/catalog";
 import { NODE_BLUEPRINTS, pickModel } from "@/lib/studio/node-ui";
-import { ImageGenIcon, VideoGenIcon } from "./asset-icons";
+import { AgentIcon, ImageGenIcon, VideoGenIcon } from "./asset-icons";
 import { ModelLogo } from "./model-logos";
 import { ModelMenuList } from "./model-menu";
 import { Slider } from "@/components/ui/slider";
@@ -47,14 +49,44 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-type PromptModality = "image" | "video";
+export type PromptModality = "image" | "video";
+
+/**
+ * What the toggle offers. Agent is a third tab, not a third modality — it
+ * starts a conversation instead of placing a node, so `modality` stays parked
+ * on the last real one while `tab` says what Generate actually means.
+ */
+export type PromptTab = PromptModality | "agent";
+
+const PROMPT_TABS: { id: PromptTab; label: string; icon: typeof ImageGenIcon }[] = [
+  { id: "image", label: "Image", icon: ImageGenIcon },
+  { id: "video", label: "Video", icon: VideoGenIcon },
+  { id: "agent", label: "Agent", icon: AgentIcon },
+];
+
+/** Width of one tab, and so the distance the block slides per step. */
+const TAB_WIDTH = 66;
 
 /** What Generate hands the canvas: the node to place, fully decided. */
 export type PromptSpec = {
+  /** Which tab fired: image/video place a chain, agent opens a conversation. */
+  tab: PromptTab;
   modality: PromptModality;
   model?: CatalogModel;
   params?: Record<string, unknown>;
+  /** Image tab only: how many generate nodes the quick chain fans out to. */
+  count?: number;
 };
+
+/** A file staged on the bar — owned by the parent, displayed here. */
+export type PromptAttachment = {
+  name: string;
+  /** Object URL for an image thumbnail; absent renders a plain chip. */
+  previewUrl?: string | null;
+};
+
+/** The Generate button's states — home creates, quick modes craft. */
+export type PromptBusy = boolean | "creating" | "crafting";
 
 const chip =
   "flex h-8 shrink-0 items-center gap-1.5 border border-[#1f211c]/14 bg-[#f7f4ee]/80 px-2 text-xs font-medium text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]";
@@ -256,6 +288,9 @@ export function PromptBar({
   onGenerate,
   onAttach,
   busy = false,
+  attachments,
+  onAttachFiles,
+  onRemoveAttachment,
 }: {
   catalog: Catalog;
   value: string;
@@ -264,12 +299,29 @@ export function PromptBar({
   onAttach: () => void;
   /**
    * On the home screen, Generate creates a workflow before it can place a
-   * node — so the wait belongs on the button that started it.
+   * node — so the wait belongs on the button that started it. "crafting" is
+   * the quick modes' LLM rewrite; plain `true` reads as "creating".
    */
-  busy?: boolean;
+  busy?: PromptBusy;
+  /** Files staged for the next Generate, owned by the parent. When these three
+   *  props are present the `+` button stages files here (agent always; quick
+   *  modes only when the selected model has a reference-image port) instead of
+   *  falling back to `onAttach`'s upload-node behavior. */
+  attachments?: PromptAttachment[];
+  onAttachFiles?: (files: File[]) => void;
+  onRemoveAttachment?: (index: number) => void;
 }) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const [tab, setTab] = React.useState<PromptTab>("image");
+  /**
+   * The generating half of the toggle. Agent parks on the last real modality
+   * rather than clearing it, so switching away and back finds the model and
+   * params still where they were left.
+   */
   const [modality, setModality] = React.useState<PromptModality>("image");
+  /** Quick image mode's fan-out — a placement count, never a model param. */
+  const [count, setCount] = React.useState(1);
+  const fileInput = React.useRef<HTMLInputElement>(null);
 
   // Role-less models only: the bar's two tabs mean plain image / plain video
   // generation, and a lipsync model placed from here could never run.
@@ -316,12 +368,29 @@ export function PromptBar({
     if (value) el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [value]);
 
-  const isVideo = modality === "video";
+  const isVideo = tab === "video";
+  const isAgent = tab === "agent";
+
+  /**
+   * Whether the `+` button stages files on the bar rather than seeding an
+   * upload node: always in agent mode (the conversation carries them), and in
+   * the quick modes only when the chosen model can actually take a reference.
+   */
+  const canStageFiles =
+    Boolean(onAttachFiles) &&
+    (isAgent || Boolean(model?.accepts.some((a) => a.port === "image_ref")));
+
   // Guarded here rather than only on the button, because Enter in the textarea
   // reaches this without going through it.
   const generate = () => {
     if (busy) return;
-    onGenerate({ modality, model, params: model ? params[modality] : undefined });
+    onGenerate({
+      tab,
+      modality,
+      model: isAgent ? undefined : model,
+      params: !isAgent && model ? params[modality] : undefined,
+      count: tab === "image" ? count : undefined,
+    });
   };
 
   return (
@@ -372,11 +441,23 @@ export function PromptBar({
           <button
             type="button"
             aria-label="Add media"
-            onClick={onAttach}
+            onClick={() => (canStageFiles ? fileInput.current?.click() : onAttach())}
             className="mt-0.5 grid size-8 shrink-0 place-items-center border border-[#1f211c]/12 text-[#4c4a41] transition-colors hover:border-[#1f211c]/30 hover:bg-[#f7f4ee] hover:text-[#1f211c]"
           >
             <PlusIcon className="size-4" />
           </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*,video/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (files.length) onAttachFiles?.(files);
+            }}
+          />
           <textarea
             ref={textareaRef}
             rows={1}
@@ -393,43 +474,73 @@ export function PromptBar({
           />
         </div>
 
+        {attachments?.length ? (
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
+            {attachments.map((a, index) => (
+              <span
+                key={`${a.name}-${index}`}
+                className="flex items-center gap-1.5 border border-[#1f211c]/14 bg-[#f7f4ee]/80 py-1 pr-1.5 pl-1 text-[11px] font-medium text-[#4c4a41]"
+              >
+                {a.previewUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={a.previewUrl} alt="" className="size-6 object-cover" />
+                ) : null}
+                <span className="max-w-36 truncate">{a.name}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${a.name}`}
+                  onClick={() => onRemoveAttachment?.(index)}
+                  className="text-[#8a8271] hover:text-[#1f211c]"
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
         <div className="mt-3 flex items-center gap-1.5">
           {/* Options wrap instead of pushing Generate past the bar's edge */}
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-          {/* Modality toggle — sliding ink block */}
+          {/* Modality toggle — sliding block in primary, carrying the same
+              amber-on-dark-amber pairing Generate uses at the other end of the
+              bar. One brand colour across the row, no neutral block. */}
           <div className="relative flex h-8 shrink-0 border border-[#1f211c]/14 bg-[#f7f4ee]/80 p-0.5">
             <span
               aria-hidden
-              className={cn(
-                "absolute top-0.5 bottom-0.5 left-0.5 w-[66px] bg-[#1f211c] transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]",
-                isVideo && "translate-x-[66px]",
-              )}
+              className="absolute top-0.5 bottom-0.5 left-0.5 bg-primary transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]"
+              style={{
+                width: TAB_WIDTH,
+                transform: `translateX(${PROMPT_TABS.findIndex((t) => t.id === tab) * TAB_WIDTH}px)`,
+              }}
             />
-            {(
-              [
-                { id: "image", label: "Image", icon: ImageGenIcon },
-                { id: "video", label: "Video", icon: VideoGenIcon },
-              ] as const
-            ).map(({ id, label, icon: IconComp }) => (
+            {PROMPT_TABS.map(({ id, label, icon: IconComp }) => (
               <button
                 key={id}
                 type="button"
-                aria-pressed={modality === id}
-                onClick={() => setModality(id)}
+                aria-pressed={tab === id}
+                onClick={() => {
+                  setTab(id);
+                  if (id !== "agent") setModality(id);
+                }}
+                style={{ width: TAB_WIDTH }}
                 className={cn(
-                  "relative z-10 flex w-[66px] items-center justify-center gap-1.5 text-xs font-semibold transition-colors duration-300",
-                  modality === id
-                    ? "text-[#f7f4ee]"
+                  "relative z-10 flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors duration-300",
+                  tab === id
+                    ? "text-primary-foreground"
                     : "text-[#8a8271] hover:text-[#1f211c]",
                 )}
               >
-                <IconComp className="size-3.5" weight={modality === id ? "fill" : "regular"} />
+                <IconComp className="size-3.5" weight={tab === id ? "fill" : "regular"} />
                 {label}
               </button>
             ))}
           </div>
 
-          {/* Model picker for the active modality */}
+          {/* Model picker for the active modality. Agent has no catalog behind
+              it yet, so the row stays empty rather than offering a choice that
+              wouldn't run. */}
+          {!isAgent && (
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -463,12 +574,28 @@ export function PromptBar({
               />
             </DropdownMenuContent>
           </DropdownMenu>
+          )}
 
-          {model ? (
+          {model && !isAgent ? (
             <ParamChips
               model={model}
               params={params[modality]}
               onChange={setParam}
+            />
+          ) : null}
+
+          {/* Fan-out for the quick image chain — placement count, not a model
+              param, so it lives beside the chips rather than among them. */}
+          {tab === "image" && model ? (
+            <OptionMenu
+              label="Images"
+              options={[1, 2, 3, 4].map((n) => ({
+                value: String(n),
+                label: `×${n}`,
+              }))}
+              value={String(count)}
+              onSelect={(v) => setCount(Number(v))}
+              icon={<StackIcon className="size-3.5" />}
             />
           ) : null}
           </div>
@@ -476,14 +603,14 @@ export function PromptBar({
           <button
             type="button"
             onClick={generate}
-            disabled={busy}
-            aria-busy={busy || undefined}
+            disabled={Boolean(busy)}
+            aria-busy={Boolean(busy) || undefined}
             className="flex h-9 shrink-0 items-center gap-2 bg-primary px-4 text-[13px] font-semibold text-primary-foreground shadow-[0_10px_24px_-8px_oklch(0.75_0.16_85_/_0.9),inset_0_1px_0_rgba(255,255,255,0.5)] transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:active:scale-100 disabled:hover:brightness-100"
           >
             {busy ? (
               <>
                 <Spinner className="size-4" />
-                Creating workflow…
+                {busy === "crafting" ? "Crafting…" : "Creating workflow…"}
               </>
             ) : (
               <>

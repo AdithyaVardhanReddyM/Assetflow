@@ -66,6 +66,8 @@ export const enrichmentStatus = pgEnum("enrichment_status", [
   "failed",
 ]);
 
+export const chatStatus = pgEnum("chat_status", ["open", "closed"]);
+
 /** Postgres `tsvector`, which drizzle-orm has no built-in column type for. */
 const tsvector = customType<{ data: string }>({
   dataType() {
@@ -140,6 +142,61 @@ export const workflowComments = pgTable(
     index("workflow_comments_workflow_idx").on(t.workflowId, t.createdAt),
     index("workflow_comments_parent_idx").on(t.parentId),
   ],
+);
+
+/**
+ * The workflow-builder agent's conversation, one thread per canvas (the unique
+ * index). Next.js owns these two tables entirely — the FastAPI mirror ignores
+ * them, which is safe because verify.py is one-directional (extra tables in the
+ * database are expected, missing ones are the failure).
+ *
+ * `proposal` is the live bookkeeping for a placed-but-undecided graph:
+ * `{ toolCallId, nodeIds, status } | null`. It lives here rather than in node
+ * `data` because the backend silently drops undeclared keys from `wire` on any
+ * round trip.
+ */
+export const workflowChats = pgTable(
+  "workflow_chats",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    workflowId: uuid()
+      .notNull()
+      .references(() => workflows.id, { onDelete: "cascade" }),
+    tenantId: text().notNull(),
+    ownerUserId: text().notNull(),
+    /** Accept/Run close the thread; a later agent prompt reopens it. */
+    status: chatStatus().notNull().default("open"),
+    proposal: jsonb(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("workflow_chats_workflow_idx").on(t.workflowId),
+    index("workflow_chats_tenant_idx").on(t.tenantId, t.updatedAt),
+  ],
+);
+
+/**
+ * AI SDK UIMessages, parts stored verbatim. The id is the client-generated
+ * UIMessage id — a natural upsert key, which makes persistence idempotent
+ * across the route's onFinish and the client's explicit flushes. Tool parts
+ * keep their state/input/output, so answered questionnaires and placed
+ * proposals rehydrate after a reload without replaying the model.
+ */
+export const chatMessages = pgTable(
+  "chat_messages",
+  {
+    id: text().primaryKey(),
+    chatId: uuid()
+      .notNull()
+      .references(() => workflowChats.id, { onDelete: "cascade" }),
+    tenantId: text().notNull(),
+    role: text().notNull(),
+    parts: jsonb().notNull(),
+    /** Off-wire context: `{ assetIds?: string[], taggedNodeIds?: string[] }`. */
+    metadata: jsonb(),
+    createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("chat_messages_chat_idx").on(t.chatId, t.createdAt)],
 );
 
 /**
@@ -379,6 +436,22 @@ export const assetEnrichment = pgTable(
 export const workflowsRelations = relations(workflows, ({ many }) => ({
   runs: many(runs),
   comments: many(workflowComments),
+  chats: many(workflowChats),
+}));
+
+export const workflowChatsRelations = relations(workflowChats, ({ one, many }) => ({
+  workflow: one(workflows, {
+    fields: [workflowChats.workflowId],
+    references: [workflows.id],
+  }),
+  messages: many(chatMessages),
+}));
+
+export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
+  chat: one(workflowChats, {
+    fields: [chatMessages.chatId],
+    references: [workflowChats.id],
+  }),
 }));
 
 export const workflowCommentsRelations = relations(workflowComments, ({ one }) => ({
@@ -427,6 +500,10 @@ export type Workflow = typeof workflows.$inferSelect;
 export type NewWorkflow = typeof workflows.$inferInsert;
 export type WorkflowComment = typeof workflowComments.$inferSelect;
 export type NewWorkflowComment = typeof workflowComments.$inferInsert;
+export type WorkflowChat = typeof workflowChats.$inferSelect;
+export type NewWorkflowChat = typeof workflowChats.$inferInsert;
+export type ChatMessage = typeof chatMessages.$inferSelect;
+export type NewChatMessage = typeof chatMessages.$inferInsert;
 export type Run = typeof runs.$inferSelect;
 export type NewRun = typeof runs.$inferInsert;
 export type RunStep = typeof runSteps.$inferSelect;

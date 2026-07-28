@@ -35,6 +35,7 @@ import {
   type RunEvent,
   type RunEventAsset,
   buildRunGraph,
+  buildRunGraphForNodes,
   downloadResult,
   fetchRunAssets,
   fetchWorkflowResults,
@@ -43,6 +44,14 @@ import {
   stepNodes,
   streamRun,
 } from "@/lib/studio/runs-client";
+import { belowContentAt } from "@/lib/studio/agent/placement";
+import {
+  type QuickPrompts,
+  buildQuickImageGraph,
+  buildQuickVideoGraph,
+} from "@/lib/studio/agent/quick-graphs";
+import type { AgentAttachment } from "@/lib/studio/agent/spec";
+import type { LoadedChat } from "@/app/workflow/chat-actions";
 import { type TakeEditSpec, buildTakeEditGraph } from "@/lib/studio/camera-edit";
 import {
   fetchAssetBlob as fetchAssetBlobApi,
@@ -67,7 +76,13 @@ import { CommentModeHint, type CommentsApi } from "./comment-layer";
 import { LibrarySidebar } from "./library-sidebar";
 import { Toolbar, type ToolId } from "./toolbar";
 import { TopBar, type SaveState } from "./top-bar";
-import { PromptBar, type PromptSpec } from "./prompt-bar";
+import {
+  PromptBar,
+  type PromptAttachment,
+  type PromptSpec,
+} from "./prompt-bar";
+import { AgentSidebar } from "./agent/agent-sidebar";
+import { type AgentBridge, useAgentSession } from "./agent/use-agent-session";
 
 const SAVE_DEBOUNCE_MS = 800;
 
@@ -89,6 +104,7 @@ export function StudioShell({
   initialComments,
   catalog,
   initialTool = "move",
+  initialChat = null,
 }: {
   workflowId: string;
   initialName: string;
@@ -97,6 +113,10 @@ export function StudioShell({
   catalog: Catalog;
   /** Carried from the home screen's toolbar; pointer tools only. */
   initialTool?: ToolId;
+  /** The workflow's agent thread, loaded with the page. An open one means the
+   *  conversation is mid-flight (often the home screen's handoff) — the
+   *  sidebar opens on it immediately. */
+  initialChat?: LoadedChat | null;
 }) {
   const router = useRouter();
 
@@ -298,22 +318,6 @@ export function StudioShell({
     if (!created) toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
   }, []);
 
-  const onGenerate = React.useCallback(
-    (spec: PromptSpec) => {
-      const text = prompt.trim();
-      setTouched(true);
-      // The bar already decided model and params; the node carries them.
-      const created = canvas.current?.addNode(spec.modality, {
-        prompt: text || undefined,
-        model: spec.model,
-        params: spec.params,
-      });
-      if (!created) toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
-      else setPrompt("");
-    },
-    [prompt],
-  );
-
   const onUpload = React.useCallback(
     async (file: File) => {
       const asset = await uploadAsset(file, await authFor());
@@ -321,6 +325,21 @@ export function StudioShell({
       return asset;
     },
     [authFor],
+  );
+
+  /**
+   * Upload for graphs placed via `insertGraph` (agent proposals, quick
+   * chains): those upload nodes are born pointing at an asset id, so the
+   * preview has to land in the shell's store — the canvas-local one only
+   * learns about files that came through its own picker.
+   */
+  const uploadTracked = React.useCallback(
+    async (file: File) => {
+      const asset = await onUpload(file);
+      if (asset) setAssets((current) => ({ ...current, [asset.id]: asset }));
+      return asset;
+    },
+    [onUpload],
   );
 
   // --- comments -----------------------------------------------------------
@@ -811,6 +830,263 @@ export function StudioShell({
     [launchRun],
   );
 
+  // --- agent --------------------------------------------------------------
+
+  const [agentOpen, setAgentOpen] = React.useState(
+    initialChat?.chat.status === "open",
+  );
+  /** The current selection, with titles resolved at event time — reading the
+   *  graph ref during render is off-limits under the compiler. */
+  const [selectedNodes, setSelectedNodes] = React.useState<
+    { id: string; title: string }[]
+  >([]);
+  /** Node ids whose tag chip was dismissed — cleared when selection moves. */
+  const [tagDismissed, setTagDismissed] = React.useState<string | null>(null);
+  /** Files staged on the bottom bar for the next agent/quick submit. */
+  const [barFiles, setBarFiles] = React.useState<{ file: File; url: string }[]>([]);
+  const [crafting, setCrafting] = React.useState(false);
+
+  /** One combined run for a whole proposal — the backend sequences the steps. */
+  const runSubgraph = React.useCallback(
+    async (nodeIds: string[]) => {
+      const built = buildRunGraphForNodes(graphRef.current, nodeIds, nodeResults.current);
+      if (!built.ok) {
+        toast.error(built.error);
+        return false;
+      }
+      const steps = stepNodes(built.graph);
+      if (!steps.length) {
+        toast.error("Nothing to run in this proposal.");
+        return false;
+      }
+      await launchRun(
+        built.graph,
+        steps.map((s) => s.id),
+      );
+      return true;
+    },
+    [launchRun],
+  );
+
+  const bridge = React.useMemo<AgentBridge>(
+    () => ({
+      graph: () => graphRef.current,
+      insertGraph: (graph, at) => {
+        setTouched(true);
+        return canvas.current?.insertGraph(graph, at) ?? false;
+      },
+      removeNodes: (ids) => canvas.current?.removeNodes(ids),
+      updateNodeData: (id, patch) => canvas.current?.updateNodeData(id, patch),
+      runSubgraph,
+      upload: uploadTracked,
+    }),
+    [runSubgraph, uploadTracked],
+  );
+
+  const session = useAgentSession({
+    workflowId,
+    catalog,
+    initialChat,
+    bridge,
+    onFinished: () => setAgentOpen(false),
+  });
+
+  const onSelectionChange = React.useCallback((ids: string[]) => {
+    setTagDismissed(null);
+    setSelectedNodes(
+      ids.flatMap((id) => {
+        const node = graphRef.current.nodes.find((n) => n.id === id);
+        if (!node) return [];
+        const title =
+          typeof node.data.title === "string" && node.data.title
+            ? node.data.title
+            : typeof node.data.model === "string" && node.data.model
+              ? node.data.model
+              : node.kind;
+        return [{ id, title }];
+      }),
+    );
+  }, []);
+
+  /** The single selected node, offered as a tag in the agent composer. */
+  const taggedNode =
+    agentOpen && selectedNodes.length === 1 && selectedNodes[0].id !== tagDismissed
+      ? selectedNodes[0]
+      : null;
+
+  const stageFiles = React.useCallback((files: File[]) => {
+    setBarFiles((current) => [
+      ...current,
+      ...files.map((file) => ({ file, url: URL.createObjectURL(file) })),
+    ]);
+  }, []);
+
+  const clearBarFiles = React.useCallback(() => {
+    setBarFiles((current) => {
+      current.forEach((f) => URL.revokeObjectURL(f.url));
+      return [];
+    });
+  }, []);
+
+  const barAttachments = React.useMemo<PromptAttachment[]>(
+    () =>
+      barFiles.map((f) => ({
+        name: f.file.name,
+        previewUrl: f.file.type.startsWith("image/") ? f.url : null,
+      })),
+    [barFiles],
+  );
+
+  /**
+   * The quick Image/Video submit: one structured LLM pass turns the brief
+   * into production prompts ("Crafting…"), then the whole chain lands below
+   * whatever is already on the canvas. Nothing runs — that is the user's move.
+   * The enhance call is an upgrade, not a gate: if it fails, the raw prompt
+   * ships instead.
+   */
+  const quickGenerate = React.useCallback(
+    async (spec: PromptSpec, text: string) => {
+      const model = spec.model;
+      if (!model) {
+        toast.error("Pick a model first.");
+        return;
+      }
+      setCrafting(true);
+      try {
+        const auth = await authFor();
+        const uploads = await Promise.all(
+          barFiles.map((f) => uploadAsset(f.file, auth)),
+        );
+        const attachments: AgentAttachment[] = uploads
+          .filter((a): a is AssetPreview => a !== null)
+          .map((a) => ({
+            assetId: a.id,
+            mediaType: a.mediaType,
+            modality: a.modality,
+            filename: a.filename,
+          }));
+        if (attachments.length) {
+          setAssets((current) => {
+            const next = { ...current };
+            for (const [i, a] of uploads.entries()) {
+              if (a) next[a.id] = a;
+              else toast.error(`Could not upload ${barFiles[i]?.file.name}.`);
+            }
+            return next;
+          });
+        }
+
+        const aspect =
+          typeof spec.params?.aspect_ratio === "string"
+            ? spec.params.aspect_ratio
+            : undefined;
+        const needsStartFrame =
+          spec.modality === "video" && model.accepts.some((a) => a.port === "init_image");
+        const needsEndFrame =
+          spec.modality === "video" && model.accepts.some((a) => a.port === "end_frame");
+
+        let prompts: QuickPrompts = { prompt: text };
+        try {
+          const res = await fetch("/api/agent/enhance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: spec.modality,
+              prompt: text,
+              aspect,
+              needsStartFrame,
+              needsEndFrame,
+            }),
+          });
+          if (res.ok) {
+            const body = (await res.json()) as {
+              prompt?: string;
+              videoPrompt?: string;
+              startFramePrompt?: string | null;
+              endFramePrompt?: string | null;
+            };
+            prompts = {
+              prompt: body.videoPrompt ?? body.prompt ?? text,
+              startFramePrompt: body.startFramePrompt ?? null,
+              endFramePrompt: body.endFramePrompt ?? null,
+            };
+          }
+        } catch {
+          // Offline enhance falls through to the raw prompt below.
+        }
+
+        const compiled =
+          spec.modality === "image"
+            ? buildQuickImageGraph(
+                catalog,
+                model,
+                prompts.prompt,
+                spec.params ?? {},
+                spec.count ?? 1,
+                attachments,
+              )
+            : buildQuickVideoGraph(
+                catalog,
+                model,
+                prompts,
+                spec.params ?? {},
+                attachments,
+              );
+        if (!compiled.ok) {
+          toast.error(compiled.errors[0] ?? "Couldn't build that chain.");
+          return;
+        }
+        const placed = canvas.current?.insertGraph(
+          compiled.graph,
+          belowContentAt(graphRef.current, compiled.size),
+        );
+        if (!placed) {
+          toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
+          return;
+        }
+        setPrompt("");
+        clearBarFiles();
+      } finally {
+        setCrafting(false);
+      }
+    },
+    [authFor, barFiles, catalog, clearBarFiles],
+  );
+
+  const onGenerate = React.useCallback(
+    (spec: PromptSpec) => {
+      const text = prompt.trim();
+      setTouched(true);
+
+      if (spec.tab === "agent") {
+        if (!text && !barFiles.length) return;
+        setAgentOpen(true);
+        void session.send(
+          text,
+          barFiles.map((f) => f.file),
+          [],
+        );
+        setPrompt("");
+        clearBarFiles();
+        return;
+      }
+
+      // No brief means no chain to craft — keep the old fast path: one node,
+      // pre-set to the bar's model and params.
+      if (!text) {
+        const created = canvas.current?.addNode(spec.modality, {
+          model: spec.model,
+          params: spec.params,
+        });
+        if (!created) toast.error(`A workflow can hold ${MAX_NODES} nodes.`);
+        return;
+      }
+
+      void quickGenerate(spec, text);
+    },
+    [prompt, barFiles, session, clearBarFiles, quickGenerate],
+  );
+
   // --- magic text ---------------------------------------------------------
 
   const onLayerize = React.useCallback(
@@ -1046,6 +1322,7 @@ export function StudioShell({
               fitOnMount={initialGraph.nodes.length > 0}
               comments={comments}
               commentMode={tool === "comment"}
+              onSelectionChange={onSelectionChange}
             />
           </div>
         </ViewTransition>
@@ -1104,6 +1381,14 @@ export function StudioShell({
           onSearch={searchPanelLibrary}
         />
 
+        <AgentSidebar
+          open={agentOpen}
+          onClose={() => setAgentOpen(false)}
+          session={session}
+          taggedNode={taggedNode}
+          onClearTag={() => setTagDismissed(selectedNodes[0]?.id ?? null)}
+        />
+
         {/* Same name as the home screen's, so it stays put across the
             navigation rather than flickering out and back in. */}
         <ViewTransition name="studio-toolbar">
@@ -1127,30 +1412,43 @@ export function StudioShell({
 
         {/* Prompt bar, docked. The home screen holds the same bar centre-stage
             under this name, which is what lets it glide down into the dock
-            instead of one copy disappearing as another appears. */}
-        <div
-          className={cn(
-            "pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4",
-            "transition-[padding] duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-            // Recentre in what is left of the canvas instead of running under
-            // the panel.
-            libraryOpen && "sm:pr-[396px]",
-          )}
-        >
-          <div className="pointer-events-auto w-full max-w-[940px]">
-            <ViewTransition name="studio-prompt-bar" share="morph">
-              <div>
-                <PromptBar
-                  catalog={catalog}
-                  value={prompt}
-                  onChange={setPrompt}
-                  onGenerate={onGenerate}
-                  onAttach={() => canvas.current?.openFilePicker()}
-                />
-              </div>
-            </ViewTransition>
+            instead of one copy disappearing as another appears. Hidden while
+            the agent panel is open — the composer in there replaces it. */}
+        {!agentOpen && (
+          <div
+            className={cn(
+              "pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4",
+              "transition-[padding] duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+              // Recentre in what is left of the canvas instead of running under
+              // the panel.
+              libraryOpen && "sm:pr-[396px]",
+            )}
+          >
+            <div className="pointer-events-auto w-full max-w-[940px]">
+              <ViewTransition name="studio-prompt-bar" share="morph">
+                <div>
+                  <PromptBar
+                    catalog={catalog}
+                    value={prompt}
+                    onChange={setPrompt}
+                    onGenerate={onGenerate}
+                    onAttach={() => canvas.current?.openFilePicker()}
+                    busy={crafting ? "crafting" : false}
+                    attachments={barAttachments}
+                    onAttachFiles={stageFiles}
+                    onRemoveAttachment={(index) =>
+                      setBarFiles((current) => {
+                        const removed = current[index];
+                        if (removed) URL.revokeObjectURL(removed.url);
+                        return current.filter((_, i) => i !== index);
+                      })
+                    }
+                  />
+                </div>
+              </ViewTransition>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </TooltipProvider>
   );

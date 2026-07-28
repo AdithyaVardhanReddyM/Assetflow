@@ -8,6 +8,7 @@ import { fetchCatalog } from "@/lib/studio/catalog";
 import { parseGraph } from "@/lib/studio/graph";
 import { requireTenant } from "@/lib/studio/tenant";
 import { listComments } from "../comments";
+import { loadChat } from "../chat-actions";
 
 export const metadata = { title: "Canvas · Asset Flow" };
 
@@ -36,7 +37,7 @@ export default async function WorkflowCanvasPage({
   const who = await requireTenant();
   if (!who) notFound();
 
-  const [catalog, row, comments, query] = await Promise.all([
+  const [catalog, row, comments, chat, query] = await Promise.all([
     fetchCatalog(),
     db.query.workflows.findFirst({
       // Missing and not-yours resolve identically, matching the server
@@ -49,6 +50,9 @@ export default async function WorkflowCanvasPage({
     // Tenant-scoped in its own right, so a mismatched id yields an empty
     // thread list rather than someone else's notes.
     listComments(id),
+    // The agent thread, if this canvas has one — an open thread reopens the
+    // sidebar mid-conversation (the home screen's handoff arrives this way).
+    loadChat(id),
     searchParams,
   ]);
   if (!row) notFound();
@@ -69,6 +73,7 @@ export default async function WorkflowCanvasPage({
       initialComments={comments.ok ? comments.data : []}
       catalog={catalog}
       initialTool={tool && POINTER_TOOLS.has(tool) ? (tool as ToolId) : "move"}
+      initialChat={chat.ok ? chat.data : null}
     />
   );
 }

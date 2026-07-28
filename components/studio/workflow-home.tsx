@@ -15,7 +15,7 @@ import { ViewTransition } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { UserButton } from "@clerk/nextjs";
+import { UserButton, useAuth } from "@clerk/nextjs";
 import { FolderSimpleIcon, FrameCornersIcon } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -24,7 +24,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Catalog } from "@/lib/studio/catalog";
 import { DOT_COLOR, DOT_GAP, isCreateTool } from "@/lib/studio/node-ui";
+import type { AgentAttachment } from "@/lib/studio/agent/spec";
+import { uploadAsset } from "@/lib/studio/assets-client";
+import type { AssetPreview } from "@/lib/studio/graph";
 import { deleteWorkflow, startWorkflow, type WorkflowSeed } from "@/app/workflow/actions";
+import { startAgentChat } from "@/app/workflow/chat-actions";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,7 +41,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { LinkPendingIcon } from "./link-pending-icon";
 import { Toolbar, type ToolId } from "./toolbar";
-import { PromptBar, type PromptSpec } from "./prompt-bar";
+import {
+  PromptBar,
+  type PromptAttachment,
+  type PromptSpec,
+} from "./prompt-bar";
 import { WorkflowCards, type WorkflowCard } from "./workflow-cards";
 
 const EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
@@ -119,21 +127,143 @@ export function WorkflowHome({
     [open],
   );
 
+  const { getToken, userId } = useAuth();
+
+  /** Files staged on the bar. Assets are tenant-scoped, not workflow-scoped,
+   *  so they upload from here — before the canvas row even exists. */
+  const [barFiles, setBarFiles] = React.useState<{ file: File; url: string }[]>([]);
+  const [crafting, setCrafting] = React.useState(false);
+
+  const barAttachments = React.useMemo<PromptAttachment[]>(
+    () =>
+      barFiles.map((f) => ({
+        name: f.file.name,
+        previewUrl: f.file.type.startsWith("image/") ? f.url : null,
+      })),
+    [barFiles],
+  );
+
+  const uploadBarFiles = React.useCallback(async (): Promise<AgentAttachment[]> => {
+    if (!barFiles.length) return [];
+    const auth = {
+      token: await getToken().catch(() => null),
+      userId: userId ?? null,
+    };
+    const uploads = await Promise.all(barFiles.map((f) => uploadAsset(f.file, auth)));
+    if (uploads.some((a) => !a)) toast.error("Some attachments failed to upload.");
+    return uploads
+      .filter((a): a is AssetPreview => a !== null)
+      .map((a) => ({
+        assetId: a.id,
+        mediaType: a.mediaType,
+        modality: a.modality,
+        filename: a.filename,
+      }));
+  }, [barFiles, getToken, userId]);
+
   const onGenerate = React.useCallback(
-    (spec: PromptSpec) => {
+    async (spec: PromptSpec) => {
       const text = prompt.trim();
-      void open("prompt", {
-        tool: spec.modality,
+
+      // Agent: the row is created holding the first message, and the canvas
+      // opens straight into the conversation — same row-is-the-handoff rule
+      // as every other entry point.
+      if (spec.tab === "agent") {
+        if (!text && !barFiles.length) return;
+        if (pending) return;
+        setPending("prompt");
+        const attachments = await uploadBarFiles();
+        const result = await startAgentChat({ prompt: text, attachments });
+        if (!result.ok) {
+          toast.error(result.error);
+          setPending(null);
+          return;
+        }
+        router.push(`/workflow/${result.data.workflowId}`);
+        return;
+      }
+
+      // No brief: the classic single-seeded-node path.
+      if (!text) {
+        void open("prompt", {
+          tool: spec.modality,
+          // Only the identity travels: the server re-resolves it against the
+          // catalog rather than trusting a model shape off the wire.
+          model: spec.model
+            ? { provider: spec.model.provider, id: spec.model.id }
+            : undefined,
+          params: spec.params,
+        });
+        return;
+      }
+
+      // Quick chain: craft the prompts first ("Crafting…"), then let the
+      // seed build the whole chain server-side so reload/back land on it.
+      if (!spec.model) {
+        toast.error("Pick a model first.");
+        return;
+      }
+      setCrafting(true);
+      const attachments = await uploadBarFiles();
+      const aspect =
+        typeof spec.params?.aspect_ratio === "string"
+          ? spec.params.aspect_ratio
+          : undefined;
+      const needsStartFrame =
+        spec.modality === "video" &&
+        spec.model.accepts.some((a) => a.port === "init_image");
+      const needsEndFrame =
+        spec.modality === "video" &&
+        spec.model.accepts.some((a) => a.port === "end_frame");
+
+      let prompts = {
         prompt: text,
-        // Only the identity travels: the server re-resolves it against the
-        // catalog rather than trusting a model shape off the wire.
-        model: spec.model
-          ? { provider: spec.model.provider, id: spec.model.id }
-          : undefined,
-        params: spec.params,
+        startFramePrompt: null as string | null,
+        endFramePrompt: null as string | null,
+      };
+      try {
+        const res = await fetch("/api/agent/enhance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: spec.modality,
+            prompt: text,
+            aspect,
+            needsStartFrame,
+            needsEndFrame,
+          }),
+        });
+        if (res.ok) {
+          const body = (await res.json()) as {
+            prompt?: string;
+            videoPrompt?: string;
+            startFramePrompt?: string | null;
+            endFramePrompt?: string | null;
+          };
+          prompts = {
+            prompt: body.videoPrompt ?? body.prompt ?? text,
+            startFramePrompt: body.startFramePrompt ?? null,
+            endFramePrompt: body.endFramePrompt ?? null,
+          };
+        }
+      } catch {
+        // Crafting is an upgrade, not a gate — the raw prompt seeds instead.
+      }
+      setCrafting(false);
+
+      void open("prompt", {
+        prompt: text,
+        quick: {
+          mode: spec.modality,
+          model: { provider: spec.model.provider, id: spec.model.id },
+          params: spec.params,
+          count: spec.count,
+          prompts,
+          attachments,
+        },
       });
     },
-    [prompt, open],
+    [prompt, open, pending, barFiles, uploadBarFiles, router],
   );
 
   const visibleWorkflows = React.useMemo(
@@ -256,9 +386,26 @@ export function WorkflowHome({
                   catalog={catalog}
                   value={prompt}
                   onChange={setPrompt}
-                  onGenerate={onGenerate}
-                  busy={pending === "prompt"}
+                  onGenerate={(spec) => void onGenerate(spec)}
+                  busy={pending === "prompt" ? true : crafting ? "crafting" : false}
                   onAttach={() => void open("tool:upload", { tool: "upload" })}
+                  attachments={barAttachments}
+                  onAttachFiles={(files) =>
+                    setBarFiles((current) => [
+                      ...current,
+                      ...files.map((file) => ({
+                        file,
+                        url: URL.createObjectURL(file),
+                      })),
+                    ])
+                  }
+                  onRemoveAttachment={(index) =>
+                    setBarFiles((current) => {
+                      const removed = current[index];
+                      if (removed) URL.revokeObjectURL(removed.url);
+                      return current.filter((_, i) => i !== index);
+                    })
+                  }
                 />
               </div>
             </ViewTransition>

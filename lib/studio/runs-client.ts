@@ -82,7 +82,6 @@ export function buildRunGraph(
   scope: "node" | "chain",
   results: Record<string, NodeResult>,
 ): { ok: true; graph: Graph } | { ok: false; error: string } {
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const targets = new Map<string, string[]>();
   for (const e of graph.edges) {
     targets.set(e.source, [...(targets.get(e.source) ?? []), e.target]);
@@ -101,6 +100,31 @@ export function buildRunGraph(
       }
     }
   }
+
+  return completeScopedGraph(graph, scoped, results);
+}
+
+/**
+ * The whole point of an agent proposal is that it runs as ONE unit — every
+ * proposed node in a single run, so the backend planner sequences the video
+ * behind its start frame and the mix behind both. Same substitution rules as
+ * `buildRunGraph`; only how the scope was chosen differs.
+ */
+export function buildRunGraphForNodes(
+  graph: Graph,
+  nodeIds: string[],
+  results: Record<string, NodeResult>,
+): { ok: true; graph: Graph } | { ok: false; error: string } {
+  return completeScopedGraph(graph, new Set(nodeIds), results);
+}
+
+/** Closes a chosen scope over its inputs — see `buildRunGraph`'s doc comment. */
+function completeScopedGraph(
+  graph: Graph,
+  scoped: Set<string>,
+  results: Record<string, NodeResult>,
+): { ok: true; graph: Graph } | { ok: false; error: string } {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 
   const included = new Map<string, GraphNode>();
   for (const id of scoped) {

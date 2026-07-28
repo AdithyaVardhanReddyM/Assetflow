@@ -32,6 +32,12 @@ import {
   blueprintData,
   isCreateTool,
 } from "@/lib/studio/node-ui";
+import {
+  type QuickPrompts,
+  buildQuickImageGraph,
+  buildQuickVideoGraph,
+} from "@/lib/studio/agent/quick-graphs";
+import type { AgentAttachment } from "@/lib/studio/agent/spec";
 import { requireTenant } from "@/lib/studio/tenant";
 
 export type ActionResult<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -103,6 +109,19 @@ export type WorkflowSeed = {
   params?: Record<string, unknown>;
   /** Falls back to the opening words of the prompt, then "Untitled workflow". */
   name?: string;
+  /**
+   * The quick Image/Video chain: enhanced prompts crafted client-side, built
+   * into a whole graph here — the row is still the handoff, so a reload or a
+   * shared link reopens the same chain. Wins over `tool` when present.
+   */
+  quick?: {
+    mode: "image" | "video";
+    model: { provider: string; id: string };
+    params?: Record<string, unknown>;
+    count?: number;
+    prompts: QuickPrompts;
+    attachments: AgentAttachment[];
+  };
 };
 
 /** First few words of the prompt, so a canvas born from one isn't "Untitled". */
@@ -114,6 +133,38 @@ function nameFromPrompt(prompt: string | undefined): string | undefined {
 }
 
 async function seedGraph(seed: WorkflowSeed): Promise<Graph> {
+  if (seed.quick) {
+    const catalog = await fetchCatalog();
+    const model = findModel(catalog, seed.quick.model.provider, seed.quick.model.id);
+    if (!model) return EMPTY_GRAPH;
+    const built =
+      seed.quick.mode === "image"
+        ? buildQuickImageGraph(
+            catalog,
+            model,
+            seed.quick.prompts.prompt,
+            seed.quick.params ?? {},
+            Math.min(Math.max(seed.quick.count ?? 1, 1), 4),
+            seed.quick.attachments,
+          )
+        : buildQuickVideoGraph(
+            catalog,
+            model,
+            seed.quick.prompts,
+            seed.quick.params ?? {},
+            seed.quick.attachments,
+          );
+    if (!built.ok) return EMPTY_GRAPH;
+    // The builder normalizes to (0,0); centre the chain on the origin the same
+    // way a single seeded node is, so the canvas's fit-on-open frames it.
+    const dx = Math.round(built.size.w / 2);
+    const dy = Math.round(built.size.h / 2);
+    for (const node of built.graph.nodes) {
+      node.position = { x: node.position.x - dx, y: node.position.y - dy };
+    }
+    return built.graph;
+  }
+
   if (!seed.tool || !isCreateTool(seed.tool)) return EMPTY_GRAPH;
 
   const blueprint = NODE_BLUEPRINTS[seed.tool];

@@ -91,6 +91,11 @@ export type CanvasApi = {
    * it does not fit.
    */
   insertGraph: (graph: Graph, at?: { x: number; y: number }) => boolean;
+  /** Removes a set of nodes and their edges — how a rejected agent proposal
+   *  leaves the canvas. Ids that no longer exist are ignored. */
+  removeNodes: (ids: string[]) => void;
+  /** Merge a patch into one node's wire data — the agent's update_node. */
+  updateNodeData: (id: string, patch: Record<string, unknown>) => void;
   zoomIn: () => void;
   zoomOut: () => void;
   resetZoom: () => void;
@@ -141,6 +146,8 @@ export type CanvasProps = {
   comments: CommentsApi;
   /** The comment tool is up: a click on empty canvas drops a pin. */
   commentMode: boolean;
+  /** Reports the current node selection — the agent input's node-tag chip. */
+  onSelectionChange?: (ids: string[]) => void;
 };
 
 const MIN_ZOOM = 0.1;
@@ -171,6 +178,7 @@ function CanvasInner({
   fitOnMount,
   comments,
   commentMode,
+  onSelectionChange,
 }: CanvasProps) {
   const seed = React.useMemo(() => toFlow(initialGraph), [initialGraph]);
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>(seed.nodes);
@@ -376,6 +384,22 @@ function CanvasInner({
       onInteract();
     },
     [setNodes, onInteract],
+  );
+
+  const removeNodes = React.useCallback(
+    (ids: string[]) => {
+      if (!ids.length) return;
+      const drop = new Set(ids);
+      // Synchronously through the ref, so a replacement fragment placed in the
+      // same tick counts against the canvas as it is, not as it was.
+      nodesRef.current = nodesRef.current.filter((n) => !drop.has(n.id));
+      setNodes(nodesRef.current);
+      setEdges((current) =>
+        current.filter((e) => !drop.has(e.source) && !drop.has(e.target)),
+      );
+      onInteract();
+    },
+    [setNodes, setEdges, onInteract],
   );
 
   const pickFileFor = React.useCallback((id: string) => {
@@ -731,13 +755,15 @@ function CanvasInner({
       },
       addLibraryAsset,
       insertGraph,
+      removeNodes,
+      updateNodeData: updateNode,
       zoomIn: () => rf.zoomIn({ duration: 180 }),
       zoomOut: () => rf.zoomOut({ duration: 180 }),
       resetZoom: () => rf.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 220 }),
       fitView: () => rf.fitView({ duration: 260, padding: 0.25, maxZoom: 1 }),
       isEmpty: () => nodes.length === 0,
     }),
-    [placeNode, uploadFiles, addLibraryAsset, insertGraph, rf, nodes.length],
+    [placeNode, uploadFiles, addLibraryAsset, insertGraph, removeNodes, updateNode, rf, nodes.length],
   );
 
   // --- drag and drop ------------------------------------------------------
@@ -823,6 +849,11 @@ function CanvasInner({
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onSelectionChange={
+            onSelectionChange
+              ? ({ nodes: selected }) => onSelectionChange(selected.map((n) => n.id))
+              : undefined
+          }
           isValidConnection={isValidConnection}
           onMove={(_, viewport) => onZoomChange(viewport.zoom)}
           onNodeDragStop={onInteract}
