@@ -11,6 +11,11 @@
 import * as React from "react";
 
 import type { TakeEditSpec } from "@/lib/studio/camera-edit";
+import type {
+  CaptionCue,
+  CaptionPlacement,
+  Transcript,
+} from "@/lib/studio/captions";
 import type { Catalog } from "@/lib/studio/catalog";
 import type { AssetPreview, NodeGeneration } from "@/lib/studio/graph";
 import type { LayerizeResult } from "@/lib/studio/magic-text";
@@ -62,6 +67,29 @@ export type StudioContextValue = {
     image: Blob,
     baseAssetId: string,
   ) => Promise<boolean>;
+  /**
+   * Captions (the expand modal's caption tool, video takes only).
+   * `transcribeTake` runs ElevenLabs Scribe over one stored take and returns
+   * word-level timings (bills per call — the panel caches per asset);
+   * `burnTakeCaptions` renders approved cues into the file server-side and
+   * indexes the result as a generation of the node, landing in the carousel
+   * like a text edit does. `assetId` null means "this node's latest result" —
+   * the composition node's client state carries no asset id.
+   */
+  transcribeTake: (
+    nodeId: string,
+    assetId: string | null,
+  ) => Promise<{ ok: true; transcript: Transcript } | { ok: false; error: string }>;
+  burnTakeCaptions: (
+    nodeId: string,
+    assetId: string | null,
+    spec: { style: string; placement: CaptionPlacement; cues: CaptionCue[] },
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Strip a caption burn: deletes the burned generation and rolls the node
+   * back to the take beneath it. Only ever called on a `captioned` take.
+   */
+  removeCaptions: (nodeId: string, assetId: string) => Promise<boolean>;
   /**
    * Save a node's generated result to disk. Without `generation` this is the
    * node's latest result; with one (a carousel pick) it saves that take.

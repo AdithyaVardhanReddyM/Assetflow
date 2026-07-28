@@ -374,7 +374,7 @@ export function RelightPanel({
           type="button"
           disabled={busy}
           onClick={() => onGenerate(relightSpec(pose))}
-          className="flex h-9 w-full items-center justify-center gap-2 bg-primary text-[13px] font-semibold text-primary-foreground shadow-[0_10px_24px_-8px_oklch(0.75_0.16_85_/_0.9),inset_0_1px_0_rgba(255,255,255,0.5)] transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 disabled:hover:brightness-100"
+          className="flex h-9 w-full items-center justify-center gap-2 bg-primary text-[13px] font-semibold text-primary-foreground transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 disabled:hover:brightness-100"
         >
           <LightbulbIcon className="size-4" weight="fill" />
           {busy ? "Generating…" : "Generate"}

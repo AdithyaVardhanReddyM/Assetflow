@@ -1,17 +1,17 @@
 "use client";
 
 /**
- * Magic Text — the expand modal's Text tab.
+ * Magic Text — the edit studio's Text tool.
  *
- * Layerize breaks the displayed take into editable text blocks; the modal's
- * media pane becomes the editing stage (type straight onto the poster) while
- * the aside lists the blocks with their controls. Saving composites the base
- * image and the edited type back into a PNG and registers it as this node's
- * newest generation.
+ * Layerize breaks the displayed take into editable text blocks; the studio's
+ * canvas becomes the editing stage (type straight onto the poster) while the
+ * control panel lists the blocks with their controls. Saving composites the
+ * base image and the edited type back into a PNG and registers it as the
+ * node's newest generation.
  *
- * State lives in `useMagicText`, owned by the node component, because the two
- * surfaces it drives — stage and aside — sit in different corners of the
- * modal. The layerize result is cached per source asset: every call bills.
+ * State lives in `useMagicText`, owned by the studio page, because the two
+ * surfaces it drives — stage and panel — sit in different corners of the
+ * screen. The layerize result is cached per source asset: every call bills.
  */
 
 import * as React from "react";
@@ -27,7 +27,6 @@ import {
   loadBlockFonts,
   loadFont,
 } from "@/lib/studio/magic-text";
-import { useStudio } from "../studio-context";
 
 type Phase =
   | { name: "idle" }
@@ -60,18 +59,37 @@ export type MagicTextApi = {
   save: () => void;
 };
 
+/**
+ * What a Magic Text host must provide — the studio page and the canvas wire
+ * these differently (direct API calls vs the shell's state-advancing
+ * handlers), so the hook takes them rather than reaching for a context.
+ */
+export type MagicTextServices = {
+  layerizeAsset: (
+    assetId: string,
+  ) => Promise<{ ok: true; result: LayerizeResult } | { ok: false; error: string }>;
+  fetchAssetBlob: (assetId: string) => Promise<Blob | null>;
+  registerTextEdit: (
+    nodeId: string,
+    image: Blob,
+    baseAssetId: string,
+  ) => Promise<boolean>;
+};
+
 export function useMagicText({
   assetId,
   nodeId,
+  services,
   onSaved,
 }: {
-  /** The displayed take being edited; null when the tab shouldn't offer. */
+  /** The displayed take being edited; null when the tool shouldn't offer. */
   assetId: string | null;
   nodeId: string;
-  /** Called after the edit lands in the carousel — closes the modal. */
+  services: MagicTextServices;
+  /** Called after the edit lands as the node's newest generation. */
   onSaved: () => void;
 }): MagicTextApi {
-  const { layerizeAsset, fetchAssetBlob, registerTextEdit } = useStudio();
+  const { layerizeAsset, fetchAssetBlob, registerTextEdit } = services;
 
   const [phase, setPhase] = React.useState<Phase>({ name: "idle" });
   const [result, setResult] = React.useState<LayerizeResult | null>(null);
@@ -183,6 +201,8 @@ export function useMagicText({
     if (!result || !blocks || saving) return;
     setSaving(true);
     void (async () => {
+      /** Whether the edit reached `onSaved` — see the release below. */
+      let handedOff = false;
       try {
         const baseBlob = await fetchAssetBlob(result.baseAssetId);
         if (!baseBlob) {
@@ -209,9 +229,14 @@ export function useMagicText({
           toast.error("The edit could not be saved.");
           return;
         }
+        handedOff = true;
         onSaved();
       } finally {
-        setSaving(false);
+        // Only a save that failed releases the button. A successful one hands
+        // off to the host, which leaves for the canvas — and the navigation
+        // outlives this callback, so releasing would flash the button back to
+        // "Save to node" on a screen that is already on its way out.
+        if (!handedOff) setSaving(false);
       }
     })();
   }, [blocks, fetchAssetBlob, nodeId, onSaved, registerTextEdit, result, saving]);
@@ -819,7 +844,7 @@ export function MagicTextPanel({ api }: { api: MagicTextApi }) {
           type="button"
           disabled={api.saving || !api.dirty}
           onClick={api.save}
-          className="flex h-9 w-full items-center justify-center gap-2 bg-primary text-[13px] font-semibold text-primary-foreground shadow-[0_10px_24px_-8px_oklch(0.75_0.16_85_/_0.9),inset_0_1px_0_rgba(255,255,255,0.5)] transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 disabled:hover:brightness-100"
+          className="flex h-9 w-full items-center justify-center gap-2 bg-primary text-[13px] font-semibold text-primary-foreground transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 disabled:hover:brightness-100"
         >
           <TextTIcon className="size-4" weight="bold" />
           {api.saving ? "Saving…" : "Save to node"}

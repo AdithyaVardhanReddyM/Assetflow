@@ -43,6 +43,9 @@ def serialize_generation(asset: Asset, *, node_id: str) -> dict[str, Any]:
         "width": asset.width,
         "height": asset.height,
         "created_at": asset.created_at.isoformat() if asset.created_at else None,
+        # A caption burn is a take you strip, not one you caption again — the
+        # modal swaps its Captions section on this.
+        "captioned": (asset.asset_metadata or {}).get("source") == "captions.burn",
     }
 
 

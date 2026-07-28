@@ -252,6 +252,7 @@ export async function fetchWorkflowResults(
         width: number | null;
         height: number | null;
         created_at: string | null;
+        captioned?: boolean;
       }[];
     };
     const out: Record<string, NodeGeneration[]> = {};
@@ -265,6 +266,7 @@ export async function fetchWorkflowResults(
         width: r.width,
         height: r.height,
         createdAt: r.created_at,
+        captioned: Boolean(r.captioned),
       });
     }
     return out;

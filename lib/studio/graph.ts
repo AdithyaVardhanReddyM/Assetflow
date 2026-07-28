@@ -257,6 +257,8 @@ export type NodeGeneration = {
   width?: number | null;
   height?: number | null;
   createdAt?: string | null;
+  /** This take is a caption burn — it gets "remove captions", never "add". */
+  captioned?: boolean;
 };
 
 /** Mirrors the step statuses the run events carry. */

@@ -27,7 +27,13 @@ export default async function WorkflowCanvasPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ tool?: string | string[] }>;
+  searchParams: Promise<{
+    tool?: string | string[];
+    /** A run the edit studio just started under `node` — the shell attaches
+     *  to its event stream so the node arrives already generating. */
+    run?: string | string[];
+    node?: string | string[];
+  }>;
 }) {
   const { id } = await params;
   // Postgres rejects a malformed uuid as a syntax error rather than an empty
@@ -65,6 +71,13 @@ export default async function WorkflowCanvasPage({
 
   const tool = Array.isArray(query.tool) ? query.tool[0] : query.tool;
 
+  const runId = Array.isArray(query.run) ? query.run[0] : query.run;
+  const runNode = Array.isArray(query.node) ? query.node[0] : query.node;
+  const resume =
+    runId && UUID.test(runId) && runNode && graph.nodes.some((n) => n.id === runNode)
+      ? { runId, nodeId: runNode }
+      : null;
+
   return (
     <StudioShell
       workflowId={row.id}
@@ -74,6 +87,7 @@ export default async function WorkflowCanvasPage({
       catalog={catalog}
       initialTool={tool && POINTER_TOOLS.has(tool) ? (tool as ToolId) : "move"}
       initialChat={chat.ok ? chat.data : null}
+      initialResume={resume}
     />
   );
 }

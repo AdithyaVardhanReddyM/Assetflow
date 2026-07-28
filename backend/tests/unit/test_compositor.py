@@ -83,6 +83,15 @@ def with_audio(monkeypatch, present: bool) -> None:
     )
 
 
+def with_lengths(monkeypatch, by_path: dict[str, float]) -> None:
+    """Override the one-second stub for clips named by a path substring."""
+
+    def probe(self, path: str) -> float:
+        return next((secs for frag, secs in by_path.items() if frag in path), 1.0)
+
+    monkeypatch.setattr(TrackCompositor, "_duration", probe)
+
+
 VIDEO = chained("video/mp4", "file:///v.mp4")
 AUDIO_1 = chained("audio/mpeg", "file:///a1.mp3")
 AUDIO_2 = chained("audio/mpeg", "file:///a2.mp3")
@@ -248,6 +257,60 @@ def test_a_single_shot_that_starts_late_is_still_an_edit(captured, monkeypatch):
     cmd = captured[0]
     assert cmd[cmd.index("-c:v") + 1] == "libx264"
     assert "overlay" in filter_graph(cmd)
+
+
+def test_sound_outrunning_the_picture_extends_the_render(captured, monkeypatch):
+    """Eight seconds of music under a four-second shot is an eight-second
+    composition that goes black at four — the way any editor would cut it —
+    not a four-second one with the music lopped off at the last frame."""
+    with_audio(monkeypatch, False)
+    with_lengths(monkeypatch, {"v.mp4": 4.0, "a1.mp3": 8.0})
+    TrackCompositor().generate(
+        step(inputs=[VIDEO, AUDIO_1], edit=edit(vtrack(clip()), atrack(clip())))
+    )
+    cmd = captured[0]
+    assert cmd[cmd.index("-t") + 1] == "8.000"
+    # A single shot at zero would normally be copied; here it has to be laid
+    # onto a canvas that outlasts it, so the tail can be black.
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    graph = filter_graph(cmd)
+    assert "color=c=black:s=640x360:r=30:d=8.000[bg]" in graph
+    # Without `eof_action=pass` the render would stop with the shot's last
+    # frame instead of falling back to the black canvas underneath it.
+    assert "overlay=eof_action=pass" in graph
+
+
+def test_a_delayed_clip_extends_the_render_by_its_offset(captured, monkeypatch):
+    with_audio(monkeypatch, False)
+    with_lengths(monkeypatch, {"v.mp4": 4.0, "a1.mp3": 3.0})
+    TrackCompositor().generate(
+        step(
+            inputs=[VIDEO, AUDIO_1],
+            edit=edit(vtrack(clip()), atrack(clip(start=2.0))),
+        )
+    )
+    cmd = captured[0]
+    assert cmd[cmd.index("-t") + 1] == "5.000"
+
+
+def test_a_muted_track_does_not_stretch_the_render(captured, monkeypatch):
+    """A muted clip is dropped from the mix, so it must not lengthen the file
+    either — that would append black under nothing at all."""
+    with_audio(monkeypatch, False)
+    with_lengths(monkeypatch, {"v.mp4": 4.0, "a1.mp3": 30.0, "a2.mp3": 2.0})
+    TrackCompositor().generate(
+        step(
+            inputs=[VIDEO, AUDIO_1, AUDIO_2],
+            edit=edit(
+                vtrack(clip()),
+                atrack(clip(), gain=0.0),
+                atrack(clip(), gain=1.0, track_id="a2"),
+            ),
+        )
+    )
+    cmd = captured[0]
+    assert cmd[cmd.index("-t") + 1] == "4.000"
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
 
 
 def test_render_length_follows_the_picture_not_the_ruler(captured, monkeypatch):
@@ -471,3 +534,31 @@ def test_renders_two_shots_cut_one_after_the_other(tmp_path: Path):
     # to be about 2.5s — proof the offset survived into the render rather than
     # every clip collapsing onto zero.
     assert 2.3 <= probe_duration(written) <= 3.2
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_renders_black_under_a_music_bed_that_outlives_the_shot(tmp_path: Path):
+    """The bug this guards: a 1s shot under a 3s bed used to render 1s with the
+    bed cut off. It must render 3s, black from the first second on."""
+    video = make_video(tmp_path / "v.mp4", 1)
+    tone = make_tone(tmp_path / "a.wav", 440, seconds=3)
+
+    result = TrackCompositor(output_dir=tmp_path).generate(
+        Step(
+            provider="track-compositor",
+            model="mux",
+            params={
+                "edit": {
+                    "timeline_sec": 8.0,
+                    "tracks": [vtrack(clip(label="Shot")), atrack(clip(label="Music"))],
+                }
+            },
+            inputs=[
+                Asset(url=video.as_uri(), media_type="video/mp4"),
+                Asset(url=tone.as_uri(), media_type="audio/wav"),
+            ],
+        )
+    )
+
+    written = Path(result.assets[0].url.removeprefix("file://"))
+    assert 2.8 <= probe_duration(written) <= 3.3

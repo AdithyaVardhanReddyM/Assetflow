@@ -315,6 +315,13 @@ body {
   }
   html {
     @apply font-sans;
+    /* Panning the canvas with two fingers is a horizontal wheel, and the studio
+       shell is `fixed inset-0` so the root never scrolls sideways to absorb it.
+       Left alone, the browser reads the swipe as a back/forward gesture and
+       navigates out of the workflow mid-pan. Nothing in the app scrolls the
+       root horizontally, so only the history gesture is lost — vertical
+       rubber-banding stays. */
+    overscroll-behavior-x: none;
   }
 }
 
@@ -491,4 +498,30 @@ body {
     color: #8a8271;
     background: none;
   }
+}
+
+/* Caption fonts — the same TTFs libass burns with (public/fonts/captions), so
+   the editor's live overlay and the rendered video use identical metrics. */
+@font-face {
+  font-family: "Archivo Black";
+  src: url("/fonts/captions/ArchivoBlack-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Poppins SemiBold";
+  src: url("/fonts/captions/Poppins-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Serif Caption";
+  src: url("/fonts/captions/InstrumentSerif-Italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
 }

@@ -99,8 +99,13 @@ class _Input:
     path: str
     kind: str
     start: float
+    duration: float
     gain: float
     label: str
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
 
 
 class TrackCompositor(SyncProvider):
@@ -233,6 +238,10 @@ class TrackCompositor(SyncProvider):
                         path=path,
                         kind=kind,
                         start=_start(clip),
+                        # Probed once here: how long each clip runs decides both
+                        # how long the composition is and whether the picture
+                        # can be stream-copied.
+                        duration=self._duration(path),
                         gain=gain,
                         label=str(clip.get("label") or kind),
                     )
@@ -241,33 +250,43 @@ class TrackCompositor(SyncProvider):
 
     # -- filter graph -------------------------------------------------------
 
-    def _picture_end(self, shots: list[_Input], fallback: float) -> float:
-        """When the last shot finishes.
+    def _track_ends(self, inputs: list[_Input]) -> tuple[float, float]:
+        """When the picture finishes, and when the last audible clip does.
 
-        This — not the node's timeline — is how long the render lasts. A
-        timeline is a ruler the user scrolls; exporting all of it would append
-        however much black they happened to have scrolled to.
+        Muted clips are excluded from the sound end for the same reason
+        `_audio_chain` drops them: they are not in the render, so they must not
+        stretch it either.
         """
-        end = max((s.start + self._duration(s.path) for s in shots), default=0.0)
-        return end if end > SILENCE_EPSILON else fallback
+        picture = max((i.end for i in inputs if i.kind == "video"), default=0.0)
+        sound = max(
+            (i.end for i in inputs if i.kind == "audio" and i.gain > SILENCE_EPSILON),
+            default=0.0,
+        )
+        return picture, sound
 
     def _video_chain(
-        self, shots: list[_Input], picture_end: float
+        self, shots: list[_Input], content_end: float, sound_outruns: bool
     ) -> tuple[list[str], str, bool]:
         """Filters for the picture track, its output label, and whether the
         video had to be re-encoded.
 
-        A single shot starting at zero is the ordinary case and is left exactly
-        as it is — copied, not re-encoded. Anything else is an edit: the shots
-        are laid onto a black canvas at their own start times, so a gap between
-        two of them is black rather than a frozen frame.
+        A single shot starting at zero, with nothing playing after it ends, is
+        the ordinary case and is left exactly as it is — copied, not
+        re-encoded. Anything else is an edit: the shots are laid onto a black
+        canvas spanning the whole composition, at their own start times. A gap
+        between two of them is black rather than a frozen frame, and so is the
+        tail under a music bed that outlives the last shot.
         """
-        if len(shots) == 1 and shots[0].start <= SILENCE_EPSILON:
+        if (
+            len(shots) == 1
+            and shots[0].start <= SILENCE_EPSILON
+            and not sound_outruns
+        ):
             return [], "0:v", False
 
         width, height = self._frame_size(shots[0].path)
         chains = [
-            f"color=c=black:s={width}x{height}:r={_FALLBACK_FPS}:d={picture_end:.3f}[bg]"
+            f"color=c=black:s={width}x{height}:r={_FALLBACK_FPS}:d={content_end:.3f}[bg]"
         ]
         current = "[bg]"
         for position, shot in enumerate(shots):
@@ -345,8 +364,21 @@ class TrackCompositor(SyncProvider):
                 error_code=ProviderErrorCode.INVALID_INPUT,
             )
 
-        picture_end = self._picture_end(shots, fallback=timeline)
-        video_chains, video_label, reencoded = self._video_chain(shots, picture_end)
+        # A composition lasts as long as its longest track, the way it does in
+        # any editor: eight seconds of music under a four-second shot is an
+        # eight-second video that goes black at four, not a four-second one
+        # with the music cut off. The node's timeline is only the fallback for
+        # when nothing probed — it is a ruler the user scrolls, and exporting
+        # all of it would append however much black they scrolled to.
+        picture_end, sound_end = self._track_ends(inputs)
+        content_end = max(picture_end, sound_end)
+        if content_end <= SILENCE_EPSILON:
+            content_end = timeline
+        sound_outruns = sound_end > picture_end + SILENCE_EPSILON
+
+        video_chains, video_label, reencoded = self._video_chain(
+            shots, content_end, sound_outruns
+        )
         audio_chains, audio_label = self._audio_chain(inputs)
         if audio_label is None:
             raise ProviderError(
@@ -367,13 +399,13 @@ class TrackCompositor(SyncProvider):
             *(["-c:v", "libx264", "-pix_fmt", "yuv420p"] if reencoded else ["-c:v", "copy"]),
             "-c:a", "aac",
             "-b:a", "192k",
-            # The composition is as long as its picture track, on both paths.
-            # `-t` trims a music bed that outruns the shot, and audio shorter
-            # than the picture simply ends early inside it. This must never be
+            # The composition is as long as its longest track, on both paths.
+            # `-t` caps it there so a clip cannot run past the edit, and
+            # anything shorter simply ends early inside it. This must never be
             # `-shortest`: that ends the file at the *shortest* stream, so one
             # second of audio under a four-second shot cut the render to one
             # second.
-            "-t", f"{picture_end:.3f}",
+            "-t", f"{content_end:.3f}",
             "-y",
             str(out_path),
         ]
@@ -384,6 +416,7 @@ class TrackCompositor(SyncProvider):
             shots=len(shots),
             audio_clips=sum(1 for i in inputs if i.kind == "audio"),
             picture_end_sec=round(picture_end, 2),
+            content_end_sec=round(content_end, 2),
             reencoded=reencoded,
         )
         run_ffmpeg(cmd, timeout=self._timeout)

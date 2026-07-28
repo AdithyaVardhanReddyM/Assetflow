@@ -138,6 +138,10 @@ export type CanvasProps = {
   onLayerize: StudioContextValue["layerizeAsset"];
   onFetchAssetBlob: StudioContextValue["fetchAssetBlob"];
   onRegisterTextEdit: StudioContextValue["registerTextEdit"];
+  /** Captions plumbing — see the context for what each one does. */
+  onTranscribeTake: StudioContextValue["transcribeTake"];
+  onBurnTakeCaptions: StudioContextValue["burnTakeCaptions"];
+  onRemoveCaptions: StudioContextValue["removeCaptions"];
   /** Save a node's generated result (a specific carousel take, or latest) to disk. */
   onDownload: (nodeId: string, generation?: NodeGeneration) => void;
   panMode: boolean;
@@ -173,6 +177,9 @@ function CanvasInner({
   onLayerize,
   onFetchAssetBlob,
   onRegisterTextEdit,
+  onTranscribeTake,
+  onBurnTakeCaptions,
+  onRemoveCaptions,
   onDownload,
   panMode,
   fitOnMount,
@@ -793,6 +800,22 @@ function CanvasInner({
     [uploadFiles, addLibraryAsset, onCanvasFull, rf],
   );
 
+  /**
+   * React Flow invokes the selection handler from an effect keyed on the
+   * handler itself, so an inline wrapper — a new identity every render —
+   * re-fires it on every render even when the selection is unchanged. With a
+   * handler that sets state in response, that is an infinite render loop
+   * ("maximum update depth exceeded"), so the wrapper must be memoized.
+   */
+  const handleSelectionChange = React.useMemo(
+    () =>
+      onSelectionChange
+        ? ({ nodes: selected }: { nodes: StudioNode[]; edges: StudioEdge[] }) =>
+            onSelectionChange(selected.map((n) => n.id))
+        : undefined,
+    [onSelectionChange],
+  );
+
   const studio = React.useMemo(
     () => ({
       catalog,
@@ -807,6 +830,9 @@ function CanvasInner({
       layerizeAsset: onLayerize,
       fetchAssetBlob: onFetchAssetBlob,
       registerTextEdit: onRegisterTextEdit,
+      transcribeTake: onTranscribeTake,
+      burnTakeCaptions: onBurnTakeCaptions,
+      removeCaptions: onRemoveCaptions,
       downloadNode: onDownload,
       refreshMedia: onRefreshMedia,
     }),
@@ -823,6 +849,9 @@ function CanvasInner({
       onLayerize,
       onFetchAssetBlob,
       onRegisterTextEdit,
+      onTranscribeTake,
+      onBurnTakeCaptions,
+      onRemoveCaptions,
       onDownload,
       onRefreshMedia,
     ],
@@ -849,11 +878,7 @@ function CanvasInner({
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onSelectionChange={
-            onSelectionChange
-              ? ({ nodes: selected }) => onSelectionChange(selected.map((n) => n.id))
-              : undefined
-          }
+          onSelectionChange={handleSelectionChange}
           isValidConnection={isValidConnection}
           onMove={(_, viewport) => onZoomChange(viewport.zoom)}
           onNodeDragStop={onInteract}

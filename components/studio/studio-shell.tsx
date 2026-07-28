@@ -59,7 +59,14 @@ import {
   requestLayerize,
 } from "@/lib/studio/magic-text";
 import {
+  burnCaptions as burnCaptionsApi,
+  transcribeAsset as transcribeAssetApi,
+  type CaptionCue,
+  type CaptionPlacement,
+} from "@/lib/studio/captions";
+import {
   type LibraryAsset,
+  deleteLibraryAsset,
   fetchLibrary,
   fetchReconstruction,
   searchLibrary,
@@ -105,6 +112,7 @@ export function StudioShell({
   catalog,
   initialTool = "move",
   initialChat = null,
+  initialResume = null,
 }: {
   workflowId: string;
   initialName: string;
@@ -117,6 +125,9 @@ export function StudioShell({
    *  conversation is mid-flight (often the home screen's handoff) — the
    *  sidebar opens on it immediately. */
   initialChat?: LoadedChat | null;
+  /** A run the edit studio started just before navigating here — the shell
+   *  attaches to its event stream so the node arrives already generating. */
+  initialResume?: { runId: string; nodeId: string } | null;
 }) {
   const router = useRouter();
 
@@ -787,6 +798,38 @@ export function StudioShell({
     [authFor, flushSave, onRunEvent, workflowId],
   );
 
+  /**
+   * A run the edit studio started just before handing us the page: flip its
+   * node to pending and attach to the event stream, exactly as if the run had
+   * been launched here. The stream replays from seq 0, so nothing that
+   * happened during the navigation is missed. Runs once — the params are
+   * stripped from the URL so a reload doesn't look like a fresh handoff, and
+   * the pending state lands before hydration's fetch resolves, which is what
+   * keeps history from claiming the well mid-run ("a live run outranks
+   * history").
+   */
+  const resumedFor = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!authLoaded || !initialResume || resumedFor.current === initialResume.runId)
+      return;
+    resumedFor.current = initialResume.runId;
+    const { runId, nodeId } = initialResume;
+
+    setRunStates((current) => ({ ...current, [nodeId]: { status: "pending" } }));
+    const url = new URL(window.location.href);
+    url.searchParams.delete("run");
+    url.searchParams.delete("node");
+    window.history.replaceState(null, "", url);
+
+    void (async () => {
+      const auth = await authFor();
+      activeStream.current?.();
+      activeStream.current = streamRun(runId, auth, (event) =>
+        onRunEvent(runId, event),
+      );
+    })();
+  }, [authFor, authLoaded, initialResume, onRunEvent]);
+
   const onRun = React.useCallback(
     async (nodeId: string, scope: "node" | "chain") => {
       const built = buildRunGraph(graphRef.current, nodeId, scope, nodeResults.current);
@@ -891,7 +934,19 @@ export function StudioShell({
     onFinished: () => setAgentOpen(false),
   });
 
+  /** The ids last announced — React Flow may re-announce an unchanged
+   *  selection (its listener re-fires whenever the handler prop's identity
+   *  changes), and answering that with fresh state would re-render, which
+   *  re-announces: the "maximum update depth" loop. */
+  const lastSelection = React.useRef<string[]>([]);
   const onSelectionChange = React.useCallback((ids: string[]) => {
+    if (
+      lastSelection.current.length === ids.length &&
+      lastSelection.current.every((v, i) => v === ids[i])
+    ) {
+      return;
+    }
+    lastSelection.current = ids;
     setTagDismissed(null);
     setSelectedNodes(
       ids.flatMap((id) => {
@@ -1139,6 +1194,137 @@ export function StudioShell({
     [authFor, prependGeneration, workflowId],
   );
 
+  // --- captions -----------------------------------------------------------
+
+  /**
+   * A caption call's target: the take the modal shows, or — when the node's
+   * client state carries no asset id (the composition render) — the node's
+   * latest known result.
+   */
+  const resolveTakeAsset = React.useCallback(
+    (nodeId: string, assetId: string | null): string | null =>
+      assetId ?? nodeResults.current[nodeId]?.assetId ?? null,
+    [],
+  );
+
+  const onTranscribeTake = React.useCallback(
+    async (nodeId: string, assetId: string | null) => {
+      const target = resolveTakeAsset(nodeId, assetId);
+      if (!target) {
+        return {
+          ok: false as const,
+          error: "This take isn't stored yet — run the node first.",
+        };
+      }
+      return transcribeAssetApi(target, await authFor());
+    },
+    [authFor, resolveTakeAsset],
+  );
+
+  /**
+   * Burn approved cues into the take and land the result as this node's
+   * newest generation — same advance as a registered text edit: no run is in
+   * flight, so the carousel and result state move directly.
+   */
+  const onBurnTakeCaptions = React.useCallback(
+    async (
+      nodeId: string,
+      assetId: string | null,
+      spec: { style: string; placement: CaptionPlacement; cues: CaptionCue[] },
+    ) => {
+      const target = resolveTakeAsset(nodeId, assetId);
+      if (!target) {
+        return {
+          ok: false as const,
+          error: "This take isn't stored yet — run the node first.",
+        };
+      }
+      const result = await burnCaptionsApi(
+        target,
+        { workflowId, nodeId, ...spec },
+        await authFor(),
+      );
+      if (!result.ok) return result;
+
+      const { burned } = result;
+      prependGeneration(nodeId, {
+        assetId: burned.assetId,
+        url: burned.url,
+        mediaType: "video/mp4",
+        width: burned.width,
+        height: burned.height,
+        createdAt: burned.createdAt,
+        captioned: true,
+      });
+      nodeResults.current[nodeId] = {
+        assetId: burned.assetId,
+        url: burned.url,
+        mediaType: "video/mp4",
+        text: null,
+      };
+      setRunStates((current) => ({
+        ...current,
+        [nodeId]: {
+          status: "succeeded",
+          progress: 1,
+          output: { url: burned.url, mediaType: "video/mp4", text: null },
+        },
+      }));
+      toast.success("Captions burned onto the video.");
+      return { ok: true as const };
+    },
+    [authFor, resolveTakeAsset, prependGeneration, workflowId],
+  );
+
+  /**
+   * Strip a caption burn: delete the burned generation and roll the node back
+   * to the take beneath it (the original, uncaptioned video). Deleting the
+   * index row is the library's own delete semantic — B2 bytes and manifests
+   * stay, so the provenance record of the burn survives its removal.
+   */
+  const onRemoveCaptions = React.useCallback(
+    async (nodeId: string, assetId: string): Promise<boolean> => {
+      const ok = await deleteLibraryAsset(assetId, await authFor());
+      if (!ok) {
+        toast.error("Could not remove the captions.");
+        return false;
+      }
+
+      const remaining = (historiesRef.current[nodeId] ?? []).filter(
+        (g) => g.assetId !== assetId,
+      );
+      setHistories((current) => ({ ...current, [nodeId]: remaining }));
+
+      const next = remaining[0] ?? null;
+      if (next) {
+        nodeResults.current[nodeId] = {
+          assetId: next.assetId,
+          url: next.url,
+          mediaType: next.mediaType,
+          text: next.text ?? null,
+        };
+      } else {
+        delete nodeResults.current[nodeId];
+      }
+      setRunStates((current) => {
+        const nextStates = { ...current };
+        if (next) {
+          nextStates[nodeId] = {
+            status: "succeeded",
+            progress: 1,
+            output: { url: next.url, mediaType: next.mediaType, text: next.text ?? null },
+          };
+        } else {
+          delete nextStates[nodeId];
+        }
+        return nextStates;
+      });
+      toast.success("Captions removed.");
+      return true;
+    },
+    [authFor],
+  );
+
   /** Save a node's result to disk — the Download button on result nodes. */
   const onDownload = React.useCallback(
     async (nodeId: string, generation?: NodeGeneration) => {
@@ -1318,6 +1504,9 @@ export function StudioShell({
               onLayerize={onLayerize}
               onFetchAssetBlob={onFetchAssetBlob}
               onRegisterTextEdit={onRegisterTextEdit}
+              onTranscribeTake={onTranscribeTake}
+              onBurnTakeCaptions={onBurnTakeCaptions}
+              onRemoveCaptions={onRemoveCaptions}
               panMode={tool === "hand"}
               fitOnMount={initialGraph.nodes.length > 0}
               comments={comments}

@@ -117,11 +117,20 @@ def create_app() -> FastAPI:
 
     install_error_handlers(app)
 
-    from app.routers import assets, catalog, events, health, magic_text, runs, workflows
+    from app.routers import (
+        assets,
+        captions,
+        catalog,
+        events,
+        health,
+        magic_text,
+        runs,
+        workflows,
+    )
 
     # magic_text before assets: both share the /v1/assets prefix, and its
     # literal /text-edits route must win over the assets router's /{asset_id}.
-    for module in (health, catalog, workflows, runs, events, magic_text, assets):
+    for module in (health, catalog, workflows, runs, events, magic_text, captions, assets):
         app.include_router(module.router)
 
     # Local storage mode serves generated media straight off disk so the canvas

@@ -75,9 +75,18 @@ import {
 import {
   DetailChip,
   ExpandButton,
-  ExpandDetails,
+  ExpandHeader,
+  ExpandSectionLabel,
   NodeExpandModal,
+  timeAgo,
 } from "./expand-modal";
+import {
+  type CaptionsState,
+  CaptionedTakeSection,
+  CaptionsSection,
+  CaptionStage,
+  useCaptions,
+} from "./captions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -117,6 +126,12 @@ type SourceInfo = {
 function formatTime(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds));
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/** "video/mp4" → "MP4", for the container chip. Null when nothing said. */
+function outputFormat(mediaType: string | null | undefined): string | null {
+  const subtype = mediaType?.split("/")[1]?.split(";")[0];
+  return subtype ? subtype.toUpperCase() : null;
 }
 
 // --- real media lengths ----------------------------------------------------
@@ -380,6 +395,26 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
     !isRunBusy(data.run) && data.run?.status === "succeeded" && data.run.output?.url
       ? { url: data.run.output.url, isVideo: true }
       : null;
+  // Only the newest generation carries a timestamp, so date the render from it
+  // — and only when it is the render on show, rather than stamping an older
+  // mix with the time of a newer one.
+  const newest = data.history?.[0];
+  const renderedWhen =
+    newest && newest.url && newest.url === data.run?.output?.url
+      ? timeAgo(newest.createdAt)
+      : null;
+
+  // Captions on the rendered mix. The asset id is only known when the newest
+  // generation is the render on show; otherwise the shell resolves the node's
+  // latest stored result. A render that is itself a caption burn only offers
+  // removal, and the hook stays inert for it.
+  const newestOnShow = Boolean(newest?.url && newest.url === data.run?.output?.url);
+  const captionedTake = Boolean(expandMedia && newestOnShow && newest?.captioned);
+  const captions = useCaptions({
+    nodeId: id,
+    assetId: newestOnShow ? (newest?.assetId ?? null) : null,
+    takeKey: !captionedTake ? (expandMedia?.url ?? null) : null,
+  });
 
   return (
     <div style={{ width: NODE_WIDTH }}>
@@ -536,17 +571,27 @@ export function CompositionNode({ id, data, selected }: NodeProps<StudioNode>) {
       </div>
 
       {expandMedia ? (
-        <NodeExpandModal open={expanded} onOpenChange={setExpanded} media={expandMedia}>
-          <ExpandDetails
-            heading="Composition"
+        <NodeExpandModal
+          open={expanded}
+          onOpenChange={setExpanded}
+          media={expandMedia}
+          stage={
+            captions.stageActive ? (
+              <CaptionStage url={expandMedia.url} captions={captions} />
+            ) : undefined
+          }
+        >
+          <CompositionSheet
+            tracks={tracks}
+            describe={describe}
+            durations={liveDurations}
+            timeline={timeline}
+            when={renderedWhen}
+            format={outputFormat(data.run?.output?.mediaType)}
             onDownload={() => downloadNode(id)}
-            chips={
-              <>
-                <DetailChip>
-                  {clipCount} {clipCount === 1 ? "clip" : "clips"}
-                </DetailChip>
-                <DetailChip>{formatTime(timeline)}</DetailChip>
-              </>
+            captions={captions}
+            captionedTake={
+              captionedTake ? { nodeId: id, assetId: newest?.assetId ?? null } : null
             }
           />
         </NodeExpandModal>
@@ -1003,6 +1048,192 @@ function TrackRow({
           <span className="size-5 shrink-0" />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The expand modal's left column — the edit decision list for the render on
+ * the right.
+ *
+ * A generate node can fill this space with its prompt; a composition has no
+ * prompt, and the two chips it used to show left the column all but empty. What
+ * it does have is an edit: which source landed on which track, where it starts,
+ * how long it runs, and how loud. That is also the only place to *read* the mix
+ * — the node's own strip draws proportion, not numbers.
+ *
+ * Read-only on purpose. The timeline on the node is where an edit is changed;
+ * duplicating drag targets here would give the same clip two truths.
+ */
+function CompositionSheet({
+  tracks,
+  describe,
+  durations,
+  timeline,
+  when,
+  format,
+  onDownload,
+  captions,
+  captionedTake,
+}: {
+  /** Picture track first, then the audio tracks — the node's own order. */
+  tracks: CompositeTrack[];
+  describe: (sourceId: string) => SourceInfo;
+  /** Live measured lengths, keyed by source node — see `liveDurations`. */
+  durations: Map<string, number>;
+  timeline: number;
+  /** How long ago this render finished, when it can be dated. */
+  when: string | null;
+  /** Container of the rendered file — "MP4". */
+  format: string | null;
+  onDownload: () => void;
+  /** The caption flow for the rendered mix — state lives on the node. */
+  captions: CaptionsState;
+  /** Set when the render on show is a caption burn — the panel offers removal. */
+  captionedTake: { nodeId: string; assetId: string | null } | null;
+}) {
+  const clipCount = tracks.reduce((n, t) => n + t.clips.length, 0);
+  const audioCount = tracks.length - 1;
+  const silent = tracks
+    .slice(1)
+    .every((t) => t.muted || t.gain === 0 || !t.clips.length);
+
+  return (
+    <div className="flex min-h-full flex-col">
+      <ExpandHeader
+        title="Composition"
+        meta={[when, format].filter(Boolean).join(" · ") || null}
+        onDownload={onDownload}
+      />
+
+      <div className="flex flex-wrap gap-1.5 px-5 pb-1">
+        <DetailChip>
+          {clipCount} {clipCount === 1 ? "clip" : "clips"}
+        </DetailChip>
+        <DetailChip>{formatTime(timeline)}</DetailChip>
+        <DetailChip>
+          {audioCount} audio {audioCount === 1 ? "track" : "tracks"}
+        </DetailChip>
+        {silent ? <DetailChip>No audible track</DetailChip> : null}
+      </div>
+
+      <ExpandSectionLabel>Captions</ExpandSectionLabel>
+      <div className="px-5 pb-4">
+        {captionedTake ? (
+          <CaptionedTakeSection
+            nodeId={captionedTake.nodeId}
+            assetId={captionedTake.assetId}
+          />
+        ) : (
+          <CaptionsSection captions={captions} />
+        )}
+      </div>
+
+      <ExpandSectionLabel>Edit</ExpandSectionLabel>
+
+      <div className="border-t border-[#1f211c]/10">
+        {tracks.map((track, i) => (
+          <SheetTrack
+            key={track.id}
+            track={track}
+            isVideo={i === 0}
+            name={i === 0 ? "Video track" : track.label || `Track ${i}`}
+            describe={describe}
+            durations={durations}
+          />
+        ))}
+      </div>
+
+      <p className="mt-auto px-5 py-4 text-[11px] leading-4 text-[#a09a88]">
+        Mixed to one {format ?? "MP4"} with ffmpeg. Drag a clip on the node to move
+        it in time.
+      </p>
+    </div>
+  );
+}
+
+/** One track in the sheet: its level, then its clips in playing order. */
+function SheetTrack({
+  track,
+  isVideo,
+  name,
+  describe,
+  durations,
+}: {
+  track: CompositeTrack;
+  isVideo: boolean;
+  name: string;
+  describe: (sourceId: string) => SourceInfo;
+  durations: Map<string, number>;
+}) {
+  // Time order, not connection order — the column is read as a running order,
+  // and the stored array is whatever sequence the edges arrived in.
+  const clips = [...track.clips].sort((a, b) => a.start_sec - b.start_sec);
+  const percent = Math.round(track.gain * 100);
+
+  return (
+    <div className="border-b border-[#1f211c]/10 px-5 py-3">
+      <div className="flex items-center gap-2">
+        {isVideo ? (
+          <VideoGenIcon className="size-3.5 shrink-0 text-[#8a8271]" />
+        ) : track.muted ? (
+          <SpeakerSimpleSlashIcon
+            className="size-3.5 shrink-0 text-[#a94848]"
+            weight="fill"
+          />
+        ) : (
+          <SpeakerSimpleHighIcon className="size-3.5 shrink-0 text-[#8a8271]" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-[#1f211c]">
+          {name}
+        </span>
+        {isVideo ? null : (
+          <span
+            className={cn(
+              "shrink-0 text-[10px] tabular-nums",
+              track.muted ? "text-[#a94848]" : "text-[#a09a88]",
+            )}
+          >
+            {track.muted ? "muted" : `${percent}%`}
+          </span>
+        )}
+      </div>
+
+      {clips.length ? (
+        <ul className="mt-2 space-y-1">
+          {clips.map((clip) => {
+            const info = describe(clip.source);
+            const accent = accentFor(info.accent);
+            // The live number, for the same reason the strip uses it: the
+            // stored stamp is only what was believed at connect time.
+            const duration =
+              durations.get(clip.source) ?? clip.duration_sec ?? ASSUMED_CLIP_SEC;
+            return (
+              <li
+                key={clip.source}
+                className={cn("flex items-center gap-2", track.muted && "opacity-45")}
+              >
+                <span
+                  className="grid size-5 shrink-0 place-items-center"
+                  style={{ background: accent.soft, color: accent.ink }}
+                >
+                  <info.Icon className="size-3" />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[11.5px] text-[#4c4a41]">
+                  {info.label}
+                </span>
+                <span className="shrink-0 text-[10.5px] tabular-nums text-[#a09a88]">
+                  {formatTime(clip.start_sec)}–{formatTime(clip.start_sec + duration)}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="mt-1.5 text-[11px] text-[#c4bdab]">
+          {isVideo ? "No video connected" : "Nothing connected"}
+        </p>
+      )}
     </div>
   );
 }

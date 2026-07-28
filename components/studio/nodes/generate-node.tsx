@@ -9,6 +9,8 @@
  */
 
 import * as React from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   type NodeProps,
   useNodeConnections,
@@ -16,15 +18,12 @@ import {
   useUpdateNodeInternals,
 } from "@xyflow/react";
 import {
-  CameraIcon,
   CaretDownIcon,
   CopyIcon,
   DownloadSimpleIcon,
-  InfoIcon,
-  LightbulbIcon,
   LightningIcon,
   PlayIcon,
-  TextTIcon,
+  SlidersHorizontalIcon,
   TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -48,6 +47,7 @@ import type {
 } from "@/lib/studio/graph";
 import { CHARACTER_SHEET_RATIO, accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
+import { LinkGlyph } from "../link-glyph";
 import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
 import { ModelLogo } from "../model-logos";
 import { ModelMenuList } from "../model-menu";
@@ -87,18 +87,16 @@ import {
   ExpandButton,
   ExpandDetails,
   ExpandHeader,
-  ExpandSection,
   ExpandSectionLabel,
   NodeExpandModal,
   timeAgo,
 } from "./expand-modal";
 import {
-  CAMERA_EDIT_MODEL,
-  CAMERA_EDIT_PROVIDER,
-} from "@/lib/studio/camera-edit";
-import { CameraAnglesPanel } from "./camera-angles";
-import { MagicTextPanel, MagicTextStage, useMagicText } from "./magic-text";
-import { RelightPanel } from "./relight";
+  CaptionedTakeSection,
+  CaptionsSection,
+  CaptionStage,
+  useCaptions,
+} from "./captions";
 
 /**
  * The card is inscribed in this box: a landscape node is MAX_WIDTH across, a
@@ -296,7 +294,6 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
     deleteNode,
     duplicateNode,
     runFrom,
-    editTake,
     downloadNode,
     refreshMedia,
   } = useStudio();
@@ -461,31 +458,35 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
         }
       : null;
   /**
-   * Which aside section is open, or null with the column collapsed to its
-   * headers. The edit tools (Camera, Text, Light) need a *stored* still — the
-   * take travels back in by asset id, so a mid-run URL with no asset row
-   * behind it (or a video) has nothing to edit. A character sheet's take is
-   * three fixed panels, not a scene to orbit — no edit tools.
+   * The take the edit studio would open on. The granular tools (camera,
+   * relight, magic text) need a *stored* still — the take travels to the
+   * studio by asset id, so a mid-run URL with no asset row behind it (or a
+   * video) has nothing to edit. A character sheet's take is three fixed
+   * panels, not a scene to orbit — no studio.
    */
-  const [expandPanel, setExpandPanel] = React.useState<
-    "details" | "camera" | "text" | "light" | null
-  >("details");
-  const togglePanel = React.useCallback(
-    (panel: "details" | "camera" | "text" | "light") =>
-      setExpandPanel((current) => (current === panel ? null : panel)),
-    [],
-  );
   const editAssetId =
     expandMedia && !expandMedia.isVideo && modality === "image" && !preset
       ? (displayed?.assetId ?? null)
       : null;
 
-  const magic = useMagicText({
-    assetId: editAssetId,
+  // The canvas lives at /workflow/{id}; the studio is a sub-route of it, so
+  // the workflow id doesn't need to travel through the node context.
+  const pathname = usePathname();
+  const studioHref = editAssetId
+    ? `${pathname}/studio/${id}?asset=${editAssetId}`
+    : null;
+
+  // Captions target the displayed video take; inert for stills and audio —
+  // and for a take that is itself a caption burn, which only offers removal.
+  // A mid-run URL with no asset row behind it can't be transcribed — the
+  // shell resolves null to the node's latest *stored* result.
+  const videoTake = expandMedia?.isVideo ? expandMedia : null;
+  const captionedTake = Boolean(videoTake && displayed?.captioned);
+  const captions = useCaptions({
     nodeId: id,
-    // The new take arrives in the carousel as the newest generation; closing
-    // lets the node show it (the pin resets to newest on arrival).
-    onSaved: () => setExpanded(false),
+    assetId: displayed?.assetId ?? null,
+    takeKey:
+      videoTake && !captionedTake ? (displayed?.assetId ?? videoTake.url) : null,
   });
 
   // A model driven entirely by its ports has nothing to describe, so it shows
@@ -828,23 +829,9 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           open={expanded}
           onOpenChange={setExpanded}
           media={expandMedia}
-          // The Text tool edits on the image itself, so its editor takes over
-          // the media pane once a layerize has landed.
           stage={
-            expandPanel === "text" &&
-            editAssetId &&
-            magic.phase.name === "ready" &&
-            magic.result &&
-            magic.blocks ? (
-              <MagicTextStage
-                result={magic.result}
-                blocks={magic.blocks}
-                revision={magic.revision}
-                selectedId={magic.selectedId}
-                onSelect={magic.select}
-                onTextChange={magic.setText}
-                onPatchBlock={magic.patchBlock}
-              />
+            videoTake && captions.stageActive ? (
+              <CaptionStage url={videoTake.url} captions={captions} />
             ) : undefined
           }
         >
@@ -888,8 +875,35 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             const when = timeAgo(displayed?.createdAt);
             const size = dims ? `${dims.w} × ${dims.h} px` : null;
 
+            // A video take's one tool is captions; stills route to the studio.
+            if (videoTake) {
+              return (
+                <div className="flex min-h-full flex-col">
+                  <ExpandHeader
+                    title={kindLabel}
+                    meta={[when, size].filter(Boolean).join(" · ") || null}
+                    onDownload={() => downloadNode(id, displayed ?? undefined)}
+                  />
+                  <ExpandSectionLabel>Captions</ExpandSectionLabel>
+                  <div className="px-5 pb-5">
+                    {captionedTake ? (
+                      <CaptionedTakeSection
+                        nodeId={id}
+                        assetId={displayed?.assetId ?? null}
+                      />
+                    ) : (
+                      <CaptionsSection captions={captions} />
+                    )}
+                  </div>
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <ExpandDetails footer={size} {...detailProps} />
+                  </div>
+                </div>
+              );
+            }
+
             // Nothing to edit — the fact sheet is the whole column.
-            if (!editAssetId) {
+            if (!studioHref) {
               return (
                 <ExpandDetails
                   heading={when ?? kindLabel}
@@ -900,7 +914,6 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
               );
             }
 
-            const layers = magic.phase.name === "ready" ? magic.blocks : null;
             return (
               <div className="flex min-h-full flex-col">
                 <ExpandHeader
@@ -909,76 +922,23 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
                   onDownload={() => downloadNode(id, displayed ?? undefined)}
                 />
 
-                <ExpandSection
-                  first
-                  icon={<InfoIcon className="size-4" />}
-                  label="Details"
-                  hint="Prompt, model and settings"
-                  open={expandPanel === "details"}
-                  onToggle={() => togglePanel("details")}
-                >
-                  <ExpandDetails padded={false} {...detailProps} />
-                </ExpandSection>
+                {/* The granular edits — camera, relight, magic text — live on
+                    their own page now, where the take gets a whole canvas. */}
+                <div className="px-5 pb-5">
+                  <Link
+                    href={studioHref}
+                    className="flex h-9 w-full items-center justify-center gap-2 bg-primary text-[13px] font-semibold text-primary-foreground transition-all duration-150 hover:brightness-[0.97] active:scale-[0.97]"
+                  >
+                    <LinkGlyph className="size-4">
+                      <SlidersHorizontalIcon className="size-4" weight="bold" />
+                    </LinkGlyph>
+                    Open in Studio
+                  </Link>
+                </div>
 
-                <ExpandSectionLabel>Edit this take</ExpandSectionLabel>
-
-                <ExpandSection
-                  icon={<CameraIcon className="size-4" weight="fill" />}
-                  label="Camera"
-                  hint="Orbit and reframe the shot"
-                  open={expandPanel === "camera"}
-                  onToggle={() => togglePanel("camera")}
-                >
-                  <CameraAnglesPanel
-                    imageUrl={expandMedia.url}
-                    busy={isRunBusy(data.run)}
-                    onGenerate={(params) => {
-                      // The modal steps aside so the node can wear the run:
-                      // the beam while it generates, then the new take — which
-                      // arrives in the carousel like any other generation.
-                      setExpanded(false);
-                      editTake(id, editAssetId, {
-                        provider: CAMERA_EDIT_PROVIDER,
-                        model: CAMERA_EDIT_MODEL,
-                        prompt: null,
-                        params,
-                      });
-                    }}
-                  />
-                </ExpandSection>
-
-                <ExpandSection
-                  icon={<TextTIcon className="size-4" weight="bold" />}
-                  label="Text"
-                  hint={
-                    layers
-                      ? `${layers.length} editable ${layers.length === 1 ? "layer" : "layers"}`
-                      : "Retype the type, keep the look"
-                  }
-                  dot={magic.dirty}
-                  open={expandPanel === "text"}
-                  onToggle={() => togglePanel("text")}
-                >
-                  <MagicTextPanel api={magic} />
-                </ExpandSection>
-
-                <ExpandSection
-                  icon={<LightbulbIcon className="size-4" weight="fill" />}
-                  label="Light"
-                  hint="Move and color the light"
-                  open={expandPanel === "light"}
-                  onToggle={() => togglePanel("light")}
-                >
-                  <RelightPanel
-                    imageUrl={expandMedia.url}
-                    busy={isRunBusy(data.run)}
-                    onGenerate={(spec) => {
-                      // Same exit as the camera tool: the node wears the run.
-                      setExpanded(false);
-                      editTake(id, editAssetId, spec);
-                    }}
-                  />
-                </ExpandSection>
+                <div className="flex min-h-0 flex-1 flex-col border-t border-[#1f211c]/10">
+                  <ExpandDetails footer={size} {...detailProps} />
+                </div>
               </div>
             );
           })()}
