@@ -33,7 +33,7 @@ export const NODE_KINDS = [
 
 export type NodeKind = (typeof NODE_KINDS)[number];
 
-export type Modality = "image" | "video" | "audio" | "text";
+export type Modality = "image" | "video" | "audio" | "text" | "3d";
 
 export type Position = { x: number; y: number };
 

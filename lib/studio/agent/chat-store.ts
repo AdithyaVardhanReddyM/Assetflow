@@ -162,6 +162,17 @@ export async function upsertMessages(
     });
 }
 
+/**
+ * Drop a thread's transcript. A workflow has one chat row for its whole life,
+ * so "a new conversation" is this: the row stays (and keeps its identity for
+ * in-flight flushes), the messages go.
+ */
+export async function clearMessages(tenantId: string, chatId: string): Promise<void> {
+  await db
+    .delete(chatMessages)
+    .where(and(eq(chatMessages.chatId, chatId), eq(chatMessages.tenantId, tenantId)));
+}
+
 export async function updateChat(
   tenantId: string,
   chatId: string,

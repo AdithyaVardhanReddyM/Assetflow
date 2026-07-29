@@ -90,7 +90,7 @@ class UploadNodeData(BaseModel):
 class GenerateNodeData(BaseModel):
     provider: str = "mock"
     model: str = "mock-video-v1"
-    modality: Literal["video", "image", "audio", "text"] = "video"
+    modality: Literal["video", "image", "audio", "text", "3d"] = "video"
     prompt: str | None = Field(default=None, max_length=4000)
     params: dict[str, Any] = Field(default_factory=dict)
     fallback_models: list[str] = Field(default_factory=list, max_length=3)

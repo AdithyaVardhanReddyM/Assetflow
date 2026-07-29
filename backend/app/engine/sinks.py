@@ -36,6 +36,7 @@ _EXT_BY_MEDIA_TYPE = {
     "audio/mpeg": ".mp3",
     "audio/wav": ".wav",
     "text/plain": ".txt",
+    "model/gltf-binary": ".glb",
 }
 
 _SAMPLE_BY_MODALITY = {
@@ -43,6 +44,7 @@ _SAMPLE_BY_MODALITY = {
     "image": "sample.png",
     "audio": "sample.mp3",
     "text": "sample.txt",
+    "3d": "sample.glb",
 }
 
 
@@ -128,9 +130,10 @@ def _modality_of(media_type: str | None) -> str:
     if not media_type:
         return "image"
     top = media_type.split("/")[0]
-    return {"video": "video", "audio": "audio", "image": "image", "text": "text"}.get(
-        top, "image"
-    )
+    return {
+        "video": "video", "audio": "audio", "image": "image", "text": "text",
+        "model": "3d",
+    }.get(top, "image")
 
 
 def _fetch(url: str, dest: Path) -> bool:
@@ -237,7 +240,7 @@ def _materialize(
         # The provider's declared media type may not match the stand-in bytes.
         record.media_type = {
             "video": "video/mp4", "audio": "audio/mpeg", "image": "image/png",
-            "text": "text/plain",
+            "text": "text/plain", "3d": "model/gltf-binary",
         }.get(record.modality, record.media_type)
         dest = dest.with_suffix(_EXT_BY_MEDIA_TYPE.get(record.media_type, dest.suffix))
         if not dest.exists():

@@ -24,6 +24,7 @@ class Modality(StrEnum):
     VIDEO = "video"
     AUDIO = "audio"
     TEXT = "text"
+    THREE_D = "3d"
 
 
 ParamType = Literal["number", "integer", "string", "boolean", "enum"]
@@ -102,6 +103,11 @@ class ModelDescriptor(BaseModel):
     # False for models driven entirely by their input ports. The compiler skips
     # its NO_PROMPT check and the canvas drops the prompt box for these.
     requires_prompt: bool = True
+    # True for models whose prompt is one of two exclusive drivers rather than
+    # a requirement: Hunyuan 3D takes prompt XOR image_url, so the compiler
+    # accepts an empty prompt whenever an input port is wired. The prompt box
+    # stays visible — it drives the run when nothing is connected.
+    prompt_optional_with_inputs: bool = False
     # True keeps the model out of the /catalog/models response — and so out of
     # every canvas picker — while it stays compilable and runnable. The mock
     # image model lives this way: the compiler suite builds on it (a keyless,

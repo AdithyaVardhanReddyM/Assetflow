@@ -16,6 +16,7 @@ import { z } from "zod";
 export const SPEC_TOOLS = [
   "image",
   "video",
+  "threed",
   "lipsync",
   "music",
   "speech",
@@ -51,7 +52,10 @@ export const GraphSpecNodeSchema = z.object({
     .string()
     .uuid()
     .optional()
-    .describe("Only for tool='upload': the id of a user-attached asset."),
+    .describe(
+      "Only for tool='upload': the id of a user-attached asset, or of a " +
+        "source-chain input when remixing.",
+    ),
   duration_locked: z
     .boolean()
     .optional()
@@ -129,6 +133,19 @@ export type AgentAttachment = {
   mediaType: string;
   modality: string;
   filename: string | null;
+};
+
+/**
+ * What a Remix carries into the conversation: which asset is being remixed,
+ * and the source chain's own input assets — the compiler must be able to
+ * resolve them when the agent re-emits their upload nodes, even though the
+ * user never attached them in this thread. Travels on the first remix
+ * message's metadata, so a reloaded transcript remixes the same thing.
+ */
+export type RemixSource = {
+  assetId: string;
+  filename: string | null;
+  sourceAssets: AgentAttachment[];
 };
 
 /** Bookkeeping for a placed-but-undecided proposal, persisted on the chat row. */

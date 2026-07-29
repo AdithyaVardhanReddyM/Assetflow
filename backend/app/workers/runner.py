@@ -358,8 +358,9 @@ def _step_timeout(plan: ExecutionPlan, settings: Any) -> float:
     GenBlaze takes one timeout for every step in a pipeline, so a plan
     containing any video step gets the video ceiling — video jobs routinely
     run past 600s while an image would have failed long before either limit.
+    3D rides the same ceiling: Hunyuan runs are minutes, not seconds.
     """
-    if any(s.modality == "video" for s in plan.steps):
+    if any(s.modality in ("video", "3d") for s in plan.steps):
         return float(settings.video_step_timeout_seconds)
     return float(settings.step_timeout_seconds)
 
@@ -432,53 +433,96 @@ async def _stream_pipeline(
             if done:
                 return
 
+    # The sink is deliberately NOT handed to the pipeline. GenBlaze calls
+    # sink.write_run() synchronously inside its finalize step, and with lazy
+    # transfer that call downloads every asset and uploads it to B2 — minutes
+    # of blocking I/O on the event loop of the process that also serves the
+    # API. Seen live: heartbeats stopped, the lease expired, SSE froze, the
+    # tail of the event stream (including the terminal event) was never
+    # persisted, and a second worker re-ran — and re-paid for — the whole
+    # pipeline. `_flush_sink` runs the same transfer in a thread instead,
+    # after the stream has fully drained.
     persist_task = asyncio.create_task(persist())
     try:
-        stream = pipeline.astream(
-            sink=sink,
-            timeout=_step_timeout(plan, settings),
-            fail_fast=False,
-            raise_on_failure=False,
-            pipeline_timeout=_pipeline_timeout(plan, settings),
-        )
+        try:
+            stream = pipeline.astream(
+                timeout=_step_timeout(plan, settings),
+                fail_fast=False,
+                raise_on_failure=False,
+                pipeline_timeout=_pipeline_timeout(plan, settings),
+            )
 
-        async for event in stream:
-            captured = extract_result(event) or captured
-            wire = mapper.map(event)
-            if wire is None:
-                continue
-            # Heartbeats keep proxies warm but are not real progress; persisting
-            # them would bloat the event log for no UI benefit.
-            if wire.type == "node.progress" and wire.payload.get("is_heartbeat"):
-                continue
-            # GenBlaze's terminal event arrives before we have persisted assets
-            # or computed the final status. `_finish` emits the authoritative
-            # one; emitting both would put two terminal events in the log, and
-            # since consumers close the stream on the first one they would
-            # disconnect before ever seeing the assets.
-            if wire.type in ("run.completed", "run.failed"):
-                continue
-            # A staged run is several pipelines; only the first may announce.
-            if suppress_run_started and wire.type == "run.started":
-                continue
-            if wire.type == "node.progress" and not _worth_persisting(
-                wire.payload, last_progress
-            ):
-                continue
-            if wire.type == "node.completed":
-                _sign_event_assets(wire.payload)
-            buffer.put_nowait(wire)
+            async for event in stream:
+                captured = extract_result(event) or captured
+                wire = mapper.map(event)
+                if wire is None:
+                    continue
+                # Heartbeats keep proxies warm but are not real progress;
+                # persisting them would bloat the event log for no UI benefit.
+                if wire.type == "node.progress" and wire.payload.get("is_heartbeat"):
+                    continue
+                # GenBlaze's terminal event arrives before we have persisted
+                # assets or computed the final status. `_finish` emits the
+                # authoritative one; emitting both would put two terminal
+                # events in the log, and since consumers close the stream on
+                # the first one they would disconnect before ever seeing the
+                # assets.
+                if wire.type in ("run.completed", "run.failed"):
+                    continue
+                # A staged run is several pipelines; only the first announces.
+                if suppress_run_started and wire.type == "run.started":
+                    continue
+                if wire.type == "node.progress" and not _worth_persisting(
+                    wire.payload, last_progress
+                ):
+                    continue
+                if wire.type == "node.completed":
+                    _sign_event_assets(wire.payload)
+                buffer.put_nowait(wire)
+        finally:
+            buffer.put_nowait(None)
+            # Every buffered event lands before the caller emits terminal state —
+            # and a writer crash surfaces here rather than being swallowed.
+            await persist_task
+        await _flush_sink(sink, captured, run_id)
     finally:
-        buffer.put_nowait(None)
-        # Every buffered event lands before the caller emits terminal state —
-        # and a writer crash surfaces here rather than being swallowed.
-        await persist_task
         if sink is not None:
-            # The pipeline normally closes the sink itself; this covers the
-            # paths where we never reached run(). Best-effort by design.
+            # The pipeline never sees the sink, so closing it is always ours.
+            # Cheap with lazy transfer: no eager pool to drain, just clients.
             with contextlib.suppress(Exception):
                 sink.close()
     return captured
+
+
+# Ceiling on the post-run B2 transfer, generous because it moves every asset
+# the run produced. It bounds the wait, not the work: on expiry the upload
+# thread keeps going, but the run finishes with provider URLs instead of
+# hanging forever.
+_SINK_WRITE_TIMEOUT = 600.0
+
+
+async def _flush_sink(sink: Any | None, captured: Any, run_id: uuid.UUID) -> None:
+    """Run the sink's lazy transfer (downloads + B2 uploads + manifest) in a
+    worker thread. A failure downgrades the run to provider URLs — logged,
+    never raised, because the generated media already exists and the step
+    statuses are already true."""
+    if sink is None or captured is None:
+        return
+    run_obj = getattr(captured, "run", None)
+    manifest = getattr(captured, "manifest", None)
+    if run_obj is None or manifest is None:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(sink.write_run, run_obj, manifest),
+            timeout=_SINK_WRITE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 - archival must not fail the run
+        log.warning(
+            "storage.write_run_failed",
+            run_id=str(run_id),
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 _PROGRESS_PERSIST_INTERVAL = 2.5
@@ -691,6 +735,22 @@ async def _finish(
 
     step_rows = await session.execute(select(RunStep).where(RunStep.run_id == run.id))
     steps = list(step_rows.scalars())
+
+    # A terminal run must leave no step mid-flight. A row still pending or
+    # running here lost its terminal event (worker restart, severed stream) —
+    # without this, the canvas shows that node "generating" forever.
+    for step in steps:
+        if step.status not in (StepStatus.PENDING, StepStatus.RUNNING):
+            continue
+        payload = {
+            "node_id": step.node_id,
+            "error": "The run ended before this step reported a result.",
+            "error_code": "not_reported",
+        }
+        await writer.append("node.failed", payload, step.node_id, commit=False)
+        await _apply_step_update(session, run.id, "node.failed", payload)
+        step.status = StepStatus.FAILED
+
     failed = [s for s in steps if s.status is StepStatus.FAILED]
     succeeded = [s for s in steps if s.status is StepStatus.SUCCEEDED]
 

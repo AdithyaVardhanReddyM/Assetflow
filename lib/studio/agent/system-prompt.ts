@@ -6,10 +6,10 @@
  */
 
 import type { Catalog, CatalogModel } from "../catalog";
-import type { Graph } from "../graph";
-import type { GenerateNodeData } from "../graph";
+import type { Graph, GraphNode } from "../graph";
+import type { GenerateNodeData, UploadNodeData } from "../graph";
 import { NODE_BLUEPRINTS } from "../node-ui";
-import type { AgentAttachment } from "./spec";
+import type { AgentAttachment, RemixSource } from "./spec";
 
 const RULES = `You are the workflow-builder agent for AssetFlow, a node-graph studio for
 generative media. You build graphs of nodes on the user's canvas; you never
@@ -24,6 +24,8 @@ generate media yourself.
 - music / speech: audio generation (a soundtrack; a voiceover from a script).
 - composition: mixes video + audio tracks into one clip. Ports: video, audio.
 - lipsync: re-drives a mouth in a video from an audio track.
+- threed: a 3D model (GLB) from its prompt, or from ONE image wired to
+  image_ref (the prompt is ignored then — the API takes one or the other).
 - llm, sfx, character: allowed but reach for them ONLY when the request
   genuinely calls for them — most marketing graphs need none of the three.
 
@@ -114,16 +116,127 @@ export function attachmentsDigest(attachments: AgentAttachment[]): string {
   ].join("\n");
 }
 
+/**
+ * The wire graph's node, named as the spec tool the agent would use to place
+ * it — the reverse of what `compileGraphSpec` resolves. Null for kinds the
+ * spec cannot express (`output`), which the digest simply omits.
+ */
+function toolForNode(node: GraphNode, catalog: Catalog): string | null {
+  if (node.kind === "input.upload") return "upload";
+  if (node.kind === "input.text") return "text";
+  if (node.kind === "transform.composite") return "composition";
+  if (node.kind !== "generate") return null;
+  const data = node.data as unknown as GenerateNodeData;
+  if (data.preset === "character_sheet") return "character";
+  const model = catalog.models.find((m) => m.id === data.model);
+  const role = model?.role ?? undefined;
+  const modality = model?.modality ?? data.modality;
+  for (const [tool, blueprint] of Object.entries(NODE_BLUEPRINTS)) {
+    if (blueprint.kind !== "generate" || blueprint.preset) continue;
+    if (blueprint.modality === modality && blueprint.role === role) return tool;
+  }
+  // A model the catalog no longer carries: fall back on the plain tool for
+  // the stored modality so the chain stays expressible.
+  return { image: "image", video: "video", audio: "music", text: "llm", "3d": "threed" }[
+    modality
+  ] ?? null;
+}
+
+/** `src_1`-style local ids, valid for the spec's id regex and easy to echo. */
+function localIds(nodes: GraphNode[]): Map<string, string> {
+  return new Map(nodes.map((n, i) => [n.id, `src_${i + 1}`]));
+}
+
+/**
+ * The source chain behind a remix, rendered spec-style — the same vocabulary
+ * the agent proposes in, so mirroring it back is copying, not translation.
+ * Prompts are included in full: rewriting them is the whole job.
+ */
+export function remixDigest(
+  remix: RemixSource,
+  graph: Graph,
+  catalog: Catalog,
+): string {
+  const ids = localIds(graph.nodes);
+  const lines: string[] = [];
+  for (const node of graph.nodes) {
+    const tool = toolForNode(node, catalog);
+    if (!tool) continue;
+    const bits = [`id ${ids.get(node.id)}`, `tool ${tool}`];
+    if (node.kind === "generate") {
+      const data = node.data as unknown as GenerateNodeData;
+      bits.push(`model ${data.model}`);
+      if (data.params && Object.keys(data.params).length) {
+        bits.push(`params ${JSON.stringify(data.params)}`);
+      }
+      if (data.title) bits.push(`title "${data.title}"`);
+      if (data.prompt) bits.push(`prompt "${data.prompt}"`);
+    } else if (node.kind === "input.upload") {
+      const data = node.data as unknown as UploadNodeData;
+      const source = remix.sourceAssets.find((a) => a.assetId === data.asset_id);
+      bits.push(`asset_id ${data.asset_id ?? "missing"}`);
+      if (source) {
+        bits.push(`${source.modality} (${source.mediaType})`);
+        if (source.filename) bits.push(`"${source.filename}"`);
+      }
+    } else if (node.kind === "input.text") {
+      const text = String((node.data as { text?: unknown }).text ?? "");
+      bits.push(`prompt "${text}"`);
+    }
+    lines.push(`- ${bits.join(" · ")}`);
+  }
+
+  const edges = graph.edges
+    .filter((e) => ids.has(e.source) && ids.has(e.target))
+    .map((e) => {
+      const port = e.target_handle.startsWith("audio_") ? "audio" : e.target_handle;
+      return `- ${ids.get(e.source)} → ${ids.get(e.target)} (port: ${port})`;
+    });
+
+  const name = remix.filename ? `"${remix.filename}"` : "the selected asset";
+  return [
+    `## Remix (overrides the general flow)`,
+    `The user is REMIXING ${name}. The graph below is the exact chain that`,
+    `generated it. Your job: re-propose that chain, changed only as far as the`,
+    `user's request demands.`,
+    ``,
+    `Source nodes:`,
+    ...lines,
+    `Source edges:`,
+    ...(edges.length ? edges : ["- (none)"]),
+    ``,
+    `Remix rules:`,
+    `- Call propose_graph with the FULL chain: same structure, same models,`,
+    `  same params, verbatim — unless the user's request requires otherwise.`,
+    `  Never ask about aspect ratio; inherit it from the source params.`,
+    `- Rewrite generation prompts only as far as the remix demands; keep the`,
+    `  craft and specificity of the originals.`,
+    `- Reuse the source upload nodes by their asset_id. If the user attached a`,
+    `  new file, it REPLACES the source input it supersedes — wire it to the`,
+    `  same port, and drop the input it replaces. Use ask_user only when the`,
+    `  choice of which input it replaces is genuinely ambiguous.`,
+  ].join("\n");
+}
+
 export function buildSystemPrompt(input: {
   catalog: Catalog;
   graph: Graph;
   attachments: AgentAttachment[];
+  /** Present when the thread is remixing an asset; null graph = chain lost. */
+  remix?: { source: RemixSource; graph: Graph | null } | null;
 }): string {
   return [
     RULES,
     catalogDigest(input.catalog),
     graphDigest(input.graph),
     attachmentsDigest(input.attachments),
+    input.remix
+      ? input.remix.graph
+        ? remixDigest(input.remix.source, input.remix.graph, input.catalog)
+        : "## Remix\nThe user asked to remix an asset, but its source chain " +
+          "could not be loaded. Say so, and build the closest graph you can " +
+          "from their description instead."
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n");

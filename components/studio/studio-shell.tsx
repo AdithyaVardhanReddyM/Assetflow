@@ -50,7 +50,7 @@ import {
   buildQuickImageGraph,
   buildQuickVideoGraph,
 } from "@/lib/studio/agent/quick-graphs";
-import type { AgentAttachment } from "@/lib/studio/agent/spec";
+import type { AgentAttachment, RemixSource } from "@/lib/studio/agent/spec";
 import type { LoadedChat } from "@/app/workflow/chat-actions";
 import { type TakeEditSpec, buildTakeEditGraph } from "@/lib/studio/camera-edit";
 import {
@@ -888,6 +888,8 @@ export function StudioShell({
   /** Files staged on the bottom bar for the next agent/quick submit. */
   const [barFiles, setBarFiles] = React.useState<{ file: File; url: string }[]>([]);
   const [crafting, setCrafting] = React.useState(false);
+  /** A remix staged by the library panel, until its first message is sent. */
+  const [pendingRemix, setPendingRemix] = React.useState<RemixSource | null>(null);
 
   /** One combined run for a whole proposal — the backend sequences the steps. */
   const runSubgraph = React.useCallback(
@@ -916,14 +918,33 @@ export function StudioShell({
       graph: () => graphRef.current,
       insertGraph: (graph, at) => {
         setTouched(true);
-        return canvas.current?.insertGraph(graph, at) ?? false;
+        const placed = canvas.current?.insertGraph(graph, at) ?? false;
+        // A remix proposal re-emits the source chain's upload nodes, whose
+        // assets this canvas has never resolved — fetch their previews or
+        // they'd sit empty until a reload. Re-resolving a composer upload's
+        // id alongside them is a harmless merge of what's already there.
+        const uploadIds = placed
+          ? graph.nodes
+              .filter((n) => n.kind === "input.upload")
+              .map((n) => n.data.asset_id)
+              .filter((id): id is string => typeof id === "string")
+          : [];
+        if (uploadIds.length) {
+          void (async () => {
+            const resolved = await fetchAssetPreviews(uploadIds, await authFor());
+            if (Object.keys(resolved).length) {
+              setAssets((current) => ({ ...current, ...resolved }));
+            }
+          })();
+        }
+        return placed;
       },
       removeNodes: (ids) => canvas.current?.removeNodes(ids),
       updateNodeData: (id, patch) => canvas.current?.updateNodeData(id, patch),
       runSubgraph,
       upload: uploadTracked,
     }),
-    [runSubgraph, uploadTracked],
+    [runSubgraph, uploadTracked, authFor],
   );
 
   const session = useAgentSession({
@@ -931,7 +952,12 @@ export function StudioShell({
     catalog,
     initialChat,
     bridge,
-    onFinished: () => setAgentOpen(false),
+    onFinished: () => {
+      setAgentOpen(false);
+      setPendingRemix(null);
+    },
+    pendingRemix,
+    onRemixSent: () => setPendingRemix(null),
   });
 
   /** The ids last announced — React Flow may re-announce an unchanged
@@ -1340,7 +1366,7 @@ export function StudioShell({
       const ext =
         { "video/mp4": ".mp4", "image/png": ".png", "image/jpeg": ".jpg",
           "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/wav": ".wav",
-          "text/plain": ".txt" }[mediaType] ?? "";
+          "text/plain": ".txt", "model/gltf-binary": ".glb" }[mediaType] ?? "";
       const saved = await downloadResult(source, `${title}${ext}`, await authFor());
       if (!saved && !source.url) toast.error("Nothing downloadable on this node yet.");
     },
@@ -1354,6 +1380,7 @@ export function StudioShell({
   const [libraryAssets, setLibraryAssets] = React.useState<LibraryAsset[] | null>(null);
   const [libraryLoading, setLibraryLoading] = React.useState(false);
   const [reconstructing, setReconstructing] = React.useState<string | null>(null);
+  const [remixing, setRemixing] = React.useState<string | null>(null);
 
   const loadLibrary = React.useCallback(async () => {
     setLibraryLoading(true);
@@ -1478,6 +1505,79 @@ export function StudioShell({
     [authFor],
   );
 
+  /**
+   * Stage a remix: pull the chain behind the asset and hand it to the agent.
+   * The chain itself never touches the canvas here — the agent re-proposes it,
+   * reworked, through the normal proposal flow. What must be gathered now are
+   * the chain's own input assets, so the compiler can resolve the upload nodes
+   * the agent re-emits (and previews render the moment they place).
+   */
+  const { resetThread } = session;
+  const onRemix = React.useCallback(
+    async (asset: LibraryAsset) => {
+      setRemixing(asset.id);
+      const result = await fetchReconstruction(asset.id, await authFor());
+
+      if (!result.ok) {
+        setRemixing(null);
+        toast.error(
+          result.reason === "no_run"
+            ? "This one was uploaded, not generated — there's no chain to remix."
+            : result.reason === "too_large"
+              ? `That chain is ${result.nodeCount} nodes — too big to remix.`
+              : "Couldn't load the chain behind this asset.",
+        );
+        return;
+      }
+
+      const uploadIds = result.data.graph.nodes
+        .filter((n) => n.kind === "input.upload")
+        .map((n) => n.data.asset_id)
+        .filter((id): id is string => typeof id === "string");
+      // One resolve covers the chain's inputs AND the remixed asset itself —
+      // the inputs for the compiler and for previews when the proposal
+      // places, the asset for the sidebar's "Remixing" card.
+      const resolved = await fetchAssetPreviews(
+        [asset.id, ...uploadIds],
+        await authFor(),
+      );
+      if (Object.keys(resolved).length) {
+        setAssets((current) => ({ ...current, ...resolved }));
+      }
+      const sourceAssets: AgentAttachment[] = uploadIds.flatMap((id) => {
+        const p = resolved[id];
+        return p
+          ? [{ assetId: p.id, mediaType: p.mediaType, modality: p.modality, filename: p.filename }]
+          : [];
+      });
+      setRemixing(null);
+
+      // A remix is its own conversation: whatever thread this workflow had —
+      // finished or not — makes way rather than bleeding into the new brief.
+      await resetThread();
+      setPendingRemix({ assetId: asset.id, filename: asset.filename, sourceAssets });
+      setLibraryOpen(false);
+      setAgentOpen(true);
+    },
+    [authFor, resetThread],
+  );
+
+  /**
+   * The remixed asset's preview, for the sidebar's "Remixing" card. Staging
+   * seeds it above; this covers the other way in — a reload landing on an
+   * open thread whose remix was staged in some previous session.
+   */
+  const remixTargetId = session.remixTarget?.assetId ?? null;
+  React.useEffect(() => {
+    if (!remixTargetId || assets[remixTargetId]) return;
+    void (async () => {
+      const resolved = await fetchAssetPreviews([remixTargetId], await authFor());
+      if (Object.keys(resolved).length) {
+        setAssets((current) => ({ ...current, ...resolved }));
+      }
+    })();
+  }, [remixTargetId, assets, authFor]);
+
   return (
     <TooltipProvider>
       <div className="fixed inset-0 overflow-hidden bg-[#f7f4ee] text-[#1f211c]">
@@ -1567,6 +1667,8 @@ export function StudioShell({
           onRetry={() => void loadLibrary()}
           onReconstruct={(asset) => void onReconstruct(asset)}
           reconstructing={reconstructing}
+          onRemix={(asset) => void onRemix(asset)}
+          remixing={remixing}
           onSearch={searchPanelLibrary}
         />
 
@@ -1576,12 +1678,14 @@ export function StudioShell({
           session={session}
           taggedNode={taggedNode}
           onClearTag={() => setTagDismissed(selectedNodes[0]?.id ?? null)}
+          onClearRemix={() => setPendingRemix(null)}
+          remixAsset={remixTargetId ? (assets[remixTargetId] ?? null) : null}
         />
 
         {/* Same name as the home screen's, so it stays put across the
             navigation rather than flickering out and back in. */}
         <ViewTransition name="studio-toolbar">
-          <Toolbar activeTool={tool} onSelect={onToolSelect} />
+          <Toolbar activeTool={tool} onSelect={onToolSelect} shifted={agentOpen} />
         </ViewTransition>
 
         {/* Empty-state hint, retires after first interaction */}

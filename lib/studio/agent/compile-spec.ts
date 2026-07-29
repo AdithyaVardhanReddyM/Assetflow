@@ -120,9 +120,16 @@ export function compileGraphSpec(
   spec: GraphSpec,
   catalog: Catalog,
   attachments: AgentAttachment[],
+  /**
+   * Assets an upload node may reference without the user having attached them
+   * this thread — a remix re-emits the source chain's inputs. Resolvable but
+   * never required: the remix may well drop one.
+   */
+  extraAssets: AgentAttachment[] = [],
 ): CompiledSpec | CompileFailure {
   const errors: string[] = [];
   const byLocal = new Map<string, Prepared>();
+  const resolvable = [...attachments, ...extraAssets];
 
   // -- resolve nodes ---------------------------------------------------------
   for (const node of spec.nodes) {
@@ -149,9 +156,11 @@ export function compileGraphSpec(
     }
     let assetModality: string | undefined;
     if (node.tool === "upload") {
-      const hit = attachments.find((a) => a.assetId === node.asset_id);
+      const hit = resolvable.find((a) => a.assetId === node.asset_id);
       if (!hit) {
-        errors.push(`node '${node.id}': asset_id must be one of the user's attachments`);
+        errors.push(
+          `node '${node.id}': asset_id must be one of the user's attachments or remix source inputs`,
+        );
         continue;
       }
       assetModality = hit.modality;
@@ -164,7 +173,7 @@ export function compileGraphSpec(
       title:
         node.title ??
         (node.tool === "upload"
-          ? attachments.find((a) => a.assetId === node.asset_id)?.filename ?? undefined
+          ? resolvable.find((a) => a.assetId === node.asset_id)?.filename ?? undefined
           : undefined),
       model,
       params: undefined, // seeded below once the model is known

@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import {
   saveChatMessages,
   openChat,
+  resetChat,
   setChatProposal,
   setChatStatus,
 } from "@/app/workflow/chat-actions";
@@ -32,6 +33,7 @@ import type {
   AskUserInput,
   ChatProposal,
   GraphSpec,
+  RemixSource,
   UpdateNodeInput,
 } from "@/lib/studio/agent/spec";
 import type { Catalog } from "@/lib/studio/catalog";
@@ -50,6 +52,8 @@ export type AgentBridge = {
 export type AgentMessageMeta = {
   attachments?: AgentAttachment[];
   taggedNodeIds?: string[];
+  /** Set on the message that opened a remix; the route reads the newest one. */
+  remix?: RemixSource;
 };
 
 export type PendingAsk = { toolCallId: string; input: AskUserInput };
@@ -60,6 +64,12 @@ export type AgentSession = {
   busy: boolean;
   error: Error | undefined;
   proposal: ChatProposal | null;
+  /**
+   * What this thread is remixing, for the sidebar's chip. `pending` while the
+   * user hasn't sent the first message yet — the only moment it can still be
+   * dismissed, because nothing has entered the transcript.
+   */
+  remixTarget: { assetId: string; filename: string | null; pending: boolean } | null;
   /** The unanswered questionnaire, if the transcript ends on one. */
   pendingAsk: PendingAsk | null;
   answerAsk: (toolCallId: string, answers: Record<string, string>) => void;
@@ -68,6 +78,12 @@ export type AgentSession = {
     files: File[],
     tagged: { id: string; title: string }[],
   ) => Promise<void>;
+  /**
+   * Wipe the thread — transcript, proposal, and any nodes a placed proposal
+   * left on the canvas. `send` does this itself when a prompt lands on a
+   * finished thread; Remix calls it up front so the sidebar opens clean.
+   */
+  resetThread: () => Promise<void>;
   /** True while `send` is still uploading attachments. */
   uploading: boolean;
   accept: () => Promise<void>;
@@ -89,6 +105,16 @@ function collectAttachments(messages: UIMessage[]): AgentAttachment[] {
   return [...seen.values()];
 }
 
+/** The thread's remix, if one was declared — newest wins, same as the route. */
+function collectRemix(messages: UIMessage[]): RemixSource | null {
+  let found: RemixSource | null = null;
+  for (const m of messages) {
+    const remix = metaOf(m).remix;
+    if (remix?.assetId) found = remix;
+  }
+  return found;
+}
+
 const MAX_SELF_CORRECTIONS = 2;
 
 export function useAgentSession(options: {
@@ -99,10 +125,24 @@ export function useAgentSession(options: {
   bridge: AgentBridge;
   /** Called when the conversation ends (Accept / Run) — closes the sidebar. */
   onFinished: () => void;
+  /** A remix staged by the library panel, waiting for its first message. */
+  pendingRemix: RemixSource | null;
+  /** The staged remix entered the transcript — the shell can drop its copy. */
+  onRemixSent: () => void;
 }): AgentSession {
-  const { workflowId, catalog, initialChat, bridge, onFinished } = options;
+  const { workflowId, catalog, initialChat, bridge, onFinished, pendingRemix, onRemixSent } =
+    options;
 
   const chatIdRef = React.useRef<string | null>(initialChat?.chat.id ?? null);
+  /**
+   * Whether the loaded thread is finished. A closed thread's history is shown
+   * for context, but the next prompt starts a NEW conversation — it resets
+   * rather than appends, so the model (and the user) aren't dragged through a
+   * brief that was already delivered.
+   */
+  const statusRef = React.useRef<"open" | "closed">(
+    initialChat?.chat.status ?? "open",
+  );
   const [proposal, setProposal] = React.useState<ChatProposal | null>(
     initialChat?.chat.proposal ?? null,
   );
@@ -191,6 +231,19 @@ export function useAgentSession(options: {
     );
   }, []);
 
+  const resetThread = React.useCallback(async () => {
+    const prev = proposalRef.current;
+    if (prev?.status === "placed") bridge.removeNodes(prev.nodeIds);
+    proposalRef.current = null;
+    setProposal(null);
+    corrections.current = 0;
+    setMessages([]);
+    statusRef.current = "open";
+    // Nothing server-side to clear when no row exists yet.
+    const chatId = chatIdRef.current;
+    if (chatId) await resetChat(chatId);
+  }, [bridge, setMessages]);
+
   function handleProposal(toolCallId: string, spec: GraphSpec) {
     const attachments = collectAttachments(messagesRef.current);
     const prev = proposalRef.current;
@@ -200,7 +253,10 @@ export function useAgentSession(options: {
       bridge.removeNodes(prev.nodeIds);
     }
 
-    const compiled = compileGraphSpec(spec, catalog, attachments);
+    // A remix's spec re-emits the source chain's upload nodes; their assets
+    // were never attached this thread, so they resolve through the side door.
+    const remix = collectRemix(messagesRef.current);
+    const compiled = compileGraphSpec(spec, catalog, attachments, remix?.sourceAssets ?? []);
     if (!compiled.ok) {
       addToolOutput({
         tool: "propose_graph",
@@ -284,6 +340,8 @@ export function useAgentSession(options: {
     async (text: string, files: File[], tagged: { id: string; title: string }[]) => {
       const trimmed = text.trim();
       if (!trimmed && !files.length) return;
+      // A prompt on a finished thread is a new conversation, not an appendix.
+      if (statusRef.current === "closed") await resetThread();
       if (!(await ensureChatId())) return;
 
       let attachments: AgentAttachment[] = [];
@@ -308,13 +366,17 @@ export function useAgentSession(options: {
       const metadata: AgentMessageMeta = {};
       if (attachments.length) metadata.attachments = attachments;
       if (tagged.length) metadata.taggedNodeIds = tagged.map((t) => t.id);
+      if (pendingRemix) {
+        metadata.remix = pendingRemix;
+        onRemixSent();
+      }
 
       await sendMessage({
         text: tags ? `${trimmed}\n${tags}` : trimmed,
         metadata: Object.keys(metadata).length ? metadata : undefined,
       });
     },
-    [bridge, ensureChatId, sendMessage],
+    [bridge, ensureChatId, sendMessage, pendingRemix, onRemixSent, resetThread],
   );
 
   const closeOut = React.useCallback(
@@ -332,6 +394,7 @@ export function useAgentSession(options: {
 
   const accept = React.useCallback(async () => {
     await closeOut("accepted");
+    statusRef.current = "closed";
     const chatId = chatIdRef.current;
     if (chatId) void setChatStatus(chatId, "closed");
     onFinished();
@@ -348,6 +411,7 @@ export function useAgentSession(options: {
     const started = await bridge.runSubgraph(prev.nodeIds);
     if (!started) return; // the shell already toasted why
     await closeOut("accepted");
+    statusRef.current = "closed";
     const chatId = chatIdRef.current;
     if (chatId) void setChatStatus(chatId, "closed");
     onFinished();
@@ -387,14 +451,23 @@ export function useAgentSession(options: {
     }
   }
 
+  const sentRemix = collectRemix(messages);
+  const remixTarget = pendingRemix
+    ? { assetId: pendingRemix.assetId, filename: pendingRemix.filename, pending: true }
+    : sentRemix
+      ? { assetId: sentRemix.assetId, filename: sentRemix.filename, pending: false }
+      : null;
+
   return {
     messages,
     busy: status === "submitted" || status === "streaming",
     error,
     proposal,
+    remixTarget,
     pendingAsk,
     answerAsk,
     send,
+    resetThread,
     uploading,
     accept,
     reject,

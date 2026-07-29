@@ -54,6 +54,7 @@ from genblaze_core.providers import (
     route_images,
     validate_asset_url,
 )
+from genblaze_core.providers.pricing import per_unit
 from genblaze_core.providers.retry import retry_after_from_response
 from genblaze_core.providers.spec import StringSchema
 from genblaze_core.runnable.config import RunnableConfig
@@ -536,6 +537,135 @@ def _kling_lipsync_cls():
 def gmi_kling_lipsync_provider() -> Any:
     """Kling lip-sync — identify the face, then sync it to the wired audio."""
     return _kling_lipsync_cls()()
+
+
+# --- GMI Cloud 3D (Hunyuan) --------------------------------------------------
+
+
+def _hunyuan_3d_spec() -> ModelSpec:
+    """Hunyuan 3D Pro on GMI's request queue.
+
+    IMAGE modality because genblaze_core's enum has no 3D — the pipeline layer
+    never inspects it beyond compatibility, and our own plan keeps "3d".
+    The allowlist is GMI's documented payload surface; anything else
+    (``seed`` rides in from Step by default) 400s on their side.
+    """
+    return ModelSpec(
+        model_id="hunyuan-3d-pro",
+        modality=Modality.IMAGE,
+        pricing=per_unit(0.375),
+        input_mapping=route_images(slots=("image_url",)),
+        param_allowlist=frozenset(
+            {"prompt", "image_url", "enable_pbr", "face_count", "generate_type"}
+        ),
+        extras={"envelope_key": "payload"},
+    )
+
+
+@lru_cache(maxsize=1)
+def _gmi_3d_cls() -> Any:
+    """Lazy subclass so this module imports without the gmicloud extra."""
+    from genblaze_gmicloud import GMICloudImageProvider
+    from genblaze_gmicloud._base import extract_media_urls
+
+    class GMI3DProvider(  # type: ignore[misc]
+        _GMIQueueStatusProgress, _RetryFlakyGMISubmit, GMICloudImageProvider
+    ):
+        """Hunyuan 3D through the GMI queue — GLB out, prompt XOR image_url.
+
+        GMI rejects a payload carrying both drivers, so a wired reference
+        image wins and the typed prompt is dropped; the compiler's
+        ``prompt_optional_with_inputs`` is what allows the empty prompt in.
+        """
+
+        name = "gmicloud-3d"
+
+        @classmethod
+        def create_registry(cls) -> ModelRegistry:
+            registry = ModelRegistry()
+            registry.register(_hunyuan_3d_spec())
+            return registry
+
+        def get_capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                supported_modalities=[Modality.IMAGE],
+                supported_inputs=["text", "image"],
+                accepts_chain_input=True,
+                models=self._models.known(),
+                output_formats=["model/gltf-binary"],
+            )
+
+        def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
+            try:
+                # SSRF-validates the wired URL and applies the allowlist.
+                payload = self.prepare_payload(step)
+                if payload.get("image_url"):
+                    payload.pop("prompt", None)
+                elif not str(payload.get("prompt") or "").strip():
+                    raise ProviderError(
+                        "Hunyuan 3D needs a prompt or a wired reference image.",
+                        error_code=ProviderErrorCode.INVALID_INPUT,
+                    )
+                return self._submit_request(step.model, payload)
+            except ProviderError:
+                raise
+            except Exception as exc:
+                raise ProviderError(
+                    f"GMICloud 3D submit failed: {exc}",
+                    error_code=ProviderErrorCode.UNKNOWN,
+                ) from exc
+
+        def fetch_output(self, prediction_id: Any, step: Step) -> Step:
+            try:
+                detail = self._fetch_detail(prediction_id)
+                status = detail.get("status", "")
+                outcome = detail.get("outcome") or {}
+
+                step.provider_payload = {
+                    "gmicloud": {"request_id": prediction_id, "status": status}
+                }
+
+                if status in ("failed", "cancelled"):
+                    raise ProviderError(
+                        str(detail.get("error") or f"3D generation {status}"),
+                        error_code=ProviderErrorCode.UNKNOWN,
+                    )
+
+                urls = extract_media_urls(outcome)
+                if not urls:
+                    raise ProviderError(
+                        "GMICloud request completed but no model URL found"
+                    )
+                # Hunyuan's outcome may bundle textures or thumbnails beside
+                # the mesh; a .glb/.gltf suffix picks it out, and an
+                # extension-less signed URL falls back to the first entry.
+                glb = next(
+                    (
+                        u
+                        for u in urls
+                        if urlparse(u).path.lower().endswith((".glb", ".gltf"))
+                    ),
+                    urls[0],
+                )
+                validate_asset_url(glb)
+                step.assets.append(Asset(url=glb, media_type="model/gltf-binary"))
+
+                self._apply_registry_pricing(step)
+                return step
+            except ProviderError:
+                raise
+            except Exception as exc:
+                raise ProviderError(
+                    f"GMICloud 3D fetch_output failed: {exc}",
+                    error_code=ProviderErrorCode.UNKNOWN,
+                ) from exc
+
+    return GMI3DProvider
+
+
+def gmicloud_3d_provider() -> Any:
+    """Hunyuan 3D — text- or image-to-3D through the GMI request queue."""
+    return _gmi_3d_cls()()
 
 
 # --- Runway image -----------------------------------------------------------

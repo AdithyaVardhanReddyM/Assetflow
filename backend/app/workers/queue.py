@@ -132,6 +132,11 @@ async def sweep_expired(session: AsyncSession) -> list[tuple[uuid.UUID, str]]:
     """
     result = await session.execute(_SWEEP_SQL)
     rows = [(r[0], r[1]) for r in result.fetchall()]
+    # Buried runs never reach finalize(), so their steps are closed out here.
+    # Requeued runs keep their rows as-is — the retry re-drives them.
+    for run_id, status in rows:
+        if status == "interrupted":
+            await _close_out_steps(session, run_id, run_status=RunStatus.INTERRUPTED)
     await session.commit()
     if rows:
         log.info(
@@ -176,7 +181,40 @@ async def finalize(
         text(f"UPDATE runs SET {assignments}, updated_at = now() WHERE id = :run_id"),
         {**fields, "run_id": str(run_id)},
     )
+    # A terminal run may not keep steps mid-flight: a row left pending/running
+    # renders as "generating" on the canvas forever. The runner reconciles its
+    # own steps with proper events; this catches the paths that never get
+    # there — cancellation, a crashed worker, a buried retry.
+    await _close_out_steps(session, run_id, run_status=status)
     await session.commit()
+
+
+_CLOSE_STEPS_SQL = text(
+    """
+    UPDATE run_steps
+       SET status = CAST(:step_status AS step_status),
+           error = COALESCE(error, :step_error),
+           finished_at = COALESCE(finished_at, now())
+     WHERE run_id = :run_id AND status IN ('pending', 'running')
+    """
+)
+
+
+async def _close_out_steps(
+    session: AsyncSession, run_id: uuid.UUID, *, run_status: RunStatus
+) -> None:
+    """Force any still-open step of a terminal run into a terminal state.
+    Does not commit — runs inside the caller's transaction."""
+    interrupted = run_status in (RunStatus.CANCELED, RunStatus.INTERRUPTED)
+    await session.execute(
+        _CLOSE_STEPS_SQL,
+        {
+            "run_id": str(run_id),
+            "step_status": "canceled" if interrupted else "failed",
+            "step_error": None if interrupted
+            else "The run ended before this step reported a result.",
+        },
+    )
 
 
 def lease_deadline(seconds: int | None = None) -> datetime:

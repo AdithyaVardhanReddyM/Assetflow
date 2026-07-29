@@ -924,3 +924,34 @@ def test_character_sheet_defers_llm_prompt_to_the_runner(catalog):
     step = result.plan.step_for_node("a")
     assert step.prompt_from == 0
     assert step.metadata["prompt_preset"] == "character_sheet"
+
+
+# --------------------------------------------------------------------------- #
+# 3d generation
+# --------------------------------------------------------------------------- #
+
+
+def test_3d_with_wired_image_compiles_without_a_prompt(catalog):
+    """Hunyuan's payload is prompt XOR image_url, so a wired reference image
+    stands in for the prompt — `prompt_optional_with_inputs` licenses it."""
+    graph = build(
+        [
+            gen("img", model="mock-image-v1", modality="image", y=0),
+            gen("cube", model="mock-3d-v1", modality="3d", prompt=None, y=100),
+        ],
+        [edge("e1", "img", "cube", "image_ref")],
+    )
+    result = plan_graph(graph, catalog=catalog)
+    assert result.valid, result.errors
+    step = result.plan.step_for_node("cube")
+    assert step.modality == "3d"
+    assert step.input_from == [0]
+
+
+def test_3d_with_nothing_to_drive_it_fails(catalog):
+    """No prompt and no wired image leaves the model nothing to generate from."""
+    result = plan_graph(
+        build([gen("cube", model="mock-3d-v1", modality="3d", prompt=None)]),
+        catalog=catalog,
+    )
+    assert ErrorCode.NO_PROMPT in codes(result)

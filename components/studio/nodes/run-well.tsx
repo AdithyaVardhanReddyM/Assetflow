@@ -20,6 +20,7 @@ import { WarningIcon } from "@phosphor-icons/react";
 import { BorderBeam } from "border-beam";
 
 import { ShimmeringText } from "@/components/ui/shimmering-text";
+import { DynamicModelWellPreview } from "@/components/studio/three";
 import { WaveformPlayer } from "@/components/studio/waveform-player";
 import type { NodeRunState } from "@/lib/studio/graph";
 
@@ -203,6 +204,13 @@ function MediaWell({
           onError={onError}
         />
       </div>
+    );
+  } else if (modality === "3d" || mediaType?.startsWith("model/")) {
+    media = (
+      // The dynamic wrapper keeps three out of the bundle until a 3D take
+      // actually renders. Load failure (an expired presign) reports through
+      // the same onError → resign budget as the media elements below.
+      <DynamicModelWellPreview key={url} url={url} onReady={ready} onError={onError} />
     );
   } else {
     media = (

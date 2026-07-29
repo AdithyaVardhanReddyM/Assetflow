@@ -22,6 +22,7 @@ import {
   LlmIcon,
   MusicGenIcon,
   TextToSpeechIcon,
+  ThreeDGenIcon,
   VideoGenIcon,
 } from "./asset-icons";
 import {
@@ -36,6 +37,7 @@ export type ToolId =
   | "comment"
   | "image"
   | "video"
+  | "threed"
   | "lipsync"
   | "music"
   | "speech"
@@ -92,6 +94,7 @@ export const POINTER_TOOLS: ToolDef[] = [
 export const CREATE_TOOLS: ToolDef[] = [
   { id: "image", label: "Image", icon: ImageGenIcon },
   { id: "video", label: "Video", icon: VideoGenIcon },
+  { id: "threed", label: "3D model", icon: ThreeDGenIcon },
   { id: "lipsync", label: "Lip sync", icon: UserSoundIcon },
   { id: "music", label: "Music", icon: MusicGenIcon },
   { id: "speech", label: "Text to speech", icon: TextToSpeechIcon },
@@ -162,18 +165,30 @@ export function Toolbar({
   activeTool,
   busyTool = null,
   onSelect,
+  shifted = false,
 }: {
   activeTool: ToolId;
   /** The tool whose click is still creating a workflow, on the home screen. */
   busyTool?: string | null;
   onSelect: (id: ToolId) => void;
+  /**
+   * True while the agent sidebar is open — slides the rail to its right edge
+   * instead of leaving it buried underneath. Desktop only: on small screens
+   * the sidebar takes the whole width and there is no "beside" to move to.
+   */
+  shifted?: boolean;
 }) {
   const island =
     "flex flex-col gap-0.5 border border-primary bg-white/88 p-1.5 shadow-[0_18px_44px_-12px_rgba(31,33,28,0.22)] backdrop-blur-md";
 
   return (
     <div
-      className="fixed top-1/2 left-3 z-40 flex max-h-[92vh] -translate-y-1/2 flex-col gap-2.5 overflow-y-auto no-scrollbar animate-[studio-drift-in_0.7s_cubic-bezier(0.32,0.72,0,1)_both]"
+      className={cn(
+        "fixed top-1/2 left-3 z-40 flex max-h-[92vh] -translate-y-1/2 flex-col gap-2.5 overflow-y-auto no-scrollbar animate-[studio-drift-in_0.7s_cubic-bezier(0.32,0.72,0,1)_both]",
+        // Same slide tuning as the sidebar itself, so the two move as one.
+        "transition-[left] duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        shifted && "sm:left-[392px]",
+      )}
       role="toolbar"
       aria-label="Studio tools"
     >

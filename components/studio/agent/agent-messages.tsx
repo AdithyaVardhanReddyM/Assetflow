@@ -7,8 +7,10 @@
  */
 
 import * as React from "react";
-import { FileIcon, GraphIcon, PencilSimpleIcon } from "@phosphor-icons/react";
+import { FileIcon, PencilSimpleIcon } from "@phosphor-icons/react";
 import type { UIMessage } from "ai";
+
+import { ShimmeringText } from "@/components/ui/shimmering-text";
 
 import type {
   AgentAttachment,
@@ -85,9 +87,8 @@ export function AgentMessages({
           />
         ))}
         {session.busy ? (
-          <p className="animate-pulse text-[12px] font-medium text-[#8a8271]">
-            Thinking…
-          </p>
+          // The nodes' "Generating" voice — one shimmer system everywhere.
+          <ShimmeringText text="Thinking…" className="text-[12.5px] font-medium" />
         ) : null}
       </div>
     </div>
@@ -165,9 +166,11 @@ function MessageBlock({
             | undefined;
           if (output && !output.ok) {
             return (
-              <p key={part.toolCallId} className="text-[11.5px] text-[#8a8271] italic">
-                Reworking the graph…
-              </p>
+              <ShimmeringText
+                key={part.toolCallId}
+                text="Reworking the graph…"
+                className="text-[12px] font-medium"
+              />
             );
           }
           const mine = proposal?.toolCallId === part.toolCallId;
@@ -201,13 +204,17 @@ function MessageBlock({
 
         if (part.type.startsWith("tool-") && part.state === "input-streaming") {
           return (
-            <p
+            <ShimmeringText
               key={part.toolCallId}
-              className="flex animate-pulse items-center gap-1.5 text-[11.5px] font-medium text-[#8a8271]"
-            >
-              <GraphIcon className="size-3.5" />
-              Drafting…
-            </p>
+              text={
+                part.type === "tool-propose_graph"
+                  ? "Building the graph…"
+                  : part.type === "tool-ask_user"
+                    ? "Writing questions…"
+                    : "Working…"
+              }
+              className="text-[12px] font-medium"
+            />
           );
         }
         return null;

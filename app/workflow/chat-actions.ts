@@ -14,6 +14,7 @@ import {
   type StoredChat,
   type StoredMessage,
   chatForWorkflow,
+  clearMessages,
   ensureChat,
   messagesForChat,
   ownedChat,
@@ -149,6 +150,25 @@ export async function saveChatMessages(
     return { ok: true, data: null };
   } catch {
     return { ok: false, error: "Could not save the conversation." };
+  }
+}
+
+/**
+ * Start the thread over: drop the transcript and any recorded proposal, and
+ * reopen the row. Called when a new conversation begins on a finished thread —
+ * a fresh main-bar agent prompt, or staging a Remix.
+ */
+export async function resetChat(chatId: string): Promise<ActionResult<null>> {
+  const who = await requireTenant();
+  if (!who) return { ok: false, error: "You are not signed in." };
+  try {
+    const chat = await ownedChat(who.tenantId, chatId);
+    if (!chat) return { ok: false, error: "That conversation was not found." };
+    await clearMessages(who.tenantId, chatId);
+    await updateChat(who.tenantId, chatId, { proposal: null, status: "open" });
+    return { ok: true, data: null };
+  } catch {
+    return { ok: false, error: "Could not reset the conversation." };
   }
 }
 

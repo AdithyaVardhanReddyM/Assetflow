@@ -28,6 +28,7 @@ import {
 export type CreateToolId =
   | "image"
   | "video"
+  | "threed"
   | "lipsync"
   | "music"
   | "speech"
@@ -92,6 +93,15 @@ export const NODE_BLUEPRINTS: Record<CreateToolId, NodeBlueprint> = {
     modality: "video",
     prefer: ["seedance-2-0-fast-260128"],
     label: "Video",
+  },
+  // Hunyuan 3D is the only 3D model on GMI; text-to-3D from the prompt, or
+  // image-to-3D when a reference image is wired (the prompt is dropped then —
+  // GMI's payload takes one or the other, never both).
+  threed: {
+    kind: "generate",
+    modality: "3d",
+    prefer: ["hunyuan-3d-pro"],
+    label: "3D",
   },
   // Both lip-sync models re-drive the mouth in an existing video from a wired
   // track; PixVerse (Replicate) is the house default, Kling the alternative.
@@ -313,6 +323,8 @@ export const MODALITY_ACCENT: Record<string, Accent> = {
   video: { soft: "#ece1ee", ink: "#7b5f86" },
   audio: { soft: "#dfe9dd", ink: "#527d5a" },
   text: { soft: "#e8e4da", ink: "#6b6558" },
+  // Muted sage, kept warm like the rest — distinct from audio's cooler green.
+  "3d": { soft: "#e2e2d4", ink: "#5f6e50" },
   any: { soft: "#e8e4da", ink: "#6b6558" },
 };
 

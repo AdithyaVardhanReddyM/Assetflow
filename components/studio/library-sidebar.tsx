@@ -4,13 +4,15 @@
  * The library, docked beside a canvas.
  *
  * Shows what this workflow did *not* make — the filter is the point, since the
- * canvas already holds its own output. Two ways out of the panel:
+ * canvas already holds its own output. Three ways out of the panel:
  *
  * - **Drag** an asset onto the canvas: it lands as an upload node pointing at
  *   the row that is already in B2. No bytes move.
  * - **Reconstruct**: rebuild the graph that produced it, chased back through
  *   every take edit and every run boundary, and drop that onto the canvas
  *   instead. Only generated media has one — an upload is where history starts.
+ * - **Remix**: hand that same chain to the agent, which reworks its prompts —
+ *   and swaps an input image for one the user attaches — from a new brief.
  *
  * Search and filtering run over the fetched window in memory, matching the full
  * library page: this is one tenant's media, not an unbounded feed.
@@ -22,6 +24,7 @@ import {
   ArrowSquareOutIcon,
   GitBranchIcon,
   MagnifyingGlassIcon,
+  ShuffleIcon,
   WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
@@ -47,6 +50,10 @@ export type LibrarySidebarProps = {
   onReconstruct: (asset: LibraryAsset) => void;
   /** Which asset is mid-reconstruction, so its button can say so. */
   reconstructing: string | null;
+  /** Hand this asset's chain to the agent to rework from a new prompt. */
+  onRemix: (asset: LibraryAsset) => void;
+  /** Which asset is being staged for a remix, so its button can say so. */
+  remixing: string | null;
   /**
    * Hybrid search over the enrichment index, already scoped by the shell to
    * exclude this workflow's own output. Null falls the panel back to its
@@ -63,7 +70,7 @@ function dragPayload(asset: LibraryAsset): AssetPreview {
     // it expires, so handing over a stale one is recoverable.
     url: asset.previewUrl ?? "",
     mediaType: asset.mediaType,
-    modality: (["image", "video", "audio", "text"].includes(asset.modality)
+    modality: (["image", "video", "audio", "text", "3d"].includes(asset.modality)
       ? asset.modality
       : "image") as Modality,
     filename: asset.filename,
@@ -80,6 +87,8 @@ export function LibrarySidebar({
   onRetry,
   onReconstruct,
   reconstructing,
+  onRemix,
+  remixing,
   onSearch,
 }: LibrarySidebarProps) {
   const [query, setQuery] = React.useState("");
@@ -250,7 +259,9 @@ export function LibrarySidebar({
                   key={asset.id}
                   asset={asset}
                   busy={reconstructing === asset.id}
+                  remixBusy={remixing === asset.id}
                   onReconstruct={() => onReconstruct(asset)}
+                  onRemix={() => onRemix(asset)}
                 />
               ))}
               {searchRows.keyword.length > 0 && (
@@ -261,7 +272,9 @@ export function LibrarySidebar({
                   key={asset.id}
                   asset={asset}
                   busy={reconstructing === asset.id}
+                  remixBusy={remixing === asset.id}
                   onReconstruct={() => onReconstruct(asset)}
+                  onRemix={() => onRemix(asset)}
                 />
               ))}
             </div>
@@ -283,7 +296,9 @@ export function LibrarySidebar({
                 key={asset.id}
                 asset={asset}
                 busy={reconstructing === asset.id}
+                remixBusy={remixing === asset.id}
                 onReconstruct={() => onReconstruct(asset)}
+                onRemix={() => onRemix(asset)}
               />
             ))}
           </div>
@@ -318,11 +333,15 @@ function SectionRule({ label }: { label: string }) {
 function LibraryRow({
   asset,
   busy,
+  remixBusy,
   onReconstruct,
+  onRemix,
 }: {
   asset: LibraryAsset;
   busy: boolean;
+  remixBusy: boolean;
   onReconstruct: () => void;
+  onRemix: () => void;
 }) {
   // Only generated media has a graph behind it. An upload is where a chain
   // begins, so offering to rebuild one would promise something that cannot
@@ -356,19 +375,34 @@ function LibraryRow({
       </div>
 
       {rebuildable && (
-        <button
-          type="button"
-          onClick={onReconstruct}
-          disabled={busy}
-          className="flex w-full items-center gap-2 border-t border-[#1f211c]/10 px-3 py-2 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:bg-[#1f211c]/5 hover:text-[#1f211c] disabled:pointer-events-none disabled:opacity-60"
-        >
-          {busy ? (
-            <Spinner className="size-3.5" />
-          ) : (
-            <GitBranchIcon className="size-3.5" />
-          )}
-          {busy ? "Rebuilding…" : "Reconstruct"}
-        </button>
+        <div className="flex border-t border-[#1f211c]/10">
+          <button
+            type="button"
+            onClick={onReconstruct}
+            disabled={busy || remixBusy}
+            className="flex flex-1 items-center gap-2 px-3 py-2 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:bg-[#1f211c]/5 hover:text-[#1f211c] disabled:pointer-events-none disabled:opacity-60"
+          >
+            {busy ? (
+              <Spinner className="size-3.5" />
+            ) : (
+              <GitBranchIcon className="size-3.5" />
+            )}
+            {busy ? "Rebuilding…" : "Reconstruct"}
+          </button>
+          <button
+            type="button"
+            onClick={onRemix}
+            disabled={busy || remixBusy}
+            className="flex flex-1 items-center gap-2 border-l border-[#1f211c]/10 px-3 py-2 text-[12px] font-semibold text-[#4c4a41] transition-colors hover:bg-[#1f211c]/5 hover:text-[#1f211c] disabled:pointer-events-none disabled:opacity-60"
+          >
+            {remixBusy ? (
+              <Spinner className="size-3.5" />
+            ) : (
+              <ShuffleIcon className="size-3.5" />
+            )}
+            {remixBusy ? "Staging…" : "Remix"}
+          </button>
+        </div>
       )}
     </div>
   );

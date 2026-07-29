@@ -7,7 +7,7 @@
  */
 
 import * as React from "react";
-import { PlayIcon } from "@phosphor-icons/react";
+import { GraphIcon, PlayIcon } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
@@ -41,14 +41,18 @@ export function ProposalCard({
   onRun: () => void;
 }) {
   return (
-    <div className="border border-[#1f211c]/12 bg-white p-3 shadow-[0_10px_30px_-18px_rgba(31,33,28,0.4)]">
-      <span className="text-[10px] font-semibold tracking-[0.18em] text-[#8a8271] uppercase">
-        Proposed graph · {nodeCount} node{nodeCount === 1 ? "" : "s"}
-      </span>
-      <p className="mt-1 text-[12.5px] leading-5 text-[#1f211c]">{summary}</p>
+    <div className="border border-[#1f211c]/12 bg-white shadow-[0_14px_36px_-24px_rgba(31,33,28,0.45)]">
+      {/* Same header rail as the question cards — one family of cards. */}
+      <div className="flex items-center gap-2 border-b border-[#1f211c]/8 bg-gradient-to-r from-primary/12 to-transparent px-3 py-1.5">
+        <GraphIcon className="size-3.5 shrink-0 text-[#8a8271]" />
+        <span className="text-[9.5px] font-semibold tracking-[0.18em] text-[#8a8271] uppercase">
+          Proposed graph · {nodeCount} node{nodeCount === 1 ? "" : "s"}
+        </span>
+      </div>
+      <p className="px-3 pt-2.5 text-[12.5px] leading-5 text-[#1f211c]">{summary}</p>
 
       {active ? (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 p-3 pt-2.5">
           <button type="button" onClick={onReject} disabled={busy} className={action}>
             Reject
           </button>
@@ -71,7 +75,7 @@ export function ProposalCard({
       ) : (
         <p
           className={cn(
-            "mt-2 text-[11.5px] font-semibold",
+            "px-3 pt-1.5 pb-3 text-[11.5px] font-semibold",
             outcome === "accepted" && "text-[#527d5a]",
             outcome === "rejected" && "text-[#9d5763]",
             (outcome === "replaced" || outcome === null) && "text-[#8a8271]",

@@ -34,6 +34,7 @@ def _model_payload(model: ModelDescriptor) -> dict[str, Any]:
         "output_media_type": model.output_media_type,
         "output_aspect_ratio": model.output_aspect_ratio,
         "requires_prompt": model.requires_prompt,
+        "prompt_optional_with_inputs": model.prompt_optional_with_inputs,
         "params": [p.model_dump(exclude_none=True) for p in model.params],
         "accepts": [a.model_dump() for a in model.accepts],
     }

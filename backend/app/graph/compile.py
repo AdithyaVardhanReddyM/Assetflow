@@ -625,8 +625,15 @@ def _build_step(
             metadata["prompt_preset"] = CHARACTER_SHEET
     # Some models are driven entirely by their input ports — lipsync takes an
     # avatar and a speech track and has nothing to describe — so a missing
-    # prompt is only an error for models that declare they need one.
-    elif model.requires_prompt and prompt_from is None and not (prompt or "").strip():
+    # prompt is only an error for models that declare they need one. Models
+    # flagged prompt_optional_with_inputs (Hunyuan 3D: prompt XOR image_url)
+    # additionally accept an empty prompt once any input is wired.
+    elif (
+        model.requires_prompt
+        and prompt_from is None
+        and not (prompt or "").strip()
+        and not (model.prompt_optional_with_inputs and (step_preds or upload_preds))
+    ):
         ctx.fail(
             ErrorCode.NO_PROMPT,
             "This node needs a prompt.",
@@ -687,7 +694,9 @@ def _build_step(
         node_id=node.id,
         index=index,
         provider_key=provider_key,
-        model=data.model if provider_key == data.provider else "mock-video-v1",
+        model=data.model
+        if provider_key == data.provider
+        else ("mock-3d-v1" if model.modality.value == "3d" else "mock-video-v1"),
         modality=model.modality.value,
         step_type="generate",
         prompt=prompt,

@@ -25,7 +25,9 @@ def test_mock_provider_is_always_ready(catalog):
     mock = catalog.provider("mock")
     assert mock is not None
     assert mock.status is ProviderStatus.READY
-    assert {m.modality.value for m in mock.models} == {"video", "image", "audio", "text"}
+    assert {m.modality.value for m in mock.models} == {
+        "video", "image", "audio", "text", "3d"
+    }
 
 
 def test_every_model_has_a_wellformed_adapter_reference(catalog):
@@ -52,13 +54,20 @@ def test_mock_adapters_resolve_and_emit_transferable_assets():
     dies with `SinkError: asset transfers failed`."""
     import tempfile
 
-    from app.engine.mock_providers import _asset, audio_provider, image_provider, video_provider
+    from app.engine.mock_providers import (
+        _asset,
+        audio_provider,
+        image_provider,
+        three_d_provider,
+        video_provider,
+    )
 
-    for factory in (video_provider, image_provider, audio_provider):
+    for factory in (video_provider, image_provider, audio_provider, three_d_provider):
         assert factory() is not None
 
     for modality, media_type in (
         ("video", "video/mp4"), ("image", "image/png"), ("audio", "audio/mpeg"),
+        ("3d", "model/gltf-binary"),
     ):
         asset = _asset(modality)
         assert asset.media_type == media_type

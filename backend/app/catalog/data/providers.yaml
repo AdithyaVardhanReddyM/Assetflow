@@ -92,6 +92,22 @@ providers:
               - {value: "2K"}
               - {value: "4K"}
 
+      # Hidden like the media mocks above. Keyless stand-in for Hunyuan 3D:
+      # the compile fallback substitutes it for a 3d node in mock mode, so
+      # the viewer path stays demoable without a GMI key.
+      - id: mock-3d-v1
+        label: Mock 3D
+        modality: 3d
+        hidden: true
+        adapter: app.engine.mock_providers:three_d_provider
+        expected_duration_sec: 1
+        est_cost_usd: 0
+        output_media_type: model/gltf-binary
+        prompt_optional_with_inputs: true
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params: []
+
       # Hidden like the other media mocks — the lipsync tool has no real
       # provider yet, and a mock in the picker reads as product surface.
       # Compile tests for the avatar/speech ports still build on it.
@@ -1153,6 +1169,42 @@ providers:
             group: advanced
             options: [{value: jpeg}, {value: png}]
           - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
+
+      # Hunyuan 3D Pro — text- or image-to-3D, GLB out. GMI's payload takes
+      # prompt XOR image_url: the adapter drops the typed prompt when a
+      # reference image is wired (that is what prompt_optional_with_inputs
+      # licenses at compile time), and only the FIRST wired image rides —
+      # extras are dropped by the adapter's single-slot routing.
+      - id: hunyuan-3d-pro
+        label: Hunyuan 3D Pro
+        modality: 3d
+        adapter: app.engine.genblaze_adapters:gmicloud_3d_provider
+        expected_duration_sec: 240
+        est_cost_usd: 0.375
+        output_media_type: model/gltf-binary
+        prompt_optional_with_inputs: true
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - name: generate_type
+            type: enum
+            label: Style
+            default: Normal
+            options:
+              - {value: Normal}
+              - {value: LowPoly, label: Low poly}
+              - {value: Geometry}
+              - {value: Sketch}
+          - {name: enable_pbr, type: boolean, label: PBR materials, default: true, group: advanced}
+          # GMI's documented polygon budget; the default is theirs, mid-range.
+          - name: face_count
+            type: integer
+            label: Face count
+            group: advanced
+            default: 500000
+            min: 40000
+            max: 1500000
+            step: 10000
 
       # No FLUX.1 Kontext Pro: GMI's `flux-kontext-pro` slug is live but every
       # real submit 500s with `API request failed with status 403` (their

@@ -27,6 +27,7 @@ _SAMPLES = {
     "image": ("sample.png", "image/png"),
     "audio": ("sample.mp3", "audio/mpeg"),
     "text": ("sample.txt", "text/plain"),
+    "3d": ("sample.glb", "model/gltf-binary"),
 }
 
 
@@ -99,3 +100,9 @@ def text_provider(**kwargs: Any) -> Any:
     """Stands in for an LLM. Returns a sample rewritten prompt, so the
     prompt-writer node demonstrates end to end with no credentials."""
     return _provider("text", **kwargs)
+
+
+def three_d_provider(**kwargs: Any) -> Any:
+    """Stands in for Hunyuan 3D. Returns a sample GLB cube, so the 3D node
+    and its viewer demonstrate end to end with no credentials."""
+    return _provider("3d", **kwargs)

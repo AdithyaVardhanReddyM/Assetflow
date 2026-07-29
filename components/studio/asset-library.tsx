@@ -24,6 +24,7 @@ import {
   CaretDownIcon,
   CheckIcon,
   CopyIcon,
+  CubeIcon,
   DatabaseIcon,
   DownloadSimpleIcon,
   FileTextIcon,
@@ -71,6 +72,7 @@ import {
 } from "@/lib/studio/library-client";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { LinkPendingIcon } from "./link-pending-icon";
+import { DynamicModelWellPreview } from "./three";
 import {
   Dialog,
   DialogContent,
@@ -98,7 +100,7 @@ const EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
 
 // --- vocabulary -----------------------------------------------------------
 
-type ModalityFilter = "all" | "image" | "video" | "audio" | "text";
+type ModalityFilter = "all" | "image" | "video" | "audio" | "text" | "3d";
 type KindFilter = "all" | "generated" | "upload";
 type SortOrder = "newest" | "oldest" | "largest" | "name";
 
@@ -108,6 +110,7 @@ const MODALITY_TABS: { id: ModalityFilter; label: string }[] = [
   { id: "video", label: "Video" },
   { id: "audio", label: "Audio" },
   { id: "text", label: "Text" },
+  { id: "3d", label: "3D" },
 ];
 
 const KIND_LABELS: Record<KindFilter, string> = {
@@ -128,6 +131,7 @@ const MODALITY_ICONS: Record<string, React.ComponentType<{ className?: string }>
   video: VideoCameraIcon,
   audio: WaveformIcon,
   text: FileTextIcon,
+  "3d": CubeIcon,
 };
 
 const EXT_BY_MEDIA_TYPE: Record<string, string> = {
@@ -138,6 +142,7 @@ const EXT_BY_MEDIA_TYPE: Record<string, string> = {
   "audio/mpeg": ".mp3",
   "audio/wav": ".wav",
   "text/plain": ".txt",
+  "model/gltf-binary": ".glb",
 };
 
 // --- little formatters ----------------------------------------------------
@@ -1169,9 +1174,23 @@ function CardMedia({ asset }: { asset: LibraryAsset }) {
       return <VideoPlate asset={asset} />;
     case "audio":
       return <AudioPlate asset={asset} />;
+    case "3d":
+      return <ModelPlate />;
     default:
       return <TextPlate asset={asset} />;
   }
+}
+
+/**
+ * A static stand-in for the grid — a live viewer per tile would stack up one
+ * WebGL context per 3D asset. The drawer is where the model actually turns.
+ */
+function ModelPlate() {
+  return (
+    <div className="grid aspect-square w-full place-items-center bg-[#eceadf]">
+      <CubeIcon className="size-10 text-[#8a8271]" weight="duotone" />
+    </div>
+  );
 }
 
 /** Hover-to-preview video with a duration tag; no chrome until you ask. */
@@ -1624,6 +1643,12 @@ function DrawerMedia({ asset }: { asset: LibraryAsset }) {
       return (
         <div className="border-b border-[#1f211c]/8">
           <AudioPlate asset={asset} />
+        </div>
+      );
+    case "3d":
+      return (
+        <div className="h-[320px] w-full border-b border-[#1f211c]/8 bg-[#eceadf]">
+          <DynamicModelWellPreview url={asset.previewUrl} />
         </div>
       );
     default:

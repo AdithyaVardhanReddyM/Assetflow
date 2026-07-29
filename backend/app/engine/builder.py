@@ -27,6 +27,9 @@ _MODALITY_BY_NAME = {
     "video": "VIDEO",
     "audio": "AUDIO",
     "text": "TEXT",
+    # genblaze_core's Modality enum is closed; 3D masquerades as IMAGE at the
+    # pipeline layer only. Our own PlannedStep.modality stays "3d" end to end.
+    "3d": "IMAGE",
 }
 
 _STEP_TYPE_BY_NAME = {

@@ -39,6 +39,7 @@ function assetIcon(src: string, name: string) {
 
 export const ImageGenIcon = assetIcon("/image_gen.svg", "ImageGenIcon");
 export const VideoGenIcon = assetIcon("/video_gen.svg", "VideoGenIcon");
+export const ThreeDGenIcon = assetIcon("/three_d_gen.svg", "ThreeDGenIcon");
 export const TextToSpeechIcon = assetIcon(
   "/text_to_speech.svg",
   "TextToSpeechIcon",

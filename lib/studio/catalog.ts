@@ -16,7 +16,7 @@
 
 import { audioPortId, compositeTracks } from "./graph";
 
-export type Modality = "image" | "video" | "audio" | "text";
+export type Modality = "image" | "video" | "audio" | "text" | "3d";
 
 export type ProviderStatus = "ready" | "missing_key" | "not_installed";
 
@@ -80,6 +80,11 @@ export type CatalogModel = {
   output_aspect_ratio?: string | null;
   /** False for models driven entirely by their ports — the canvas drops the prompt box. */
   requires_prompt?: boolean;
+  /**
+   * True when the prompt is one of two exclusive drivers (Hunyuan 3D takes
+   * prompt XOR reference image): a wired input stands in for the prompt.
+   */
+  prompt_optional_with_inputs?: boolean;
   params: ParamDescriptor[];
   accepts: PortHandoff[];
 };

@@ -8,10 +8,11 @@
  */
 
 import * as React from "react";
-import { XIcon } from "@phosphor-icons/react";
+import { ShuffleIcon, XIcon } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 import type { ChatProposal } from "@/lib/studio/agent/spec";
+import type { AssetPreview } from "@/lib/studio/graph";
 import { AgentMessages } from "./agent-messages";
 import { AgentInput, type TaggedNode } from "./agent-input";
 import type { AgentSession } from "./use-agent-session";
@@ -22,12 +23,18 @@ export function AgentSidebar({
   session,
   taggedNode,
   onClearTag,
+  onClearRemix,
+  remixAsset,
 }: {
   open: boolean;
   onClose: () => void;
   session: AgentSession;
   taggedNode: TaggedNode | null;
   onClearTag: () => void;
+  /** Dismiss a staged remix — only offered while it hasn't been sent. */
+  onClearRemix: () => void;
+  /** Preview of the asset being remixed, for the card under the header. */
+  remixAsset: AssetPreview | null;
 }) {
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
   const [revising, setRevising] = React.useState(false);
@@ -45,12 +52,15 @@ export function AgentSidebar({
 
   const proposal: ChatProposal | null = session.proposal;
   const rejected = proposal?.status === "rejected";
+  const remix = session.remixTarget;
 
   const placeholder = revising
     ? "Describe the changes you'd like…"
     : rejected
       ? "Tell me what you'd like instead…"
-      : "Ask for a workflow…";
+      : remix?.pending
+        ? "Describe your remix…"
+        : "Ask for a workflow…";
 
   return (
     <aside
@@ -63,24 +73,75 @@ export function AgentSidebar({
         open ? "translate-x-0" : "pointer-events-none -translate-x-full",
       )}
     >
-      <header className="flex items-start justify-between gap-3 border-b border-[#1f211c]/8 px-4 pt-5 pb-4">
-        <div>
-          <span className="text-[10px] font-semibold tracking-[0.22em] text-[#8a8271] uppercase">
-            Agent
-          </span>
-          <h2 className="mt-1.5 text-[17px] leading-tight font-medium tracking-[-0.01em]">
-            Build it <span className="font-serif italic">together</span>
-          </h2>
-        </div>
+      {/* Amber-to-white wash, the brand colour dissolving into the paper —
+          the panel's one indulgence; everything below stays quiet. */}
+      <header className="relative shrink-0 overflow-hidden border-b border-[#1f211c]/8 bg-gradient-to-br from-primary/40 via-white/85 to-white px-4 pt-6 pb-5">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -top-10 -right-8 size-36 bg-primary/25 blur-3xl"
+        />
+        <h2 className="relative text-[19px] leading-tight font-medium tracking-[-0.01em]">
+          Build it <span className="font-serif italic">together</span>
+        </h2>
+        <p className="relative mt-1 text-[12px] leading-5 text-[#8a8271]">
+          Describe the piece; I&rsquo;ll wire the nodes.
+        </p>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close agent"
-          className="grid size-7 shrink-0 place-items-center text-[#4c4a41] transition-colors hover:bg-[#1f211c]/6 hover:text-[#1f211c]"
+          className="absolute top-4 right-3 grid size-7 place-items-center text-[#4c4a41] transition-colors hover:bg-[#1f211c]/6 hover:text-[#1f211c]"
         >
           <XIcon className="size-4" />
         </button>
       </header>
+
+      {remix && (
+        <div className="flex shrink-0 items-center gap-2.5 border-b border-[#1f211c]/8 bg-white/70 px-4 py-2.5">
+          {remixAsset?.url && remixAsset.modality === "image" ? (
+            // Plain <img>/<video>: short-lived presigned B2 URLs, same rule
+            // as every other thumbnail in the studio.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={remixAsset.url}
+              alt=""
+              className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#1f211c]/5 object-cover"
+            />
+          ) : remixAsset?.url && remixAsset.modality === "video" ? (
+            <video
+              src={remixAsset.url}
+              muted
+              playsInline
+              preload="metadata"
+              className="size-10 shrink-0 border border-[#1f211c]/10 bg-[#1f211c] object-cover"
+            />
+          ) : (
+            <div className="grid size-10 shrink-0 place-items-center border border-[#1f211c]/10 bg-[#1f211c]/5">
+              <ShuffleIcon className="size-4 text-[#8a8271]" />
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-semibold tracking-[0.18em] text-[#8a8271] uppercase">
+              Remixing
+            </p>
+            <p className="truncate text-[12.5px] font-semibold text-[#1f211c]">
+              {remix.filename ??
+                remixAsset?.filename ??
+                `A generated ${remixAsset?.modality ?? "asset"}`}
+            </p>
+          </div>
+          {remix.pending && (
+            <button
+              type="button"
+              aria-label="Cancel remix"
+              onClick={onClearRemix}
+              className="grid size-5 shrink-0 place-items-center text-[#8a8271] transition-colors hover:text-[#1f211c]"
+            >
+              <XIcon className="size-3" />
+            </button>
+          )}
+        </div>
+      )}
 
       <AgentMessages
         session={session}

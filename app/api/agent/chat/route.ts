@@ -26,6 +26,7 @@ import { workflows } from "@/db/schema";
 import { ensureChat, upsertMessages } from "@/lib/studio/agent/chat-store";
 import {
   type AgentAttachment,
+  type RemixSource,
   AskUserSchema,
   GraphSpecSchema,
   UpdateNodeSchema,
@@ -33,6 +34,7 @@ import {
 import { buildSystemPrompt } from "@/lib/studio/agent/system-prompt";
 import { fetchAssetPreviews } from "@/lib/studio/assets-client";
 import { fetchCatalog } from "@/lib/studio/catalog";
+import { fetchReconstruction } from "@/lib/studio/library-client";
 import { type Graph, EMPTY_GRAPH, parseGraph } from "@/lib/studio/graph";
 import { requireTenant } from "@/lib/studio/tenant";
 
@@ -55,6 +57,16 @@ function collectAttachments(messages: UIMessage[]): AgentAttachment[] {
     }
   }
   return [...seen.values()];
+}
+
+/** The remix this thread is about, if any — the newest declaration wins. */
+function collectRemix(messages: UIMessage[]): RemixSource | null {
+  let found: RemixSource | null = null;
+  for (const message of messages) {
+    const meta = message.metadata as { remix?: RemixSource } | undefined;
+    if (meta?.remix?.assetId) found = meta.remix;
+  }
+  return found;
 }
 
 /**
@@ -117,20 +129,34 @@ export async function POST(req: Request) {
   const graph: Graph = parseGraph(workflow.graph) ?? EMPTY_GRAPH;
   const catalog = await fetchCatalog();
   const attachments = collectAttachments(messages);
+  const remixSource = collectRemix(messages);
 
   // Fresh presigned URLs for everything the model should look at. Uses the
   // caller's own Clerk token so FastAPI resolves the same tenant either way.
   let urls: Record<string, { url: string; mediaType: string }> = {};
-  if (attachments.length) {
+  let remix: { source: RemixSource; graph: Graph | null } | null = null;
+  if (attachments.length || remixSource) {
     const { getToken } = await auth();
     const token = await getToken().catch(() => null);
-    const previews = await fetchAssetPreviews(
-      attachments.map((a) => a.assetId),
-      { token, userId: who.userId },
-    );
-    urls = Object.fromEntries(
-      Object.entries(previews).map(([id, p]) => [id, { url: p.url, mediaType: p.mediaType }]),
-    );
+    if (attachments.length) {
+      const previews = await fetchAssetPreviews(
+        attachments.map((a) => a.assetId),
+        { token, userId: who.userId },
+      );
+      urls = Object.fromEntries(
+        Object.entries(previews).map(([id, p]) => [id, { url: p.url, mediaType: p.mediaType }]),
+      );
+    }
+    if (remixSource) {
+      // Re-walked per request rather than stored on the message: the walk is
+      // a handful of indexed reads, and the digest stays true to the runs
+      // even if the transcript is reopened days later.
+      const rebuilt = await fetchReconstruction(remixSource.assetId, {
+        token,
+        userId: who.userId,
+      });
+      remix = { source: remixSource, graph: rebuilt.ok ? rebuilt.data.graph : null };
+    }
   }
 
   const openrouter = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
@@ -141,7 +167,7 @@ export async function POST(req: Request) {
     // tokens stay uncapped — a capped budget is how reasoning models return
     // empty content (see the Kimi node's history).
     model: openrouter.chat(AGENT_MODEL, { reasoning: { effort: "low" } }),
-    system: buildSystemPrompt({ catalog, graph, attachments }),
+    system: buildSystemPrompt({ catalog, graph, attachments, remix }),
     messages: await convertToModelMessages(await withMediaParts(messages, urls)),
     tools: {
       // All client-side (no execute): the stream pauses at the call and the

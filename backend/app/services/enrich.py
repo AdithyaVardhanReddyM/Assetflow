@@ -429,12 +429,18 @@ async def _enrich(
     elif asset.modality == "text":
         words = (asset.asset_metadata or {}).get("text") or ""
         extra = str(words)[:4000]
+    elif asset.modality == "3d":
+        # No visual describer for meshes — the prompt (folded in by
+        # assemble_doc) is the searchable signal.
+        extra = "3d model mesh glb"
 
     caption = (described or {}).get("caption")
     if not caption and asset.modality == "audio" and prompt and not _is_musiclike(
         step.model if step else None
     ):
         caption = f"Spoken audio: {prompt[:300]}"
+    if not caption and asset.modality == "3d" and prompt:
+        caption = f"3D model: {prompt[:300]}"
     tags = list((described or {}).get("tags") or [])
     ocr_text = (described or {}).get("ocr_text")
     palette = list((described or {}).get("palette") or [])

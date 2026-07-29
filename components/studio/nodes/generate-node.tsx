@@ -48,9 +48,16 @@ import type {
 import { CHARACTER_SHEET_RATIO, accentFor } from "@/lib/studio/node-ui";
 import { useStudio } from "../studio-context";
 import { LinkGlyph } from "../link-glyph";
-import { ImageGenIcon, LlmIcon, MusicGenIcon, VideoGenIcon } from "../asset-icons";
+import {
+  ImageGenIcon,
+  LlmIcon,
+  MusicGenIcon,
+  ThreeDGenIcon,
+  VideoGenIcon,
+} from "../asset-icons";
 import { ModelLogo } from "../model-logos";
 import { ModelMenuList } from "../model-menu";
+import { DynamicModelStage } from "../three";
 import { OutputPort, PortRail } from "./ports";
 import { LoadingWell, RunBeam, RunWell, isRunBusy } from "./run-well";
 import {
@@ -128,6 +135,7 @@ const MODALITY_ICON = {
   video: VideoGenIcon,
   audio: MusicGenIcon,
   text: LlmIcon,
+  "3d": ThreeDGenIcon,
 } as const;
 
 const MODALITY_LABEL = {
@@ -135,6 +143,7 @@ const MODALITY_LABEL = {
   video: "Video",
   audio: "Audio",
   text: "Text",
+  "3d": "3D",
 } as const;
 
 /** Landscape unless the node says otherwise — the shape most generations take. */
@@ -208,6 +217,8 @@ function GenerationCarousel({
         const active = activeId ? gen.assetId === activeId : i === 0;
         const isVideo = gen.mediaType?.startsWith("video/");
         const isAudio = gen.mediaType?.startsWith("audio/");
+        // A GLB has no still to shrink — a glyph tile, like audio's.
+        const isModel = gen.mediaType?.startsWith("model/");
         return (
           <button
             key={gen.assetId ?? gen.url ?? i}
@@ -222,9 +233,13 @@ function GenerationCarousel({
                 : "size-10 border border-[#1f211c]/15 opacity-75 hover:opacity-100",
             )}
           >
-            {isAudio || !gen.url ? (
+            {isAudio || isModel || !gen.url ? (
               <span className="grid h-full w-full place-items-center text-[#a09a88]">
-                <MusicGenIcon className="size-4" />
+                {isModel ? (
+                  <ThreeDGenIcon className="size-4" />
+                ) : (
+                  <MusicGenIcon className="size-4" />
+                )}
               </span>
             ) : isVideo ? (
               // First frame as the thumbnail; playback stays in the well.
@@ -448,9 +463,12 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
 
   const [expanded, setExpanded] = React.useState(false);
   // Only a settled visual take expands — audio and text have no full-size
-  // view, and a busy or failed well has nothing to blow up yet.
+  // view, and a busy or failed well has nothing to blow up yet. 3D counts as
+  // visual: its full-size view is the orbitable stage.
   const expandMedia =
-    !liveOwnsWell && displayed?.url && (modality === "image" || modality === "video")
+    !liveOwnsWell &&
+    displayed?.url &&
+    (modality === "image" || modality === "video" || modality === "3d")
       ? {
           url: displayed.url,
           isVideo:
@@ -722,7 +740,13 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
             rows={2}
             value={wire.prompt ?? ""}
             onChange={(e) => updateNode(id, { prompt: e.target.value || null })}
-            placeholder={copy?.placeholder ?? `Describe the ${kindLabel.toLowerCase()}…`}
+            placeholder={
+              // Hunyuan's payload is prompt XOR image_url — with a reference
+              // wired, whatever is typed here never reaches the model.
+              modality === "3d" && connected.has("image_ref")
+                ? "Reference image drives this — the prompt is ignored"
+                : (copy?.placeholder ?? `Describe the ${kindLabel.toLowerCase()}…`)
+            }
             // `nodrag` keeps a click from dragging the node; `nowheel` keeps the
             // canvas from swallowing the wheel to pan with (`panOnScroll`), which
             // otherwise leaves a long prompt scrollable only by its scrollbar.
@@ -830,7 +854,9 @@ export function GenerateNode({ id, data, selected }: NodeProps<StudioNode>) {
           onOpenChange={setExpanded}
           media={expandMedia}
           stage={
-            videoTake && captions.stageActive ? (
+            modality === "3d" ? (
+              <DynamicModelStage url={expandMedia.url} />
+            ) : videoTake && captions.stageActive ? (
               <CaptionStage url={videoTake.url} captions={captions} />
             ) : undefined
           }
