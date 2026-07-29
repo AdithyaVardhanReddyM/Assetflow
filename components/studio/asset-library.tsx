@@ -1965,10 +1965,7 @@ function LineagePanel({
   onInspect: (asset: LibraryAsset) => void;
 }) {
   const [open, setOpen] = React.useState(false);
-  const sources = chain.hops.filter((hop) =>
-    hop.kind.startsWith("input."),
-  ).length;
-  const steps = chain.hops.length - sources;
+  const tally = chainTally(chain);
 
   return (
     <div>
@@ -1992,7 +1989,9 @@ function LineagePanel({
         >
           <ArrowsOutSimpleIcon className="size-3.5" />
         </button>
-        <div className="relative p-3">
+        {/* A long history is taller than the drawer wants to be; the plate
+            scrolls and the dialog is where it gets read properly. */}
+        <div className="relative max-h-[340px] overflow-y-auto p-3">
           <LineageGraph
             chain={chain}
             currentId={currentId}
@@ -2003,10 +2002,7 @@ function LineagePanel({
       </div>
 
       <div className="mt-2 flex items-center justify-between gap-3">
-        <p className="text-[11px] text-[#8a8271] tabular-nums">
-          {steps} {steps === 1 ? "step" : "steps"} · {sources}{" "}
-          {sources === 1 ? "source" : "sources"}
-        </p>
+        <p className="text-[11px] text-[#8a8271] tabular-nums">{tally}</p>
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -2058,9 +2054,10 @@ function LineageDialog({
             How &ldquo;{title}&rdquo; was made
           </DialogTitle>
           <DialogDescription className="mt-1 text-[12px] leading-5 text-[#8a8271]">
-            Drawn from the graph snapshot the run actually executed — sources at
-            the top, this file at the bottom. Any piece with a file behind it
-            opens its own trail.
+            Drawn from the graph snapshots the runs actually executed — sources
+            at the top, this file at the bottom. Where a file made elsewhere was
+            brought in, the graph that made it is here too. Any piece with a
+            file behind it opens its own trail.
           </DialogDescription>
         </div>
 
@@ -2080,10 +2077,26 @@ function LineageDialog({
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#1f211c]/8 px-5 py-3">
-          <p className="flex items-center gap-1.5 text-[11px] text-[#8a8271]">
-            <span aria-hidden className="inline-block h-px w-5 bg-[#b08a2e]" />
-            leads to this file
-          </p>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-[#8a8271]">
+            <p className="flex items-center gap-1.5">
+              <span aria-hidden className="inline-block h-px w-5 bg-[#b08a2e]" />
+              leads to this file
+            </p>
+            {crossesRuns(chain) && (
+              <p className="flex items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className="inline-block h-px w-5"
+                  style={{
+                    backgroundImage:
+                      "repeating-linear-gradient(to right, rgba(31,33,28,0.4) 0 6px, transparent 6px 10px)",
+                  }}
+                />
+                carried in from another run
+              </p>
+            )}
+            <p className="tabular-nums">{chainTally(chain)}</p>
+          </div>
           {workflowId && (
             <Link
               href={`/workflow/${workflowId}`}
@@ -2100,6 +2113,50 @@ function LineageDialog({
 }
 
 type GraphScale = "mini" | "full";
+
+/**
+ * A tile's box in its graph's own coordinates, from *layout* rather than from
+ * `getBoundingClientRect`.
+ *
+ * Rects are post-transform: the dialog opens with `zoom-in-95`, so measuring
+ * during that animation returns every box at 95% and every thread comes out
+ * short of the gap it has to span — a line with daylight at both ends, which
+ * reads as broken. Offsets are pre-transform and pre-scroll, so they describe
+ * where the tiles will actually settle.
+ */
+function boxWithin(el: HTMLElement, root: HTMLElement) {
+  let x = 0;
+  let y = 0;
+  let node: HTMLElement | null = el;
+  // Each step is relative to the nearest positioned ancestor, so walk up until
+  // the graph's own wrapper (which is `relative`) closes the chain.
+  while (node && node !== root) {
+    x += node.offsetLeft;
+    y += node.offsetTop;
+    node = node.offsetParent as HTMLElement | null;
+  }
+  return { x, y, w: el.offsetWidth, h: el.offsetHeight };
+}
+
+/** Did the walk leave the run that produced the file to finish the story? */
+function crossesRuns(chain: LineageChain): boolean {
+  return new Set(chain.hops.map((hop) => hop.runId)).size > 1;
+}
+
+/** What the graph adds up to, in one line under it. */
+function chainTally(chain: LineageChain): string {
+  const sources = chain.hops.filter((hop) => hop.kind.startsWith("input.")).length;
+  const steps = chain.hops.length - sources;
+  const runs = new Set(chain.hops.map((hop) => hop.runId)).size;
+  const parts = [
+    `${steps} ${steps === 1 ? "step" : "steps"}`,
+    `${sources} ${sources === 1 ? "source" : "sources"}`,
+  ];
+  // Only worth saying once it is more than one — every graph ran somewhere.
+  if (runs > 1) parts.push(`${runs} runs`);
+  if (chain.truncated) parts.push("history goes deeper");
+  return parts.join(" · ");
+}
 
 /**
  * The derivation as the graph it was: hops in rows by distance from this file,
@@ -2123,7 +2180,7 @@ function LineageGraph({
   const wrap = React.useRef<HTMLDivElement>(null);
   const tiles = React.useRef(new Map<string, HTMLElement>());
   const [threads, setThreads] = React.useState<
-    { key: string; d: string; lit: boolean }[]
+    { key: string; d: string; lit: boolean; crossed: boolean }[]
   >([]);
 
   const levels = React.useMemo(() => {
@@ -2134,27 +2191,31 @@ function LineageGraph({
     return [...byDepth.entries()].sort((a, b) => b[0] - a[0]).map(([, hops]) => hops);
   }, [chain]);
 
-  /** The node that produced the file in the drawer — its inbound threads run gold. */
-  const outputNode = React.useMemo(
-    () => chain.hops.find((hop) => hop.depth === 0)?.nodeId ?? null,
+  const byId = React.useMemo(
+    () => new Map(chain.hops.map((hop) => [hop.id, hop])),
+    [chain],
+  );
+
+  /** The hop that produced the file in the drawer — its inbound threads run gold. */
+  const outputHop = React.useMemo(
+    () => chain.hops.find((hop) => hop.depth === 0)?.id ?? null,
     [chain],
   );
 
   const measure = React.useCallback(() => {
     const root = wrap.current;
     if (!root) return;
-    const base = root.getBoundingClientRect();
-    const drawn: { key: string; d: string; lit: boolean }[] = [];
+    const drawn: { key: string; d: string; lit: boolean; crossed: boolean }[] = [];
     for (const edge of chain.edges) {
       const from = tiles.current.get(edge.source);
       const to = tiles.current.get(edge.target);
       if (!from || !to) continue;
-      const a = from.getBoundingClientRect();
-      const b = to.getBoundingClientRect();
-      const x1 = a.left - base.left + a.width / 2;
-      const y1 = a.bottom - base.top;
-      const x2 = b.left - base.left + b.width / 2;
-      const y2 = b.top - base.top;
+      const a = boxWithin(from, root);
+      const b = boxWithin(to, root);
+      const x1 = a.x + a.w / 2;
+      const y1 = a.y + a.h;
+      const x2 = b.x + b.w / 2;
+      const y2 = b.y;
       // Sideways or upward edges would draw over the tiles; the rows already
       // say what order things happened in.
       if (y2 <= y1) continue;
@@ -2162,11 +2223,15 @@ function LineageGraph({
       drawn.push({
         key: `${edge.source}->${edge.target}`,
         d: `M${x1} ${y1} C${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`,
-        lit: edge.target === outputNode,
+        lit: edge.target === outputHop,
+        // A seam: the file above it was made in one run and carried into the
+        // next. Dashed, because it is a handoff rather than a wire someone drew.
+        crossed:
+          byId.get(edge.source)?.runId !== byId.get(edge.target)?.runId,
       });
     }
     setThreads(drawn);
-  }, [chain, outputNode]);
+  }, [chain, byId, outputHop]);
 
   React.useLayoutEffect(() => {
     measure();
@@ -2198,6 +2263,9 @@ function LineageGraph({
               d={thread.d}
               fill="none"
               strokeWidth={thread.lit ? 1.5 : 1}
+              // A long dash, not a dot: the seam has to read as drawn that way
+              // on purpose rather than as a line that failed to finish.
+              strokeDasharray={thread.crossed ? "6 4" : undefined}
               stroke={
                 thread.lit ? "rgba(176,138,46,0.8)" : "rgba(31,33,28,0.24)"
               }
@@ -2215,14 +2283,14 @@ function LineageGraph({
           >
             {hops.map((hop) => (
               <HopNode
-                key={hop.nodeId}
+                key={hop.id}
                 hop={hop}
                 currentId={currentId}
                 scale={scale}
                 onInspect={onInspect}
                 register={(el) => {
-                  if (el) tiles.current.set(hop.nodeId, el);
-                  else tiles.current.delete(hop.nodeId);
+                  if (el) tiles.current.set(hop.id, el);
+                  else tiles.current.delete(hop.id);
                 }}
               />
             ))}

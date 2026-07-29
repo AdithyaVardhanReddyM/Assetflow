@@ -17,7 +17,8 @@ from app.config import StorageMode
 from app.db.models import Asset, AssetEnrichment, Run, RunStep
 from app.deps import CurrentUser, Session, SettingsDep
 from app.errors import NotFound
-from app.services.reconstruct import build_reconstruction, upstream_closure
+from app.services.lineage import build_chain
+from app.services.reconstruct import build_reconstruction
 from app.services.uploads import ingest_upload
 
 router = APIRouter(prefix="/v1/assets", tags=["assets"])
@@ -295,88 +296,6 @@ async def get_asset(
     return _serialize(await _get_owned(session, asset_id, user))
 
 
-async def _build_chain(
-    session: Session, run: Run, asset: Asset
-) -> dict[str, Any] | None:
-    """The asset's upstream hops, read off the run's graph snapshot.
-
-    The snapshot is the graph that actually ran, so walking its edges backward
-    from the asset's node gives the true derivation — including nodes whose
-    canvas has since been edited or deleted.
-    """
-    closure = upstream_closure(run.graph_snapshot or {}, asset.node_id or "")
-    if closure is None:
-        return None
-    nodes, depth, order = closure
-    if len(order) == 1:
-        # Nothing upstream — the flat lineage block already tells the story.
-        return None
-
-    steps = {
-        s.node_id: s
-        for s in (
-            await session.execute(select(RunStep).where(RunStep.run_id == run.id))
-        ).scalars()
-    }
-    produced: dict[str, list[Asset]] = {}
-    for row in (
-        await session.execute(select(Asset).where(Asset.run_id == run.id))
-    ).scalars():
-        if row.node_id:
-            produced.setdefault(row.node_id, []).append(row)
-
-    # Upload nodes reference a library asset by id instead of producing one.
-    upload_refs: dict[str, str] = {}
-    for nid in order:
-        data = nodes[nid].get("data") or {}
-        if nodes[nid].get("kind") == "input.upload" and data.get("asset_id"):
-            try:
-                upload_refs[nid] = str(uuid.UUID(str(data["asset_id"])))
-            except ValueError:
-                continue
-    uploads: dict[str, Asset] = {}
-    if upload_refs:
-        rows = await session.execute(
-            select(Asset).where(
-                Asset.tenant_id == run.tenant_id,
-                Asset.id.in_([uuid.UUID(a) for a in set(upload_refs.values())]),
-            )
-        )
-        uploads = {str(a.id): a for a in rows.scalars()}
-
-    hops: list[dict[str, Any]] = []
-    for nid in order:
-        node = nodes[nid]
-        data = node.get("data") or {}
-        step = steps.get(nid)
-        outputs = produced.get(nid, [])
-        if not outputs and nid in upload_refs:
-            ref = uploads.get(upload_refs[nid])
-            outputs = [ref] if ref is not None else []
-        hops.append(
-            {
-                "node_id": nid,
-                "kind": node.get("kind"),
-                "depth": depth[nid],
-                "title": data.get("title") or data.get("label"),
-                "text": data.get("text") if node.get("kind") == "input.text" else None,
-                "provider": step.provider if step else None,
-                "model": step.model if step else None,
-                "prompt": step.prompt if step else None,
-                "step_type": step.step_type if step else None,
-                "assets": [_serialize(a) for a in outputs],
-            }
-        )
-    return {
-        "hops": hops,
-        "edges": [
-            {"source": e.get("source"), "target": e.get("target")}
-            for e in (run.graph_snapshot or {}).get("edges", [])
-            if e.get("source") in depth and e.get("target") in depth
-        ],
-    }
-
-
 @router.get("/{asset_id}/provenance")
 async def get_provenance(
     asset_id: uuid.UUID, session: Session, user: CurrentUser
@@ -423,7 +342,13 @@ async def get_provenance(
         "cost_usd": step.cost_usd if step else None,
     }
     if run is not None:
-        body["chain"] = await _build_chain(session, run, asset)
+        body["chain"] = await build_chain(
+            session,
+            run=run,
+            asset=asset,
+            tenant_id=user.tenant_id,
+            serialize=_serialize,
+        )
     return body
 
 

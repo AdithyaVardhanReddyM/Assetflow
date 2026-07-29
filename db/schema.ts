@@ -95,7 +95,7 @@ export const workflows = pgTable(
     ...timestamps,
   },
   (t) => [index("workflows_tenant_updated_idx").on(t.tenantId, t.updatedAt)],
-);
+).enableRLS();
 
 /**
  * Canvas annotations — the human layer laid over a document the compiler reads.
@@ -142,7 +142,7 @@ export const workflowComments = pgTable(
     index("workflow_comments_workflow_idx").on(t.workflowId, t.createdAt),
     index("workflow_comments_parent_idx").on(t.parentId),
   ],
-);
+).enableRLS();
 
 /**
  * The workflow-builder agent's conversation, one thread per canvas (the unique
@@ -173,7 +173,7 @@ export const workflowChats = pgTable(
     uniqueIndex("workflow_chats_workflow_idx").on(t.workflowId),
     index("workflow_chats_tenant_idx").on(t.tenantId, t.updatedAt),
   ],
-);
+).enableRLS();
 
 /**
  * AI SDK UIMessages, parts stored verbatim. The id is the client-generated
@@ -197,7 +197,7 @@ export const chatMessages = pgTable(
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("chat_messages_chat_idx").on(t.chatId, t.createdAt)],
-);
+).enableRLS();
 
 /**
  * A run is also the job queue row — a run *is* the job, which halves the state
@@ -257,7 +257,7 @@ export const runs = pgTable(
       .on(t.tenantId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
   ],
-);
+).enableRLS();
 
 /** One row per canvas node that became a GenBlaze step. */
 export const runSteps = pgTable(
@@ -299,7 +299,7 @@ export const runSteps = pgTable(
     ...timestamps,
   },
   (t) => [uniqueIndex("run_steps_run_node_idx").on(t.runId, t.nodeId)],
-);
+).enableRLS();
 
 /**
  * Append-only event log. This is the SSE source, the audit trail, and the replay
@@ -324,7 +324,7 @@ export const runEvents = pgTable(
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("run_events_run_seq_idx").on(t.runId, t.seq)],
-);
+).enableRLS();
 
 /** Uploads and generated media. `sha256` mirrors B2 content-addressing. */
 export const assets = pgTable(
@@ -370,7 +370,7 @@ export const assets = pgTable(
       .on(t.tenantId, t.sha256)
       .where(sql`${t.kind} = 'upload' and ${t.sha256} is not null`),
   ],
-);
+).enableRLS();
 
 /**
  * Derived, searchable metadata — one row per asset, filled by a background
@@ -429,7 +429,7 @@ export const assetEnrichment = pgTable(
       t.embedding.op("vector_cosine_ops"),
     ),
   ],
-);
+).enableRLS();
 
 // --- relations ------------------------------------------------------------
 

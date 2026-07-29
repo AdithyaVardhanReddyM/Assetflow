@@ -186,11 +186,20 @@ export type AssetLineage = {
   costUsd: number | null;
 };
 
-/** One node of the graph that produced the asset, walked upstream. */
+/**
+ * One pass of the graph that produced the asset, walked upstream across every
+ * run that touched it. A pass, not a node: the same canvas node edited twice is
+ * two hops, which is why `id` carries the run and `nodeId` alone cannot.
+ */
 export type LineageHop = {
+  /** `${runId}:${nodeId}` — what the chain's edges refer to. */
+  id: string;
   nodeId: string;
+  /** The run this pass ran in; hops from different runs are different runs. */
+  runId: string;
+  workflowId: string | null;
   kind: string;
-  /** Hops from the asset's own node: 0 is the step that made it. */
+  /** Rows from the asset's own node: 0 is the step that made it. */
   depth: number;
   title: string | null;
   text: string | null;
@@ -198,12 +207,15 @@ export type LineageHop = {
   model: string | null;
   prompt: string | null;
   stepType: string | null;
+  costUsd: number | null;
   assets: LibraryAsset[];
 };
 
 export type LineageChain = {
   hops: LineageHop[];
   edges: { source: string; target: string }[];
+  /** True when the history was deeper than the walk was willing to open. */
+  truncated: boolean;
 };
 
 export type AssetProvenance = {
@@ -232,7 +244,10 @@ type LineageRow = {
 };
 
 type HopRow = {
+  id: string;
   node_id: string;
+  run_id: string;
+  workflow_id: string | null;
   kind: string;
   depth: number;
   title: string | null;
@@ -241,6 +256,7 @@ type HopRow = {
   model: string | null;
   prompt: string | null;
   step_type: string | null;
+  cost_usd: number | null;
   assets: AssetRow[];
 };
 
@@ -256,7 +272,11 @@ export async function fetchProvenance(
     const body = (await res.json()) as {
       manifest_uri: string | null;
       lineage: LineageRow | null;
-      chain: { hops: HopRow[]; edges: { source: string; target: string }[] } | null;
+      chain: {
+        hops: HopRow[];
+        edges: { source: string; target: string }[];
+        truncated?: boolean;
+      } | null;
     };
     return {
       manifestUri: body.manifest_uri,
@@ -280,7 +300,10 @@ export async function fetchProvenance(
       chain: body.chain
         ? {
             hops: body.chain.hops.map((hop) => ({
+              id: hop.id,
               nodeId: hop.node_id,
+              runId: hop.run_id,
+              workflowId: hop.workflow_id,
               kind: hop.kind,
               depth: hop.depth,
               title: hop.title,
@@ -289,9 +312,11 @@ export async function fetchProvenance(
               model: hop.model,
               prompt: hop.prompt,
               stepType: hop.step_type,
+              costUsd: hop.cost_usd ?? null,
               assets: (hop.assets ?? []).map(toAsset),
             })),
             edges: body.chain.edges ?? [],
+            truncated: body.chain.truncated ?? false,
           }
         : null,
     };

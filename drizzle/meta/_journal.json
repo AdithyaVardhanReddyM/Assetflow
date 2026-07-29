@@ -43,6 +43,13 @@
       "when": 1785200100533,
       "tag": "0005_wakeful_junta",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785245998547,
+      "tag": "0006_lock-out-the-data-api",
+      "breakpoints": true
     }
   ]
 }
