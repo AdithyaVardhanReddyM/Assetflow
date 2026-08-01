@@ -1,5 +1,5 @@
 /**
- * The workflow-builder agent's brain: Gemini Flash over OpenRouter, streaming
+ * The workflow-builder agent's brain: Gemini Flash over GMI Cloud, streaming
  * UIMessages back to the sidebar. All three tools are client-executed — the
  * canvas is in the browser, so placing, editing and questioning all happen
  * there and the stream simply stops at each tool call.
@@ -9,8 +9,8 @@
  * could only be delivered in-band.
  */
 
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { auth } from "@clerk/nextjs/server";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   type FileUIPart,
   type UIMessage,
@@ -165,14 +165,19 @@ export async function POST(req: Request) {
     }
   }
 
-  const openrouter = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
+  const gmi = createOpenAICompatible({
+    name: "gmi",
+    apiKey: process.env.GMI_API_KEY,
+    baseURL: "https://api.gmi-serving.com/v1",
+  });
 
   const result = streamText({
     // Low reasoning effort: Gemini 3.6 Flash reasons by default, and unbounded
     // thinking adds seconds of dead air before the first visible token. Output
     // tokens stay uncapped — a capped budget is how reasoning models return
     // empty content (see the Kimi node's history).
-    model: openrouter.chat(AGENT_MODEL, { reasoning: { effort: "low" } }),
+    model: gmi.chatModel(AGENT_MODEL),
+    providerOptions: { gmi: { reasoningEffort: "low" } },
     system: buildSystemPrompt({ catalog, graph, attachments, remix }),
     messages: await convertToModelMessages(await withMediaParts(messages, urls)),
     tools: {

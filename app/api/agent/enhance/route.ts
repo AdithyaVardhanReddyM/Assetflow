@@ -4,7 +4,7 @@
  * carries none of the chat machinery's weight.
  */
 
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateObject } from "ai";
 import { z } from "zod";
 
@@ -48,16 +48,25 @@ export async function POST(req: Request) {
   if (!parsed.success) return Response.json({ error: "Bad request." }, { status: 400 });
   const { mode, prompt, aspect, needsStartFrame, needsEndFrame } = parsed.data;
 
-  const openrouter = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
-  // Prompt rewriting needs craft, not deliberation — minimal reasoning keeps
-  // the "Crafting…" moment near-instant (the model reasons by default).
-  const model = openrouter.chat(AGENT_MODEL, { reasoning: { effort: "minimal" } });
+  const gmi = createOpenAICompatible({
+    name: "gmi",
+    apiKey: process.env.GMI_API_KEY,
+    baseURL: "https://api.gmi-serving.com/v1",
+    // Without this the schema rides along as prose and the model freelances
+    // its own JSON keys; with it GMI enforces response_format json_schema.
+    supportsStructuredOutputs: true,
+  });
+  // Prompt rewriting needs craft, not deliberation — low reasoning keeps the
+  // "Crafting…" moment near-instant (the model reasons by default).
+  const model = gmi.chatModel(AGENT_MODEL);
+  const reasoning = { gmi: { reasoningEffort: "low" } };
   const shape = aspect ? ` The output shape is ${aspect}.` : "";
 
   try {
     if (mode === "image") {
       const { object } = await generateObject({
         model,
+        providerOptions: reasoning,
         schema: ImageResult,
         prompt:
           `Rewrite this idea as one detailed image-generation prompt a senior art ` +
@@ -74,6 +83,7 @@ export async function POST(req: Request) {
     ].filter(Boolean);
     const { object } = await generateObject({
       model,
+      providerOptions: reasoning,
       schema: VideoResult,
       prompt:
         `Rewrite this idea as a detailed video-generation brief. Return a videoPrompt ` +

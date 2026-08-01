@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from genblaze_core.providers.base import BaseProvider
+
 from app.engine.manifests import sign_for_fetch
 from app.engine.providers import build_provider
 from app.graph.plan import ExecutionPlan, PlannedStep
@@ -54,17 +56,26 @@ class BuildContext:
     resume_ids: dict[str, str] = field(default_factory=dict)
 
 
-class ResumeProvider:
+class ResumeProvider(BaseProvider):
     """A provider that re-attaches to an in-flight upstream job.
 
     GenBlaze's resume path takes the prediction id as an *argument* —
     `aresume(prediction_id, step, config)` — there is no RunnableConfig key
     for it, and `Pipeline` only ever executes a step through the provider's
-    `invoke`/`ainvoke`. Wrapping the adapter is therefore the seam: the
-    pipeline keeps its sink, manifest, events and input chaining, and the one
-    thing that changes is that this step polls/fetches the checkpointed job
-    instead of calling `submit()` — which is what keeps a retried timeout from
-    billing the provider twice.
+    `invoke`/`ainvoke`. (`Pipeline.resume_step` resumes one step *outside* a
+    run; it cannot keep the rest of the pipeline — sink, manifest, events,
+    input chaining — around it.) Wrapping the adapter is therefore the seam:
+    the one thing that changes is that this step polls/fetches the
+    checkpointed job instead of calling `submit()` — which is what keeps a
+    retried timeout from billing the provider twice.
+
+    Subclasses `BaseProvider` because `Pipeline.step()` (core 0.3.8) rejects
+    anything else. Inheriting brings concrete implementations that would
+    shadow `__getattr__`, so every member the pipeline consults on a step's
+    provider is delegated explicitly; `__getattr__` covers the rest,
+    including instance state (`super().__init__()` is deliberately not
+    called, so inherited code that reads provider state falls through to the
+    adapter's own).
     """
 
     def __init__(self, inner: Any, prediction_id: str) -> None:
@@ -72,9 +83,41 @@ class ResumeProvider:
         self._prediction_id = prediction_id
 
     def __getattr__(self, name: str) -> Any:
-        # Everything the pipeline consults — name, capabilities, preflight
-        # validation, cost estimation, param normalization — is the adapter's.
         return getattr(self._inner, name)
+
+    @property
+    def name(self) -> str:  # type: ignore[override]
+        return self._inner.name
+
+    def get_capabilities(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_capabilities(*args, **kwargs)
+
+    def validate_model(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.validate_model(*args, **kwargs)
+
+    def normalize_params(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.normalize_params(*args, **kwargs)
+
+    def estimate_cost(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.estimate_cost(*args, **kwargs)
+
+    def prepare_payload(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.prepare_payload(*args, **kwargs)
+
+    def submit(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.submit(*args, **kwargs)
+
+    def poll(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.poll(*args, **kwargs)
+
+    def fetch_output(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.fetch_output(*args, **kwargs)
+
+    def resume(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.resume(*args, **kwargs)
+
+    async def aresume(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.aresume(*args, **kwargs)
 
     def invoke(self, step: Any, config: Any = None) -> Any:
         return self._inner.resume(self._prediction_id, step, config)
