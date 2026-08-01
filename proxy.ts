@@ -4,6 +4,9 @@ const isPublicRoute = createRouteMatcher([
   "/",
   "/sign-in(.*)",
   "/sign-up(.*)",
+  // The reading room for stamped exports — its whole audience is people
+  // without accounts, holding a file someone sent them.
+  "/inspect(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {

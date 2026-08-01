@@ -133,29 +133,35 @@ export async function POST(req: Request) {
 
   // Fresh presigned URLs for everything the model should look at. Uses the
   // caller's own Clerk token so FastAPI resolves the same tenant either way.
+  // Degrades rather than dies: a failure here means the model converses
+  // without seeing the media — worse answers beat a blank sidebar.
   let urls: Record<string, { url: string; mediaType: string }> = {};
   let remix: { source: RemixSource; graph: Graph | null } | null = null;
   if (attachments.length || remixSource) {
-    const { getToken } = await auth();
-    const token = await getToken().catch(() => null);
-    if (attachments.length) {
-      const previews = await fetchAssetPreviews(
-        attachments.map((a) => a.assetId),
-        { token, userId: who.userId },
-      );
-      urls = Object.fromEntries(
-        Object.entries(previews).map(([id, p]) => [id, { url: p.url, mediaType: p.mediaType }]),
-      );
-    }
-    if (remixSource) {
-      // Re-walked per request rather than stored on the message: the walk is
-      // a handful of indexed reads, and the digest stays true to the runs
-      // even if the transcript is reopened days later.
-      const rebuilt = await fetchReconstruction(remixSource.assetId, {
-        token,
-        userId: who.userId,
-      });
-      remix = { source: remixSource, graph: rebuilt.ok ? rebuilt.data.graph : null };
+    try {
+      const { getToken } = await auth();
+      const token = await getToken().catch(() => null);
+      if (attachments.length) {
+        const previews = await fetchAssetPreviews(
+          attachments.map((a) => a.assetId),
+          { token, userId: who.userId },
+        );
+        urls = Object.fromEntries(
+          Object.entries(previews).map(([id, p]) => [id, { url: p.url, mediaType: p.mediaType }]),
+        );
+      }
+      if (remixSource) {
+        // Re-walked per request rather than stored on the message: the walk is
+        // a handful of indexed reads, and the digest stays true to the runs
+        // even if the transcript is reopened days later.
+        const rebuilt = await fetchReconstruction(remixSource.assetId, {
+          token,
+          userId: who.userId,
+        });
+        remix = { source: remixSource, graph: rebuilt.ok ? rebuilt.data.graph : null };
+      }
+    } catch (error) {
+      console.error("[agent/chat] media resolution failed", error);
     }
   }
 
@@ -193,12 +199,22 @@ export async function POST(req: Request) {
     stream: toUIMessageStream({
       stream: result.stream,
       originalMessages: messages,
+      // Unmasked on purpose: the default hides every stream failure behind
+      // "An error occurred", which reached users as a silently blank sidebar.
+      // The message lands in the client's onError toast; the console line is
+      // the server-side record of what actually broke.
+      onError: (error) => {
+        console.error("[agent/chat] stream error", error);
+        return error instanceof Error ? error.message : String(error);
+      },
       onEnd: async ({ messages: merged }) => {
         try {
           await upsertMessages(who.tenantId, chat.id, merged);
-        } catch {
+        } catch (error) {
           // The client flushes the same transcript on its next action; a
-          // failed write here loses nothing durable.
+          // failed write here loses nothing durable — but say so, silence
+          // here has already cost a debugging session.
+          console.error("[agent/chat] transcript write failed", error);
         }
       },
     }),

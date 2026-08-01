@@ -123,6 +123,7 @@ def create_app() -> FastAPI:
         catalog,
         events,
         health,
+        inspect,
         magic_text,
         runs,
         workflows,
@@ -130,7 +131,9 @@ def create_app() -> FastAPI:
 
     # magic_text before assets: both share the /v1/assets prefix, and its
     # literal /text-edits route must win over the assets router's /{asset_id}.
-    for module in (health, catalog, workflows, runs, events, magic_text, captions, assets):
+    for module in (
+        health, catalog, workflows, runs, events, magic_text, captions, assets, inspect,
+    ):
         app.include_router(module.router)
 
     # Local storage mode serves generated media straight off disk so the canvas

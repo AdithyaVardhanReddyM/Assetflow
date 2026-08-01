@@ -224,7 +224,7 @@ def _materialize(
 
     fetched = record.url.startswith("http") and _fetch(record.url, dest)
     if not fetched and record.url.startswith("file://"):
-        # A real local output (the OpenRouter adapter, or anything else that
+        # A real local output (the LLM text adapter, or anything else that
         # stages into temp). Copy the actual bytes — falling through to the
         # sample would silently replace an LLM's words with placeholder text.
         source = Path(url2pathname(urlparse(record.url).path))

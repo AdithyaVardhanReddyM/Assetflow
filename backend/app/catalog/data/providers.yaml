@@ -523,6 +523,32 @@ providers:
           - {port: speech, via: external_inputs, modality: audio}
         params: []
 
+      # The LLM node's model — text in, text out. Runs through our own
+      # SyncProvider over Replicate's predictions API rather than either
+      # GenBlaze connector: language models stream token *lists* and carry no
+      # output file, which the media path cannot express. Param names below are
+      # the model's own Replicate schema, not the OpenAI-ish spelling it had
+      # while this ran on OpenRouter.
+      - id: moonshotai/kimi-k2.6
+        label: Kimi K2.6
+        modality: text
+        role: llm
+        adapter: app.engine.replicate_text_provider:text_provider
+        expected_duration_sec: 12
+        est_cost_usd: 0.01
+        output_media_type: text/plain
+        params:
+          - name: system_prompt
+            type: string
+            label: System prompt
+            help: How the model should behave. Left empty, it writes clean
+              prompt-ready text with no chat framing.
+            group: body
+            multiline: true
+            max_length: 4000
+          - {name: temperature, type: number, label: Temperature, default: 0.6, min: 0, max: 2, step: 0.1, group: advanced}
+          - {name: max_tokens, type: integer, label: Max tokens, default: 1024, min: 16, max: 16384, step: 16, group: advanced}
+
   - key: runway
     label: Runway
     package: genblaze_runway
@@ -690,6 +716,89 @@ providers:
               - {value: "1808:768", label: "1808×768 · ≈21:9"}
               - {value: "1360:768", label: "1360×768 · ≈16:9"}
               - {value: "1168:880", label: "1168×880 · ≈4:3"}
+
+      # --- recipes -------------------------------------------------------
+      # Runway packages some multi-step workflows behind a single endpoint
+      # (/v1/recipes/<name>). They are not models — each has its own hand-
+      # written signature — so each rides its own model id through
+      # RunwayRecipeProvider, which dispatches on that id. Task lifecycle and
+      # output shape are identical to the Gen-4 image models above, so both
+      # sit in the image node's picker like anything else.
+
+      # Re-renders an existing ad in another language: the on-screen copy is
+      # translated and re-typeset while the layout, palette and art stay put.
+      # Driven entirely by its input — the ad is the only thing to describe,
+      # and it arrives as a picture, so there is no prompt box.
+      - id: recipe_ad_localization
+        label: Ad Localization
+        modality: image
+        adapter: app.engine.genblaze_adapters:RunwayRecipeProvider
+        expected_duration_sec: 60
+        est_cost_usd: 0.15
+        output_media_type: image/png
+        requires_prompt: false
+        # The ad to localize. Required — the adapter names what is missing
+        # rather than letting Runway answer with a 400.
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          # Runway's own list of target languages. The codes are ISO-style;
+          # the labels are what the picker shows.
+          - name: target_language
+            type: enum
+            label: Language
+            help: The language the ad's on-screen text is rewritten into.
+            default: es
+            options:
+              - {value: ar, label: Arabic}
+              - {value: zh, label: "Chinese (Simplified)"}
+              - {value: zh-Hant, label: "Chinese (Traditional)"}
+              - {value: nl, label: Dutch}
+              - {value: en, label: English}
+              - {value: fr, label: French}
+              - {value: de, label: German}
+              - {value: el, label: Greek}
+              - {value: hi, label: Hindi}
+              - {value: id, label: Indonesian}
+              - {value: it, label: Italian}
+              - {value: ja, label: Japanese}
+              - {value: ko, label: Korean}
+              - {value: pl, label: Polish}
+              - {value: pt, label: Portuguese}
+              - {value: ru, label: Russian}
+              - {value: es, label: Spanish}
+              - {value: sv, label: Swedish}
+              - {value: th, label: Thai}
+              - {value: tr, label: Turkish}
+              - {value: uk, label: Ukrainian}
+              - {value: vi, label: Vietnamese}
+
+      # A brief plus (usually) a brand logo, out come several on-brand
+      # marketing stills in one task. Every URL the task returns becomes its
+      # own asset on the step, so four images land as four takes in the node's
+      # carousel rather than one picture and three dropped on the floor.
+      - id: recipe_marketing_stock_image
+        label: Marketing Stock Image
+        modality: image
+        adapter: app.engine.genblaze_adapters:RunwayRecipeProvider
+        expected_duration_sec: 90
+        # GPT Image 2 underneath, billed per image — quoted at the 4-up default.
+        est_cost_usd: 0.32
+        output_media_type: image/png
+        # Optional: the logo guides the look, the brief alone still runs.
+        accepts:
+          - {port: image_ref, via: external_inputs, modality: image}
+        params:
+          - {name: output_count, type: integer, label: Images, default: 4, min: 1, max: 4, step: 1}
+          - name: quality
+            type: enum
+            label: Quality
+            default: high
+            group: advanced
+            options:
+              - {value: low, label: Low}
+              - {value: medium, label: Medium}
+              - {value: high, label: High}
 
   - key: luma
     label: Luma
@@ -988,7 +1097,7 @@ providers:
             label: Resolution
             default: "720p"
             options: [{value: "480p"}, {value: "720p"}, {value: "1080p"}]
-          - {name: generate_audio, type: boolean, label: Audio, default: true}
+          - {name: generate_audio, type: boolean, label: Audio, default: false}
           - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
 
       - id: seedance-2-0-fast-260128
@@ -1022,7 +1131,7 @@ providers:
             label: Resolution
             default: "720p"
             options: [{value: "480p"}, {value: "720p"}]
-          - {name: generate_audio, type: boolean, label: Audio, default: true}
+          - {name: generate_audio, type: boolean, label: Audio, default: false}
           - {name: watermark, type: boolean, label: Watermark, default: false, group: advanced}
 
       # Image-to-video only: the start image is required (the registry spec
@@ -1228,6 +1337,12 @@ providers:
       # an optional style-reference image. Our adapter routes the wired video
       # to `data` and a wired image to `reference_image` — the stock one
       # blindly sends whatever input comes first.
+      #
+      # Both ports hand uploads over as URL params (the decart SDK downloads
+      # them), because the canonical Lucy graph mixes an upload with a
+      # generated input — cap image onto a generated clip — and GenBlaze
+      # cannot put external_inputs and input_from on one step. Chained inputs
+      # still ride input_from; the adapter accepts either path per slot.
       - id: "lucy-2.5"
         label: Lucy 2.5 (video edit)
         modality: video
@@ -1237,12 +1352,13 @@ providers:
         # Preview only — the real framing follows the wired video.
         output_aspect_ratio: "16:9"
         accepts:
-          - {port: source_video, via: external_inputs, modality: video}
-          - {port: image_ref, via: external_inputs, modality: image}
+          - {port: source_video, via: param, param: data, modality: video}
+          - {port: image_ref, via: param, param: reference_image, modality: image}
         params:
+          # `self_anchor` used to sit here too — it's not in the decart SDK's
+          # lucy-2.5 input schema (data/prompt/reference_image/resolution per
+          # the 2026-07 docs), so the SDK validated-and-dropped it silently.
           - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
-          # Re-anchor generation on the model's own latent — lucy-2.5 only.
-          - {name: self_anchor, type: boolean, label: Self anchor, default: true, group: advanced}
 
       # Virtual try-on: the wired video is the person, the wired image is the
       # garment. Driven by its ports — a prompt is optional upstream and the
@@ -1256,8 +1372,11 @@ providers:
         output_aspect_ratio: "9:16"
         requires_prompt: false
         accepts:
-          - {port: source_video, via: external_inputs, modality: video}
-          - {port: image_ref, via: external_inputs, modality: image}
+          # Param handoff for the same reason as lucy-2.5 above: the garment
+          # is typically an upload, the person a generated clip (or vice
+          # versa), and one step cannot carry both delivery paths natively.
+          - {port: source_video, via: param, param: data, modality: video}
+          - {port: image_ref, via: param, param: reference_image, modality: image}
         params:
           - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
 
@@ -1284,34 +1403,3 @@ providers:
             default: "720p"
             options: [{value: "480p"}, {value: "720p"}]
           - {name: enhance_prompt, type: boolean, label: Enhance prompt, default: true, group: advanced}
-
-  # OpenRouter — text in, text out, the LLM node's real provider. Not a
-  # GenBlaze connector package: the adapter ships in-app (a SyncProvider over
-  # the plain chat-completions API), so `package` points at the app itself —
-  # the availability probe only needs an importable module to prove the
-  # adapter's code is present; the key check is what actually gates it.
-  - key: openrouter
-    label: OpenRouter
-    package: app.engine
-    env_var: OPENROUTER_API_KEY
-    signup_url: https://openrouter.ai/settings/keys
-    models:
-      - id: moonshotai/kimi-k2.6
-        label: Kimi K2.6
-        modality: text
-        role: llm
-        adapter: app.engine.openrouter_provider:text_provider
-        expected_duration_sec: 12
-        est_cost_usd: 0.01
-        output_media_type: text/plain
-        params:
-          - name: system_prompt
-            type: string
-            label: System prompt
-            help: How the model should behave. Left empty, it writes clean
-              prompt-ready text with no chat framing.
-            group: body
-            multiline: true
-            max_length: 4000
-          - {name: temperature, type: number, label: Temperature, default: 0.6, min: 0, max: 2, step: 0.1, group: advanced}
-          - {name: max_tokens, type: integer, label: Max tokens, default: 1024, min: 16, max: 16384, step: 16, group: advanced}

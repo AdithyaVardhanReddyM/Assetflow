@@ -10,7 +10,9 @@ them. What is worth pinning:
 - reference images route to each model's *array* parameter, since silently
   dropping a wired reference is the failure mode the module exists to prevent;
 - the Runway image family validates ratios in-process and refuses a turbo
-  submit with no references before any network is touched.
+  submit with no references before any network is touched;
+- the Runway recipes send exactly the arguments their endpoint declares, and
+  a multi-image recipe keeps every URL its task returns (one asset per take).
 """
 
 from __future__ import annotations
@@ -23,9 +25,15 @@ from genblaze_core.models.step import Step
 
 from app.engine.genblaze_adapters import (
     _SEEDREAM_SIZES,
+    MAX_MARKETING_STOCK_OUTPUTS,
+    RECIPE_AD_LOCALIZATION,
+    RECIPE_MARKETING_STOCK_IMAGE,
+    RUNWAY_AD_LANGUAGES,
     RUNWAY_IMAGE_RATIOS,
+    RUNWAY_RECIPE_VERSION,
     DecartLucyImageProvider,
     RunwayImageProvider,
+    RunwayRecipeProvider,
     replicate_image_specs,
     seedream5_specs,
     seedream_size_transform,
@@ -180,6 +188,164 @@ def test_runway_ratio_enum_matches_catalog_options():
         assert spec is not None
         values = {o.value for o in spec.options}
         assert values == RUNWAY_IMAGE_RATIOS
+
+
+# --- Runway recipes ---------------------------------------------------------
+
+
+class _FakeTask:
+    def __init__(self, task_id: str) -> None:
+        self.id = task_id
+
+
+class _FakeRecipes:
+    """Records the kwargs each recipe was called with, and nothing else."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def ad_localization(self, **kwargs):
+        self.calls.append(("ad_localization", kwargs))
+        return _FakeTask("task-ad")
+
+    def marketing_stock_image(self, **kwargs):
+        self.calls.append(("marketing_stock_image", kwargs))
+        return _FakeTask("task-mkt")
+
+
+def _recipe_provider() -> tuple[RunwayRecipeProvider, _FakeRecipes]:
+    provider = RunwayRecipeProvider(api_secret="test-secret")
+    recipes = _FakeRecipes()
+    # Pre-seed the lazy client so nothing imports or calls the runwayml SDK.
+    provider._client = type("_FakeClient", (), {"recipes": recipes})()
+    return provider, recipes
+
+
+def test_ad_localization_submits_the_wired_image_and_language():
+    provider, recipes = _recipe_provider()
+    step = _image_step(RECIPE_AD_LOCALIZATION, "runway-recipe", {"target_language": "ja"})
+    step.inputs = [_img("https://x.test/ad.png")]
+
+    assert provider.submit(step) == "task-ad"
+    name, kwargs = recipes.calls[0]
+    assert name == "ad_localization"
+    assert kwargs == {
+        "reference_image": {"uri": "https://x.test/ad.png"},
+        "target_language": "ja",
+        "version": RUNWAY_RECIPE_VERSION,
+    }
+
+
+def test_ad_localization_takes_only_the_first_wired_image():
+    """The recipe has one reference slot, not the Gen-4 models' array."""
+    provider, recipes = _recipe_provider()
+    step = _image_step(RECIPE_AD_LOCALIZATION, "runway-recipe", {"target_language": "de"})
+    step.inputs = [_img("https://x.test/a.png"), _img("https://x.test/b.png")]
+
+    provider.submit(step)
+    assert recipes.calls[0][1]["reference_image"] == {"uri": "https://x.test/a.png"}
+
+
+def test_ad_localization_refuses_an_unwired_node():
+    # Must fail with a wiring hint before the SDK is touched — the recipe has
+    # nothing to localize without an image.
+    provider, recipes = _recipe_provider()
+    step = _image_step(RECIPE_AD_LOCALIZATION, "runway-recipe", {"target_language": "es"})
+    with pytest.raises(ProviderError, match="connect an image"):
+        provider.submit(step)
+    assert recipes.calls == []
+
+
+def test_ad_localization_rejects_a_language_runway_does_not_take():
+    provider, _ = _recipe_provider()
+    step = _image_step(RECIPE_AD_LOCALIZATION, "runway-recipe", {"target_language": "xx"})
+    step.inputs = [_img("https://x.test/ad.png")]
+    with pytest.raises(ProviderError):
+        provider.submit(step)
+
+
+def test_marketing_stock_image_submits_brief_count_and_optional_logo():
+    provider, recipes = _recipe_provider()
+    step = _image_step(
+        RECIPE_MARKETING_STOCK_IMAGE,
+        "runway-recipe",
+        {"output_count": 4, "quality": "high"},
+    )
+    step.inputs = [_img("https://x.test/logo.png")]
+
+    assert provider.submit(step) == "task-mkt"
+    name, kwargs = recipes.calls[0]
+    assert name == "marketing_stock_image"
+    assert kwargs == {
+        "prompt": "a test prompt",
+        "version": RUNWAY_RECIPE_VERSION,
+        "reference_image": {"uri": "https://x.test/logo.png"},
+        "output_count": 4,
+        "quality": "high",
+    }
+
+
+def test_marketing_stock_image_runs_without_a_logo():
+    provider, recipes = _recipe_provider()
+    step = _image_step(RECIPE_MARKETING_STOCK_IMAGE, "runway-recipe", {"output_count": 2})
+    provider.submit(step)
+    assert "reference_image" not in recipes.calls[0][1]
+
+
+def test_marketing_stock_image_caps_output_count_at_four():
+    provider, _ = _recipe_provider()
+    step = _image_step(RECIPE_MARKETING_STOCK_IMAGE, "runway-recipe", {"output_count": 5})
+    with pytest.raises(ProviderError):
+        provider.submit(step)
+
+
+def test_marketing_stock_image_refuses_an_empty_brief():
+    provider, recipes = _recipe_provider()
+    step = _image_step(RECIPE_MARKETING_STOCK_IMAGE, "runway-recipe", {})
+    step.prompt = "   "
+    with pytest.raises(ProviderError, match="brief"):
+        provider.submit(step)
+    assert recipes.calls == []
+
+
+def test_recipe_fetch_output_keeps_every_returned_image():
+    """The four-up recipe must land as four assets — one carousel take each."""
+    provider, _ = _recipe_provider()
+    step = _image_step(RECIPE_MARKETING_STOCK_IMAGE, "runway-recipe", {})
+    task = type(
+        "_Succeeded",
+        (),
+        {
+            "id": "task-mkt",
+            "status": "SUCCEEDED",
+            "output": [f"https://x.test/out{i}.png" for i in range(4)],
+        },
+    )()
+    provider._cache_poll_result("task-mkt", task)
+
+    out = provider.fetch_output("task-mkt", step)
+    assert [a.url for a in out.assets] == [f"https://x.test/out{i}.png" for i in range(4)]
+    assert {a.media_type for a in out.assets} == {"image/png"}
+
+
+def test_recipe_catalog_options_match_what_the_adapter_accepts():
+    """Every language the picker offers must be one the recipe takes."""
+    from app.catalog.registry import load_catalog
+
+    catalog = load_catalog()
+
+    ad = catalog.model("runway", RECIPE_AD_LOCALIZATION)
+    assert ad is not None, f"{RECIPE_AD_LOCALIZATION} missing from providers.yaml"
+    spec = ad.param("target_language")
+    assert spec is not None
+    assert {o.value for o in spec.options} == RUNWAY_AD_LANGUAGES
+    # Driven by its image, so the canvas must not ask for a prompt.
+    assert ad.requires_prompt is False
+
+    mkt = catalog.model("runway", RECIPE_MARKETING_STOCK_IMAGE)
+    assert mkt is not None, f"{RECIPE_MARKETING_STOCK_IMAGE} missing from providers.yaml"
+    count = mkt.param("output_count")
+    assert count is not None and count.max == MAX_MARKETING_STOCK_OUTPUTS
 
 
 # --- Decart Lucy ------------------------------------------------------------

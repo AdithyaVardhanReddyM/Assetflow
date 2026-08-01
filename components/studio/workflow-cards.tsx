@@ -1,15 +1,7 @@
 "use client";
 
 import { formatDistanceToNowStrict } from "date-fns";
-import {
-  FilmSlateIcon,
-  IdentificationCardIcon,
-  ImageSquareIcon,
-  MusicNotesIcon,
-  SparkleIcon,
-  TrashIcon,
-} from "@phosphor-icons/react";
-import type { Icon } from "@phosphor-icons/react";
+import { SparkleIcon, TrashIcon } from "@phosphor-icons/react";
 
 import { Spinner } from "@/components/ui/spinner";
 
@@ -27,13 +19,6 @@ const SWATCHES: [string, string][] = [
   ["#fbe3d1", "#e08a4c"],
   ["#dde9f2", "#6d9dc5"],
   ["#f5dede", "#cf7c7c"],
-];
-
-const TEMPLATES: { name: string; tag: string; icon: Icon }[] = [
-  { name: "Product shot set", tag: "Image", icon: ImageSquareIcon },
-  { name: "Character turnaround", tag: "Character", icon: IdentificationCardIcon },
-  { name: "Lyric video", tag: "Video", icon: FilmSlateIcon },
-  { name: "Podcast trailer", tag: "Audio", icon: MusicNotesIcon },
 ];
 
 function hashHue(name: string) {
@@ -89,7 +74,6 @@ export function WorkflowCards({
   workflows,
   onOpen,
   onDelete,
-  onStartTemplate,
   busyId = null,
 }: {
   workflows: WorkflowCard[];
@@ -97,106 +81,71 @@ export function WorkflowCards({
   onOpen: (card: WorkflowCard) => void;
   /** Asks to delete — the shell owns the confirmation and the server call. */
   onDelete: (card: WorkflowCard) => void;
-  /** Templates are not saved rows — they open a blank canvas under that name. */
-  onStartTemplate: (name: string) => void;
-  /** The card being opened — a workflow id, or `template:<name>`. */
+  /** The workflow id being opened. */
   busyId?: string | null;
 }) {
-  const hasWorkflows = workflows.length > 0;
+  // Nothing made yet means nothing to show — the prompt bar above is the
+  // whole invitation, and a shelf of placeholders would only dilute it.
+  if (workflows.length === 0) return null;
 
   return (
     <div className="mx-auto w-[min(1000px,calc(100vw-160px))]">
       <div className="mb-3 flex items-baseline justify-between px-1">
         <h2 className="text-[13px] font-semibold tracking-[0.02em] text-[#4c4a41]">
-          {hasWorkflows ? "Recent workflows" : "Start from a template"}
+          Recent workflows
         </h2>
         <span className="text-xs text-[#a09a88]">
-          {hasWorkflows
-            ? `${workflows.length} workflow${workflows.length === 1 ? "" : "s"}`
-            : "or just start typing a prompt"}
+          {`${workflows.length} workflow${workflows.length === 1 ? "" : "s"}`}
         </span>
       </div>
 
       {/* overflow-x-auto also clips vertically, so the padding here has to clear
           the hover shadow (~36px below, ~18px aside); negative margins undo it. */}
       <div className="no-scrollbar -mx-4 -mb-7 flex gap-3.5 overflow-x-auto px-5 pt-2 pb-10">
-        {hasWorkflows
-          ? workflows.map((wf, i) => {
-              const [from, to] = hashHue(wf.name);
-              return (
-                <CardShell
-                  key={wf.id}
-                  delay={i * 55}
-                  busy={busyId === wf.id}
-                  onClick={() => onOpen(wf)}
-                  overlay={
-                    <button
-                      type="button"
-                      aria-label={`Delete ${wf.name}`}
-                      onClick={() => onDelete(wf)}
-                      className="absolute top-2 right-2 grid size-7 place-items-center bg-white/85 text-[#4c4a41] opacity-0 shadow-[0_2px_10px_-3px_rgba(31,33,28,0.4)] backdrop-blur-sm transition-all duration-150 group-hover:opacity-100 hover:bg-[#cf7c7c]/18 hover:text-[#a94848] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#1f211c]/40"
-                    >
-                      <TrashIcon className="size-3.5" />
-                    </button>
-                  }
+        {workflows.map((wf, i) => {
+          const [from, to] = hashHue(wf.name);
+          return (
+            <CardShell
+              key={wf.id}
+              delay={i * 55}
+              busy={busyId === wf.id}
+              onClick={() => onOpen(wf)}
+              overlay={
+                <button
+                  type="button"
+                  aria-label={`Delete ${wf.name}`}
+                  onClick={() => onDelete(wf)}
+                  className="absolute top-2 right-2 grid size-7 place-items-center bg-white/85 text-[#4c4a41] opacity-0 shadow-[0_2px_10px_-3px_rgba(31,33,28,0.4)] backdrop-blur-sm transition-all duration-150 group-hover:opacity-100 hover:bg-[#cf7c7c]/18 hover:text-[#a94848] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#1f211c]/40"
                 >
-                  <div
-                    className="relative h-[104px] w-full"
-                    style={{
-                      background: `radial-gradient(130% 140% at 18% 0%, ${from} 30%, ${to} 100%)`,
-                    }}
-                  >
-                    <SparkleIcon
-                      weight="fill"
-                      className="absolute right-3 bottom-2.5 size-4 text-white/70 mix-blend-overlay"
-                    />
-                  </div>
-                  <div className="p-3">
-                    <p className="truncate text-[13px] font-semibold text-[#1f211c]">
-                      {wf.name}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-[#a09a88]">
-                      Edited{" "}
-                      {formatDistanceToNowStrict(new Date(wf.updatedAt), {
-                        addSuffix: true,
-                      })}
-                    </p>
-                  </div>
-                </CardShell>
-              );
-            })
-          : TEMPLATES.map((tpl, i) => {
-              const [from, to] = hashHue(tpl.name);
-              const IconComp = tpl.icon;
-              return (
-                <CardShell
-                  key={tpl.name}
-                  delay={i * 55}
-                  busy={busyId === `template:${tpl.name}`}
-                  onClick={() => onStartTemplate(tpl.name)}
-                >
-                  <div
-                    className="relative h-[104px] w-full"
-                    style={{
-                      background: `radial-gradient(130% 140% at 18% 0%, ${from} 30%, ${to} 100%)`,
-                    }}
-                  >
-                    <IconComp
-                      weight="duotone"
-                      className="absolute right-3 bottom-2.5 size-6 text-[#1f211c]/35"
-                    />
-                  </div>
-                  <div className="p-3">
-                    <p className="truncate text-[13px] font-semibold text-[#1f211c]">
-                      {tpl.name}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-[#a09a88]">
-                      Template · {tpl.tag}
-                    </p>
-                  </div>
-                </CardShell>
-              );
-            })}
+                  <TrashIcon className="size-3.5" />
+                </button>
+              }
+            >
+              <div
+                className="relative h-[104px] w-full"
+                style={{
+                  background: `radial-gradient(130% 140% at 18% 0%, ${from} 30%, ${to} 100%)`,
+                }}
+              >
+                <SparkleIcon
+                  weight="fill"
+                  className="absolute right-3 bottom-2.5 size-4 text-white/70 mix-blend-overlay"
+                />
+              </div>
+              <div className="p-3">
+                <p className="truncate text-[13px] font-semibold text-[#1f211c]">
+                  {wf.name}
+                </p>
+                <p className="mt-0.5 text-[11px] text-[#a09a88]">
+                  Edited{" "}
+                  {formatDistanceToNowStrict(new Date(wf.updatedAt), {
+                    addSuffix: true,
+                  })}
+                </p>
+              </div>
+            </CardShell>
+          );
+        })}
       </div>
     </div>
   );

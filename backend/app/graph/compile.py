@@ -861,12 +861,18 @@ def _validate_params(
     for key, value in raw.items():
         spec = known.get(key)
         if spec is None:
-            ctx.fail(
-                ErrorCode.PARAM_UNKNOWN,
-                f"{model.label} has no parameter {key!r}.",
+            # A warning, not an error: saved graphs outlive the catalog, and
+            # the editor only renders declared params — a value left behind by
+            # a catalog change is invisible there, so failing would brick the
+            # workflow with no way to fix it from the UI. Seen live when
+            # lucy-2.5 lost `self_anchor`. Typos still surface: the param
+            # simply doesn't reach the provider, and the warning names it.
+            ctx.warn(
+                WarningCode.PARAM_DROPPED,
+                f"{model.label} no longer has a parameter {key!r}; it was "
+                "ignored for this run.",
                 node_id=node_id,
                 param=key,
-                hint=f"Supported: {', '.join(sorted(known)) or 'none'}.",
             )
             continue
         coerced = _coerce_param(spec, value, node_id, ctx)

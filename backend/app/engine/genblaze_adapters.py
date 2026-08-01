@@ -11,7 +11,8 @@ input routing) rather than bypassing it. The shapes of the fixes:
   ``gmicloud_video_provider``: Seedance frame/reference routing, Kling v3's
   required start image and string durations).
 - **First-party providers for endpoints the stock adapters never call** —
-  ``RunwayImageProvider`` (text_to_image), ``RunwayVideoProvider``
+  ``RunwayImageProvider`` (text_to_image), ``RunwayRecipeProvider`` (Runway's
+  packaged recipe workflows, one model id per recipe), ``RunwayVideoProvider``
   (text_to_video *or* image_to_video, chosen by wiring), ``LumaAgentsProvider``
   (Luma's Agents API — Ray 3.2 / Uni-1 are not on the legacy Dream Machine
   API), and the Decart Lucy editors (``DecartLucyImageProvider`` /
@@ -27,10 +28,12 @@ loaded, and its specs unit-tested, in a mock-only environment.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import os
 import re
 import tempfile
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -56,7 +59,7 @@ from genblaze_core.providers import (
 )
 from genblaze_core.providers.pricing import per_unit
 from genblaze_core.providers.retry import retry_after_from_response
-from genblaze_core.providers.spec import StringSchema
+from genblaze_core.providers.spec import IntSchema, StringSchema
 from genblaze_core.runnable.config import RunnableConfig
 
 from app.logging import get_logger
@@ -219,8 +222,41 @@ def replicate_provider() -> Any:
 # only (connect errors), because a submit that *did* land could double-bill on
 # replay. That reasoning does not apply here: GMI records the request as `failed`
 # with no output before answering, so the retry re-enqueues nothing.
-_GMI_SUBMIT_ATTEMPTS = 3
-_GMI_SUBMIT_BACKOFF_SEC = 2.0
+#
+# The ladder is minutes, not seconds. The first version spent 2s + 4s and gave
+# up — but the outage this exists for does not clear that fast. Read off this
+# account's own request log: seedance-2-0-fast failed six times between 06:05
+# and 06:06 and succeeded at 06:21. A ~6-second budget answers a fault that
+# lasts a quarter of an hour, which is to say it does not answer it at all.
+# `submit` runs under `asyncio.to_thread`, so the sleeps park a worker thread,
+# never the event loop, and the ceiling stays far inside
+# `video_step_timeout_seconds`.
+_GMI_SUBMIT_BACKOFF_SEC = (5.0, 15.0, 30.0, 60.0)
+_GMI_SUBMIT_ATTEMPTS = len(_GMI_SUBMIT_BACKOFF_SEC) + 1
+
+# GMI wraps its upstream's status in the 500 body: `Backend error (400)` is
+# BytePlus Ark answering GMI, not GMI answering us — our payload never reached
+# a validator that could have rejected it. Worth spelling out, because
+# "server_error" on a step whose inputs are two images reads as "my images are
+# wrong", and the hours someone spends re-exporting them are wasted.
+_GMI_BACKEND_ERROR = re.compile(r"Backend error \((\d{3})\)")
+
+
+def _gmi_upstream_hint(model: str, exc: ProviderError) -> ProviderError:
+    """Re-word an exhausted `Backend error (NNN)` so it names the real culprit."""
+    match = _GMI_BACKEND_ERROR.search(str(exc))
+    if match is None:
+        return exc
+    return ProviderError(
+        f"GMI Cloud could not reach {model} — its upstream answered "
+        f"{match.group(1)} on every one of {_GMI_SUBMIT_ATTEMPTS} attempts. "
+        "This is a fault on the model's route at GMI, not a problem with this "
+        "node's prompt, images or settings: the same error hits a bare "
+        "text-only request. Re-run later, or switch this node to another "
+        "video model.",
+        error_code=exc.error_code,
+        retry_after=exc.retry_after,
+    )
 
 
 class _RetryFlakyGMISubmit:
@@ -235,19 +271,20 @@ class _RetryFlakyGMISubmit:
             try:
                 return super()._submit_request(model, payload)  # type: ignore[misc]
             except ProviderError as exc:
-                if (
-                    exc.error_code is not ProviderErrorCode.SERVER_ERROR
-                    or attempt == _GMI_SUBMIT_ATTEMPTS
-                ):
+                if exc.error_code is not ProviderErrorCode.SERVER_ERROR:
                     raise
+                if attempt == _GMI_SUBMIT_ATTEMPTS:
+                    raise _gmi_upstream_hint(model, exc) from exc
+                delay = _GMI_SUBMIT_BACKOFF_SEC[attempt - 1]
                 log.warning(
                     "gmicloud.submit_retry",
                     model=model,
                     attempt=attempt,
                     of=_GMI_SUBMIT_ATTEMPTS,
+                    retry_in_sec=delay,
                     error=str(exc),
                 )
-                time.sleep(_GMI_SUBMIT_BACKOFF_SEC * attempt)
+                time.sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -295,18 +332,57 @@ class _GMIQueueStatusProgress:
         return None
 
 
+# GMI parks a failed request's reason at `outcome.error` / `outcome.error_code`;
+# the stock connector reads top-level `detail.error` (always absent), so every
+# model-level failure collapses to "Video generation failed". Seen live: a
+# ByteDance copyright block (`OutputVideoSensitiveContentDetected.
+# PolicyViolation`) reached the canvas as `code=unknown` — the one message that
+# would have told the user to reword their prompt, dropped on the floor.
+_GMI_POLICY_MARKERS = ("sensitivecontent", "policyviolation", "contentpolicy")
+
+
+class _GMISurfaceOutcomeError:
+    """Mixin raising GMI's real `outcome.error` when a request fails."""
+
+    def fetch_output(self, prediction_id: Any, step: Step) -> Step:
+        detail = self._fetch_detail(prediction_id)  # type: ignore[attr-defined]
+        if str(detail.get("status", "")).lower() in ("failed", "cancelled"):
+            outcome = detail.get("outcome") or {}
+            message = outcome.get("error")
+            if message:
+                upstream_code = str(outcome.get("error_code") or "")
+                policy = any(
+                    m in upstream_code.lower() for m in _GMI_POLICY_MARKERS
+                )
+                raise ProviderError(
+                    f"{message}" + (f" [{upstream_code}]" if upstream_code else ""),
+                    error_code=(
+                        ProviderErrorCode.CONTENT_POLICY
+                        if policy
+                        else ProviderErrorCode.MODEL_ERROR
+                    ),
+                )
+        return super().fetch_output(prediction_id, step)  # type: ignore[misc]
+
+
 @lru_cache(maxsize=1)
 def _gmi_retrying_classes() -> tuple[Any, Any]:
     """Lazy subclasses so this module imports without the gmicloud extra."""
     from genblaze_gmicloud import GMICloudImageProvider, GMICloudVideoProvider
 
     class RetryingGMICloudImageProvider(  # type: ignore[misc]
-        _GMIQueueStatusProgress, _RetryFlakyGMISubmit, GMICloudImageProvider
+        _GMIQueueStatusProgress,
+        _GMISurfaceOutcomeError,
+        _RetryFlakyGMISubmit,
+        GMICloudImageProvider,
     ):
         pass
 
     class RetryingGMICloudVideoProvider(  # type: ignore[misc]
-        _GMIQueueStatusProgress, _RetryFlakyGMISubmit, GMICloudVideoProvider
+        _GMIQueueStatusProgress,
+        _GMISurfaceOutcomeError,
+        _RetryFlakyGMISubmit,
+        GMICloudVideoProvider,
     ):
         pass
 
@@ -915,6 +991,141 @@ class RunwayImageProvider(_RunwayTaskProgress, BaseProvider):
             ) from exc
 
 
+# --- Runway recipes ----------------------------------------------------------
+
+# A recipe is a Runway-authored multi-step workflow behind one endpoint: a
+# single POST returns a task id and it polls exactly like any other Runway
+# task, which is why these ride RunwayImageProvider's lifecycle unchanged and
+# only submit() differs. What they are *not* is models — `client.recipes.<name>`
+# is a hand-written signature per recipe, with no shared model slug — so each
+# recipe is a model id here and submit() dispatches on it.
+RECIPE_AD_LOCALIZATION = "recipe_ad_localization"
+RECIPE_MARKETING_STOCK_IMAGE = "recipe_marketing_stock_image"
+
+# Pinned rather than "unsafe-latest": the params the catalog offers and the
+# copy on the node describe *this* version's behaviour, and upstream reserves
+# the right to change the latest without notice.
+RUNWAY_RECIPE_VERSION = "2026-06"
+
+# The target languages ad_localization accepts (runwayml 5.10). Codes only —
+# the catalog carries the display names, and a test pins the two together.
+RUNWAY_AD_LANGUAGES = frozenset(
+    {
+        "ar", "zh", "zh-Hant", "nl", "en", "fr", "de", "hi", "id", "it", "ja",
+        "ko", "pl", "pt", "ru", "es", "sv", "th", "tr", "uk", "vi", "el",
+    }
+)
+
+RUNWAY_MARKETING_QUALITIES = frozenset({"low", "medium", "high"})
+
+# Upstream caps marketing_stock_image at four images per call.
+MAX_MARKETING_STOCK_OUTPUTS = 4
+
+
+def _route_recipe_reference(inputs: Any) -> dict[str, Any]:
+    """The first wired image becomes the recipe's single ``referenceImage``.
+
+    Recipes take one reference, not the array the Gen-4 image models accept —
+    extras are dropped here rather than sent for upstream to reject.
+    """
+    images = [a for a in inputs if (a.media_type or "").startswith("image/")]
+    if not images:
+        return {}
+    return {"reference_image": {"uri": images[0].url}}
+
+
+_RUNWAY_RECIPE_SPECS = (
+    ModelSpec(
+        model_id=RECIPE_AD_LOCALIZATION,
+        modality=Modality.IMAGE,
+        param_schemas={"target_language": StringSchema(enum=RUNWAY_AD_LANGUAGES)},
+        param_required=frozenset({"target_language"}),
+        input_mapping=_route_recipe_reference,
+    ),
+    ModelSpec(
+        model_id=RECIPE_MARKETING_STOCK_IMAGE,
+        modality=Modality.IMAGE,
+        param_schemas={
+            "output_count": IntSchema(min=1, max=MAX_MARKETING_STOCK_OUTPUTS),
+            "quality": StringSchema(enum=RUNWAY_MARKETING_QUALITIES),
+        },
+        input_mapping=_route_recipe_reference,
+    ),
+)
+
+
+class RunwayRecipeProvider(RunwayImageProvider):
+    """Runway's recipe endpoints — ad localization and marketing stock images.
+
+    Everything after the POST is identical to a Gen-4 image task (same secret,
+    same `tasks.retrieve` polling, same `output` array of URLs), so only the
+    registry and `submit` are new. The inherited `fetch_output` already appends
+    *every* URL the task returns, which is what lets marketing_stock_image's
+    four images land as four assets on the step.
+    """
+
+    name = "runway-recipe"
+
+    @classmethod
+    def create_registry(cls) -> ModelRegistry:
+        registry = ModelRegistry()
+        registry.extend(_RUNWAY_RECIPE_SPECS)
+        return registry
+
+    def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
+        try:
+            payload = self.prepare_payload(step)
+            reference = payload.get("reference_image")
+
+            if step.model == RECIPE_AD_LOCALIZATION:
+                # The ad being localized *is* the input — checked before the
+                # client exists so it fires keyless, and worded as wiring
+                # rather than the 400 upstream would send back.
+                if not reference:
+                    raise ProviderError(
+                        "Ad Localization needs the ad to localize — connect an "
+                        "image to the node's reference input.",
+                        error_code=ProviderErrorCode.INVALID_INPUT,
+                    )
+                task = self._get_client().recipes.ad_localization(
+                    reference_image=reference,
+                    target_language=payload["target_language"],
+                    version=RUNWAY_RECIPE_VERSION,
+                )
+                return task.id
+
+            if step.model == RECIPE_MARKETING_STOCK_IMAGE:
+                prompt = str(payload.get("prompt") or step.prompt or "").strip()
+                if not prompt:
+                    raise ProviderError(
+                        "Marketing Stock Image needs a brief — describe the "
+                        "subject, audience and mood in the prompt.",
+                        error_code=ProviderErrorCode.INVALID_INPUT,
+                    )
+                request: dict = {"prompt": prompt, "version": RUNWAY_RECIPE_VERSION}
+                # The logo is optional here, unlike the ad above.
+                if reference:
+                    request["reference_image"] = reference
+                for key in ("output_count", "quality"):
+                    if key in payload:
+                        request[key] = payload[key]
+                task = self._get_client().recipes.marketing_stock_image(**request)
+                return task.id
+
+            raise ProviderError(
+                f"Unknown Runway recipe {step.model!r}.",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"Runway recipe submit failed: {exc}",
+                error_code=ProviderErrorCode.UNKNOWN,
+                retry_after=retry_after_from_response(exc),
+            ) from exc
+
+
 # --- Runway video (Gen-4.5, Gemini Omni Flash) -------------------------------
 
 # Per-model ratio surfaces from the Runway OpenAPI spec (2026-07). The
@@ -1360,18 +1571,32 @@ class LumaAgentsProvider(BaseProvider):
                     error_code=ProviderErrorCode.UNKNOWN,
                 )
 
-            assets = data.get("assets") or {}
-            urls = [str(v) for v in assets.values() if isinstance(v, str)]
-            if not urls:
-                raise ProviderError("Luma generation completed but no asset URL found")
+            # Two response shapes exist: `assets: {key: url}` (ray-era) and
+            # `output: [{"type": "image", "url": ...}]` — what uni-1 actually
+            # returns on API version 2026-04-01. Reading only the first lost a
+            # completed, billed image to "no asset URL found".
+            found: list[tuple[str, str | None]] = [
+                (str(v), None)
+                for v in (data.get("assets") or {}).values()
+                if isinstance(v, str)
+            ]
+            for item in data.get("output") or []:
+                if isinstance(item, dict) and isinstance(item.get("url"), str):
+                    found.append((item["url"], item.get("type")))
+            if not found:
+                raise ProviderError(
+                    "Luma generation completed but no asset URL found "
+                    f"(response keys: {sorted(data)})"
+                )
 
-            for url in urls:
+            for url, kind in found:
                 validate_asset_url(url)
                 mime, _ = mimetypes.guess_type(urlparse(url).path)
                 if mime is None:
-                    mime = (
-                        "video/mp4" if step.modality == Modality.VIDEO else "image/png"
+                    fallback_video = kind == "video" or (
+                        kind is None and step.modality == Modality.VIDEO
                     )
+                    mime = "video/mp4" if fallback_video else "image/png"
                 step.assets.append(Asset(url=url, media_type=mime))
 
             self._apply_registry_pricing(step)
@@ -1387,6 +1612,31 @@ class LumaAgentsProvider(BaseProvider):
 
 
 # --- Decart Lucy video editing ------------------------------------------------
+
+# The decart SDK caches an ``aiohttp.ClientSession`` inside ``DecartClient``,
+# and aiohttp welds a session to the event loop it was created on. GenBlaze's
+# ``_run_async`` runs each call under a fresh ``asyncio.run()`` loop and closes
+# it afterwards, so the session ``submit()`` created was dead by the first
+# ``poll()`` — seen live as `Decart video edit poll failed: Event loop is
+# closed`. Every decart coroutine therefore runs on this single process-wide
+# loop thread, which keeps the session valid across the whole
+# submit → poll → result lifecycle.
+_decart_loop_lock = threading.Lock()
+_decart_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _decart_call(coro: Any) -> Any:
+    """Run a decart SDK coroutine on the shared Decart event loop."""
+    global _decart_loop
+    with _decart_loop_lock:
+        if _decart_loop is None or _decart_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever, name="decart-loop", daemon=True
+            ).start()
+            _decart_loop = loop
+    return asyncio.run_coroutine_threadsafe(coro, _decart_loop).result()
+
 
 _DECART_LUCY_EDIT_FAMILY = ModelFamily(
     name="decart-lucy-video-edit",
@@ -1404,8 +1654,8 @@ class DecartLucyVideoProvider(BaseProvider):
     pinned genblaze_core (its ``local_file_url`` helper is gone), and its
     submit path could not express these models anyway — Lucy edits take the
     video being changed as ``data`` and a garment/style image as
-    ``reference_image``, routed here by media type, plus lucy-2.5's
-    ``self_anchor`` toggle. Drives the ``decart`` SDK's queue API directly.
+    ``reference_image``, routed here by media type. Drives the ``decart``
+    SDK's queue API directly.
     """
 
     name = "decart-lucy-video"
@@ -1464,7 +1714,6 @@ class DecartLucyVideoProvider(BaseProvider):
     def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
         try:
             from decart import models as decart_models
-            from genblaze_core._utils import _run_async
 
             # Wiring checks come before the client so a mis-wired node fails
             # the same way keyless or keyed.
@@ -1472,29 +1721,44 @@ class DecartLucyVideoProvider(BaseProvider):
 
             videos = [a for a in step.inputs if (a.media_type or "").startswith("video/")]
             images = [a for a in step.inputs if (a.media_type or "").startswith("image/")]
-            if not videos:
+
+            # Each slot arrives one of two ways: chained step outputs land in
+            # step.inputs (already SSRF-validated by prepare_payload), uploads
+            # ride the catalog's `via: param` handoff as presigned URLs in
+            # params — the split that lets one node mix an upload with a
+            # generated input despite external_inputs XOR input_from.
+            data_url = videos[0].url if videos else payload.get("data")
+            if not data_url:
                 raise ProviderError(
                     f"{step.model} edits an existing video — connect one to the "
                     "node's source video input.",
                     error_code=ProviderErrorCode.INVALID_INPUT,
                 )
+            if not videos:
+                validate_asset_url(str(data_url))
 
             params: dict[str, Any] = {
                 "model": decart_models.video(step.model),
                 # Optional upstream (defaults to ""), so port-driven runs work.
                 "prompt": payload.get("prompt", step.prompt or ""),
                 # The decart SDK downloads URL inputs itself.
-                "data": videos[0].url,
+                "data": data_url,
             }
-            if images:
-                params["reference_image"] = images[0].url
-            for key in ("enhance_prompt", "self_anchor", "seed"):
+            reference = images[0].url if images else payload.get("reference_image")
+            if reference:
+                if not images:
+                    validate_asset_url(str(reference))
+                params["reference_image"] = reference
+            # The SDK's VideoEdit2Input keeps exactly these; anything else is
+            # validated-and-dropped before the wire, so forwarding more would
+            # only pretend a knob exists.
+            for key in ("enhance_prompt", "resolution", "seed"):
                 if key in payload:
                     params[key] = payload[key]
             if step.seed is not None:
                 params.setdefault("seed", step.seed)
 
-            job = _run_async(self._get_client().queue.submit(params))
+            job = _decart_call(self._get_client().queue.submit(params))
             return job.job_id
         except ProviderError:
             raise
@@ -1507,9 +1771,7 @@ class DecartLucyVideoProvider(BaseProvider):
 
     def poll(self, prediction_id: Any, config: RunnableConfig | None = None) -> bool:
         try:
-            from genblaze_core._utils import _run_async
-
-            status = _run_async(self._get_client().queue.status(prediction_id))
+            status = _decart_call(self._get_client().queue.status(prediction_id))
             done = status.status in ("completed", "failed")
             if done:
                 self._poll_states.pop(str(prediction_id), None)
@@ -1530,10 +1792,8 @@ class DecartLucyVideoProvider(BaseProvider):
 
     def fetch_output(self, prediction_id: Any, step: Step) -> Step:
         try:
-            from genblaze_core._utils import _run_async
-
             client = self._get_client()
-            status = _run_async(client.queue.status(prediction_id))
+            status = _decart_call(client.queue.status(prediction_id))
             step.provider_payload = {
                 "decart": {"job_id": prediction_id, "status": status.status}
             }
@@ -1543,7 +1803,7 @@ class DecartLucyVideoProvider(BaseProvider):
                     error_code=ProviderErrorCode.UNKNOWN,
                 )
 
-            data = _run_async(client.queue.result(prediction_id))
+            data = _decart_call(client.queue.result(prediction_id))
             if hasattr(data, "data"):
                 data = data.data
 
@@ -1650,7 +1910,6 @@ class DecartLucyImageProvider(SyncProvider):
         client = self._get_client()
         try:
             from decart import models as decart_models
-            from genblaze_core._utils import _run_async
 
             # SSRF-validates every step.inputs URL before we download any.
             payload = self.prepare_payload(step)
@@ -1674,7 +1933,7 @@ class DecartLucyImageProvider(SyncProvider):
                 if key in payload:
                     params[key] = payload[key]
 
-            result = _run_async(client.process(params))
+            result = _decart_call(client.process(params))
             data = getattr(result, "data", result)
 
             if self._output_dir:

@@ -147,7 +147,7 @@ def test_decart_queued_reports_waiting(monkeypatch):
     status.status = "queued"
 
     monkeypatch.setattr(
-        "genblaze_core._utils._run_async", lambda coro: status, raising=True
+        "app.engine.genblaze_adapters._decart_call", lambda coro: status, raising=True
     )
     assert provider.poll("j1") is False
     assert provider.poll_progress("j1") == {"message": "Waiting in queue"}

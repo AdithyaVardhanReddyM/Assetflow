@@ -38,13 +38,13 @@ def test_every_model_has_a_wellformed_adapter_reference(catalog):
         # mock_providers (the sample-backed mock), genblaze_adapters (the
         # first-party providers/factories for models the stock connectors
         # cannot express — see that module's docstring), and
-        # openrouter_provider (the in-app LLM adapter).
+        # replicate_text_provider (the in-app LLM adapter).
         assert module.startswith(
             (
                 "genblaze",
                 "app.engine.mock_providers",
                 "app.engine.genblaze_adapters",
-                "app.engine.openrouter_provider",
+                "app.engine.replicate_text_provider",
             )
         ), f"{model.id} adapter is not a recognized module: {module}"
 

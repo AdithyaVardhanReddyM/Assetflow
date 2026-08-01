@@ -56,11 +56,19 @@ class NodeTypeDescriptor(BaseModel):
     default_data: dict[str, Any] = Field(default_factory=dict)
 
 
+#: Retired provider keys, mapped to whoever serves their models now. Graphs
+#: store the provider key alongside the model id, so a saved LLM node still
+#: says "openrouter" long after Kimi K2.6 moved to Replicate — without this it
+#: would compile to UNKNOWN_PROVIDER. Lookup-only: nothing re-emits these.
+_PROVIDER_ALIASES = {"openrouter": "replicate"}
+
+
 class Catalog(BaseModel):
     providers: list[ProviderDescriptor]
     node_types: list[NodeTypeDescriptor]
 
     def provider(self, key: str) -> ProviderDescriptor | None:
+        key = _PROVIDER_ALIASES.get(key, key)
         return next((p for p in self.providers if p.key == key), None)
 
     def model(self, provider_key: str, model_id: str) -> ModelDescriptor | None:

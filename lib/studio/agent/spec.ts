@@ -31,8 +31,12 @@ export const SPEC_TOOLS = [
 export const GraphSpecNodeSchema = z.object({
   id: z
     .string()
-    .regex(/^[a-z0-9_]{1,16}$/)
-    .describe("Local id, e.g. 'hero_shot'. Edges reference these."),
+    // Generous on purpose. These ids are spec-local — compile-spec swaps in
+    // real canvas ids — and a tight cap here is enforced INSIDE the AI SDK,
+    // where one 17-char id ('voiceover_tagline', live) aborts the entire
+    // stream before the self-correction loop can see it.
+    .regex(/^[a-z0-9_]{1,40}$/)
+    .describe("Local snake_case id, e.g. 'hero_shot', max 40 chars. Edges reference these."),
   tool: z.enum(SPEC_TOOLS),
   title: z.string().max(60).optional().describe("Short human label for the node."),
   prompt: z

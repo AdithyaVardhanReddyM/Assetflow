@@ -58,11 +58,13 @@ import { downloadResult } from "@/lib/studio/runs-client";
 import { uploadAsset } from "@/lib/studio/assets-client";
 import {
   deleteLibraryAsset,
+  downloadProvenanceExport,
   fetchLibrary,
   fetchProvenance,
   fetchRunManifest,
   renameLibraryAsset,
   searchLibrary,
+  STAMPABLE_MEDIA_TYPES,
   type AssetProvenance,
   type LibraryAsset,
   type LibrarySearch,
@@ -189,6 +191,16 @@ function downloadFilename(asset: LibraryAsset): string {
     return asset.filename.includes(".") ? asset.filename : `${asset.filename}${ext}`;
   }
   return `assetflow-${asset.modality}-${asset.id.slice(0, 8)}${ext}`;
+}
+
+/** The plain name with `-provenance` before the extension, so the stamped
+ *  copy never overwrites a plain download sitting beside it. */
+function provenanceFilename(asset: LibraryAsset): string {
+  const plain = downloadFilename(asset);
+  const dot = plain.lastIndexOf(".");
+  return dot > 0
+    ? `${plain.slice(0, dot)}-provenance${plain.slice(dot)}`
+    : `${plain}-provenance`;
 }
 
 // --- the page -------------------------------------------------------------
@@ -1406,6 +1418,64 @@ function describeMixTrack(track: MixTrack): string {
  * Prompt in serif — the human's voice — then the model, the run, and the
  * cryptographic receipts, each a link on one vertical rail.
  */
+/**
+ * The share-facing export: a copy of the file with its derivation stamped
+ * into its own metadata, readable by anyone at /inspect — no account needed.
+ * The stored original never changes; the stamp is applied per export.
+ */
+function ProvenanceExportRow({
+  asset,
+  getAuth,
+}: {
+  asset: LibraryAsset;
+  getAuth: () => Promise<{ token: string | null; userId: string | null }>;
+}) {
+  const [exporting, setExporting] = React.useState(false);
+
+  const run = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const saved = await downloadProvenanceExport(
+        asset.id,
+        provenanceFilename(asset),
+        await getAuth(),
+      );
+      if (!saved) toast.error("Couldn't stamp that export.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="mt-2.5">
+      <button
+        type="button"
+        onClick={() => void run()}
+        className="flex h-9 w-full items-center justify-center gap-2 border border-[#1f211c]/14 bg-white px-3.5 text-[12.5px] font-semibold text-[#4c4a41] transition-colors hover:border-[#1f211c]/32 hover:text-[#1f211c]"
+      >
+        {exporting ? (
+          <Spinner className="size-3.5" />
+        ) : (
+          <SealCheckIcon className="size-3.5" />
+        )}
+        Export with provenance
+      </button>
+      <p className="mt-1.5 text-[11px] leading-4 text-[#8a8271]">
+        A copy that carries its own history in its metadata — anyone you send
+        it to can read the full chain at{" "}
+        <Link
+          href="/inspect"
+          className="font-semibold underline underline-offset-2 hover:text-[#1f211c]"
+        >
+          /inspect
+        </Link>
+        , no account needed.
+      </p>
+    </div>
+  );
+}
+
 function ProvenanceDrawer({
   asset,
   dossier,
@@ -1516,6 +1586,10 @@ function ProvenanceDrawer({
                   Remove
                 </button>
               </div>
+
+              {STAMPABLE_MEDIA_TYPES.has(asset.mediaType) && (
+                <ProvenanceExportRow asset={asset} getAuth={getAuth} />
+              )}
             </div>
 
             <div className="px-5 py-5">
@@ -1566,8 +1640,19 @@ function RenameableTitle({
   // starts a fresh title rather than carrying a half-typed name over.
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  // Escape has to beat the blur that follows it, or cancelling would save.
+  const cancelled = React.useRef(false);
+
+  // Select the whole name once, when the field opens. Selecting from a ref
+  // callback re-ran on every render — every keystroke re-selected the text and
+  // the next character overwrote it, so only one letter ever survived.
+  React.useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
 
   const commit = () => {
+    if (cancelled.current) return;
     setEditing(false);
     onRename(draft);
   };
@@ -1577,7 +1662,7 @@ function RenameableTitle({
       <div>
         <SheetTitle className="sr-only">{displayName(asset)}</SheetTitle>
         <input
-          ref={(el) => el?.select()}
+          ref={inputRef}
           autoFocus
           value={draft}
           maxLength={200}
@@ -1585,7 +1670,10 @@ function RenameableTitle({
           onBlur={commit}
           onKeyDown={(e) => {
             if (e.key === "Enter") commit();
-            if (e.key === "Escape") setEditing(false);
+            if (e.key === "Escape") {
+              cancelled.current = true;
+              setEditing(false);
+            }
           }}
           className="h-9 w-full border border-[#1f211c]/25 bg-white px-2.5 text-[15px] font-medium outline-none focus:border-[#1f211c]/55"
         />
@@ -1606,6 +1694,7 @@ function RenameableTitle({
         aria-label="Rename"
         title="Rename"
         onClick={() => {
+          cancelled.current = false;
           setDraft(asset.filename ?? displayName(asset));
           setEditing(true);
         }}
@@ -2546,8 +2635,11 @@ function RecordDialog({
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[80dvh] overflow-y-auto rounded-none border border-[#1f211c]/14 bg-[#f7f4ee] p-0 text-[#1f211c] sm:max-w-[520px]">
-        <div className="border-b border-[#1f211c]/8 px-5 py-4">
+      {/* Wider than the drawer it opens from, and the record scrolls the one
+          way a document should. Nothing inside may set the width: the body
+          clips sideways and every mono value breaks rather than push. */}
+      <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden rounded-none border border-[#1f211c]/14 bg-[#f7f4ee] p-0 text-[#1f211c] sm:max-w-[680px]">
+        <div className="shrink-0 border-b border-[#1f211c]/8 px-5 py-4 pr-12">
           <DialogTitle className="font-sans text-[15px] font-medium tracking-normal">
             The sealed record
           </DialogTitle>
@@ -2557,7 +2649,7 @@ function RecordDialog({
           </DialogDescription>
         </div>
 
-        <div className="px-5 py-4">
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-5 py-4">
           {record === "loading" && (
             <div className="flex items-center gap-2 py-6 text-[12.5px] text-[#8a8271]">
               <Spinner className="size-4" /> Reading the record out of storage…
@@ -2622,17 +2714,17 @@ function RecordDialog({
                         className="border border-[#1f211c]/10 bg-white px-3 py-2"
                       >
                         <p className="flex flex-wrap items-baseline gap-x-2">
-                          <span className="text-[12px] font-semibold">
+                          <span className="min-w-0 break-all text-[12px] font-semibold">
                             {step.model ?? step.step_type ?? "step"}
                           </span>
                           {step.provider && (
-                            <span className="text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
+                            <span className="min-w-0 break-all text-[10px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase">
                               {step.provider.replace(/_/g, "") || step.provider}
                             </span>
                           )}
                         </p>
                         {step.prompt && (
-                          <p className="mt-0.5 line-clamp-2 font-serif text-[11.5px] leading-4 text-[#8a8271] italic">
+                          <p className="mt-0.5 line-clamp-2 break-words font-serif text-[11.5px] leading-4 text-[#8a8271] italic">
                             &ldquo;{step.prompt}&rdquo;
                           </p>
                         )}
@@ -2646,7 +2738,7 @@ function RecordDialog({
                 <summary className="cursor-pointer text-[11px] font-semibold tracking-[0.14em] text-[#8a8271] uppercase transition-colors hover:text-[#1f211c]">
                   Raw record
                 </summary>
-                <pre className="mt-2 max-h-64 overflow-auto border border-[#1f211c]/10 bg-white p-3 font-mono text-[10.5px] leading-4 text-[#4c4a41]">
+                <pre className="mt-2 max-h-72 overflow-y-auto border border-[#1f211c]/10 bg-white p-3 font-mono text-[10.5px] leading-4 whitespace-pre-wrap break-all text-[#4c4a41]">
                   {JSON.stringify(record.manifest, null, 2)}
                 </pre>
               </details>

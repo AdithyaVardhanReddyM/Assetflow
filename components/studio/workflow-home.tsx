@@ -5,9 +5,9 @@
  *
  * Every entry point here does the same two things: create a row, then navigate
  * to `/workflow/{id}`. The canvas is never a mode this component switches into,
- * which is what makes a canvas addressable at all — the prompt, the toolbar,
- * a template and "start from blank" differ only in what node the new document
- * is seeded with, and that seeding happens server-side in `startWorkflow`.
+ * which is what makes a canvas addressable at all — the prompt and "start from
+ * blank" differ only in what node the new document is seeded with, and that
+ * seeding happens server-side in `startWorkflow`.
  */
 
 import * as React from "react";
@@ -458,20 +458,13 @@ export function WorkflowHome({
           <div className="fixed inset-x-0 bottom-7 z-20">
             <WorkflowCards
               workflows={visibleWorkflows}
-              busyId={
-                pending?.startsWith("card:")
-                  ? pending.slice(5)
-                  : pending?.startsWith("template:")
-                    ? pending
-                    : null
-              }
+              busyId={pending?.startsWith("card:") ? pending.slice(5) : null}
               onOpen={(card) => {
                 if (pending) return;
                 setPending(`card:${card.id}`);
                 router.push(`/workflow/${card.id}`);
               }}
               onDelete={setPendingDelete}
-              onStartTemplate={(name) => void open(`template:${name}`, { name })}
             />
           </div>
         </ViewTransition>

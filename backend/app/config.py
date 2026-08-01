@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     enrich_enabled: bool = True
     # Vision captioning/tagging goes through OpenRouter, so swapping models is
     # a config change. Flash-Lite: cheapest multi-image vision that does JSON.
+    # (The LLM node runs on Replicate; enrichment stays here because Replicate
+    # throttles predictions hard on a low balance and publishes no Flash-Lite.)
     enrich_vision_model: str = "google/gemini-2.5-flash-lite"
     # Jina embeddings ("jina-embeddings-v3"). Absent key degrades search to
     # keyword-only and enrichment to text-without-vectors.

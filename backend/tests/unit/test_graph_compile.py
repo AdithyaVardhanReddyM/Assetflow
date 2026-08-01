@@ -567,6 +567,40 @@ def test_composition_takes_an_uploaded_clip_alongside_a_generated_video(catalog)
     assert mux.external_input_asset_ids == []
 
 
+def test_lucy_takes_an_upload_beside_a_generated_video(catalog):
+    """The canonical Lucy graph: a generated clip on source_video plus an
+    uploaded reference image. GenBlaze refuses external_inputs with
+    input_from on one step, so the upload rides the catalog's `via: param`
+    handoff as a URL — this exact shape 422'd live as MIXED_INPUTS before
+    lucy's ports declared it."""
+    graph = build(
+        [
+            gen("vid", provider="gmicloud", model="seedance-2-0-260128",
+                modality="video", y=0),
+            node("cap", "input.upload", asset_id="asset-cap", y=10),
+            gen("edit", provider="decart", model="lucy-2.5", modality="video",
+                prompt="Add this cap to the player", y=200),
+        ],
+        [
+            edge("e1", "vid", "edit", "source_video"),
+            edge("e2", "cap", "edit", "image_ref"),
+        ],
+    )
+    assets = {
+        "asset-cap": AssetRef(
+            asset_id="asset-cap", url="https://b2/cap.png", media_type="image/png",
+            modality="image", sha256="cd" * 32,
+        )
+    }
+    result = plan_graph(graph, catalog=catalog, assets=assets)
+    assert result.valid, result.errors
+    assert ErrorCode.MIXED_INPUTS not in codes(result)
+    step = result.plan.step_for_node("edit")
+    assert step.params["reference_image"] == "https://b2/cap.png"
+    assert step.input_from == [result.plan.step_for_node("vid").index]
+    assert step.external_input_asset_ids == []
+
+
 def test_composition_needs_at_least_one_connected_lane(catalog):
     graph = build(
         [
@@ -720,7 +754,6 @@ def test_upload_without_asset(catalog):
 @pytest.mark.parametrize(
     ("params", "expected"),
     [
-        ({"nope": 1}, ErrorCode.PARAM_UNKNOWN),
         ({"duration": 999}, ErrorCode.PARAM_RANGE),
         ({"duration": 0}, ErrorCode.PARAM_RANGE),
         ({"duration": "abc"}, ErrorCode.PARAM_TYPE),
@@ -730,6 +763,17 @@ def test_upload_without_asset(catalog):
 def test_param_validation(catalog, params, expected):
     result = plan_graph(build([gen("a", params=params)]), catalog=catalog)
     assert expected in codes(result)
+
+
+def test_unknown_param_is_dropped_with_a_warning(catalog):
+    """Saved graphs outlive the catalog: a param a model no longer declares
+    (lucy-2.5's `self_anchor`, live) is invisible in the editor, so failing
+    here would brick the workflow with no UI path to fix it. It must run,
+    minus the dead param."""
+    result = plan_graph(build([gen("a", params={"nope": 1})]), catalog=catalog)
+    assert result.valid, result.errors
+    assert WarningCode.PARAM_DROPPED in {w.code for w in result.warnings}
+    assert "nope" not in result.plan.steps[0].params
 
 
 def test_param_defaults_are_filled(catalog):

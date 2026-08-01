@@ -296,12 +296,11 @@ async def get_asset(
     return _serialize(await _get_owned(session, asset_id, user))
 
 
-@router.get("/{asset_id}/provenance")
-async def get_provenance(
-    asset_id: uuid.UUID, session: Session, user: CurrentUser
+async def provenance_body(
+    session: Session, asset: Asset, tenant_id: str
 ) -> dict[str, Any]:
-    """Where did this come from — which model, prompt, run, and manifest."""
-    asset = await _get_owned(session, asset_id, user)
+    """The provenance dossier for one asset — shared with public inspect,
+    which resolves an asset from a dropped file rather than an id."""
     body: dict[str, Any] = {
         "asset": _serialize(asset),
         "manifest_uri": asset.manifest_uri,
@@ -346,10 +345,19 @@ async def get_provenance(
             session,
             run=run,
             asset=asset,
-            tenant_id=user.tenant_id,
+            tenant_id=tenant_id,
             serialize=_serialize,
         )
     return body
+
+
+@router.get("/{asset_id}/provenance")
+async def get_provenance(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser
+) -> dict[str, Any]:
+    """Where did this come from — which model, prompt, run, and manifest."""
+    asset = await _get_owned(session, asset_id, user)
+    return await provenance_body(session, asset, user.tenant_id)
 
 
 @router.get("/{asset_id}/reconstruct")
@@ -573,6 +581,46 @@ async def download_content(
 
     return StreamingResponse(
         body(),
+        media_type=asset.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{asset_id}/export")
+async def export_with_provenance(
+    asset_id: uuid.UUID, session: Session, user: CurrentUser, settings: SettingsDep
+) -> Response:
+    """The file with its own derivation written into its metadata.
+
+    Buffered rather than streamed: the stamp has to see the whole file (ffmpeg
+    remux for video, chunk surgery for images) before the first byte can go
+    out. The library original in storage is never touched — this is a copy
+    that carries its history, for the /inspect page on the receiving end.
+    """
+    from app.services.provenance_stamp import (
+        build_payload,
+        fetch_asset_bytes,
+        stamp,
+        stampable,
+    )
+
+    asset = await _get_owned(session, asset_id, user)
+    if not stampable(asset.media_type):
+        from app.errors import BadRequest
+
+        raise BadRequest(
+            f"{asset.media_type or 'This file'} has no metadata slot to stamp.",
+            hint="PNG, JPEG, WebP, MP4, and MP3 exports can carry provenance.",
+        )
+
+    payload = await build_payload(session, asset=asset, tenant_id=user.tenant_id)
+    data = await fetch_asset_bytes(asset, settings)
+    stamped = await asyncio.to_thread(stamp, data, asset.media_type, payload)
+
+    stem = (asset.filename or asset.node_id or "asset").rsplit(".", 1)[0]
+    filename = f"{stem}-provenance{_EXT_BY_MEDIA_TYPE.get(asset.media_type, '')}"
+    return Response(
+        content=stamped,
         media_type=asset.media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

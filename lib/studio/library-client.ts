@@ -490,6 +490,45 @@ export async function renameLibraryAsset(
   }
 }
 
+// --- stamped export --------------------------------------------------------
+
+/** Media types the backend can write a provenance record into (mirrors
+ *  `STAMPABLE` in the stamp service). Everything else downloads plain. */
+export const STAMPABLE_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "video/mp4",
+  "audio/mpeg",
+]);
+
+/**
+ * Save a copy of the asset with its derivation stamped into the file's own
+ * metadata — the copy meant for sharing, readable by anyone at /inspect.
+ * The stored original is untouched; the stamp is applied per export.
+ */
+export async function downloadProvenanceExport(
+  id: string,
+  filename: string,
+  auth: ApiAuth,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_URL}/v1/assets/${id}/export`, {
+      headers: authHeaders(auth.token, auth.userId),
+    });
+    if (!res.ok) return false;
+    const href = URL.createObjectURL(await res.blob());
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(href);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteLibraryAsset(id: string, auth: ApiAuth): Promise<boolean> {
   try {
     const res = await fetch(`${API_URL}/v1/assets/${id}`, {
