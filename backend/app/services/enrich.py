@@ -38,6 +38,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from genblaze_core.exceptions import ProviderError
+from genblaze_gmicloud import achat
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.config import Settings, StorageMode, get_settings
@@ -46,8 +49,6 @@ from app.logging import get_logger
 from app.services.embeddings import embed_passage, vector_literal
 
 log = get_logger(__name__)
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 #: Keyframes sampled per video — start, middle, end-ish. One multi-image call
 #: describes them together; more frames buys little and doubles tokens.
@@ -60,19 +61,34 @@ _MAX_INLINE_BYTES = 8 * 1024 * 1024
 
 _VISION_SYSTEM = (
     "You are an asset librarian. Describe the provided media for search "
-    "indexing. Respond with ONLY a JSON object, no prose, no markdown fences: "
-    '{"caption": one factual sentence, "tags": 5-10 lowercase keywords, '
-    '"ocr_text": any legible text in the image or null, '
-    '"palette": up to 5 dominant colors as lowercase hex strings}. '
-    "For multiple frames of one video, describe the video as a whole."
+    "indexing. caption: one factual sentence. tags: 5-10 lowercase keywords. "
+    "ocr_text: any legible text in the image, or null. palette: up to 5 "
+    "dominant colors as lowercase hex strings. For multiple frames of one "
+    "video, describe the video as a whole."
 )
 
 _AUDIO_SYSTEM = (
     "You are an audio librarian. Given the text prompt that generated an "
-    "audio asset, respond with ONLY a JSON object, no markdown fences: "
-    '{"caption": one sentence describing the audio, "tags": 5-10 lowercase '
-    "keywords covering mood, genre, instruments, and tempo}."
+    "audio asset: caption: one sentence describing the audio. tags: 5-10 "
+    "lowercase keywords covering mood, genre, instruments, and tempo."
 )
+
+
+# The classify step's contract, enforced on the wire: GenBlaze coerces these
+# into the json_schema response_format GMI serves, so the reply is shaped
+# JSON rather than prose-that-usually-is. The article's pipeline
+# `step_type="classify"` hasn't shipped in the SDK yet; the standalone chat
+# connector is the same machinery without the manifest.
+class _DescribedFormat(BaseModel):
+    caption: str
+    tags: list[str]
+    ocr_text: str | None
+    palette: list[str]
+
+
+class _AudioFormat(BaseModel):
+    caption: str
+    tags: list[str]
 
 #: Model-id substrings that mark generated audio as music or sound effects
 #: rather than speech. Matches the catalog's real ids (music_v2,
@@ -80,7 +96,7 @@ _AUDIO_SYSTEM = (
 _MUSICLIKE = ("music", "sound", "sfx", "audio")
 
 
-# --- OpenRouter -------------------------------------------------------------
+# --- GMI Cloud, via GenBlaze's chat connector --------------------------------
 
 
 def _parse_json_reply(content: str) -> dict[str, Any] | None:
@@ -117,61 +133,56 @@ async def _chat(
     *,
     system: str,
     content: Any,
+    response_format: type[BaseModel],
     settings: Settings,
-    api_key: str,
 ) -> dict[str, Any] | None:
-    """One JSON-mode chat call; None on any failure — enrichment degrades."""
+    """One structured chat call; None on any failure — enrichment degrades.
+
+    `achat` runs the blocking HTTP call in a worker thread, so a slow vision
+    call never stalls the event loop the way the sink flush once did.
+    """
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                json={
-                    "model": settings.enrich_vision_model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": content},
-                    ],
-                    "max_tokens": 600,
-                    # Descriptions, not deliberation — and on reasoning models
-                    # an enabled trace can eat the whole budget (see the LLM
-                    # node's provider for the long version).
-                    "reasoning": {"enabled": False},
-                },
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "HTTP-Referer": "https://github.com/assetflow",
-                    "X-Title": "AssetFlow",
-                },
-            )
-        if resp.status_code >= 400:
-            log.warning(
-                "enrich.vision_error", status=resp.status_code, body=resp.text[:200]
-            )
-            return None
-        message = resp.json()["choices"][0]["message"]
-        content_text = message.get("content") or ""
-        parsed = _parse_json_reply(content_text) if isinstance(content_text, str) else None
-        if parsed is None:
-            log.warning("enrich.vision_unparseable", head=str(content_text)[:120])
-        return parsed
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        log.warning("enrich.vision_failed", error=f"{type(exc).__name__}: {exc}")
+        resp = await achat(
+            settings.enrich_vision_model,
+            messages=[{"role": "user", "content": content}],
+            system=system,
+            response_format=response_format,
+            max_tokens=600,
+            timeout=90.0,
+            # Descriptions, not deliberation. Today's Flash-Lite spends zero
+            # reasoning tokens unprompted, but a capped budget plus an enabled
+            # trace is how reasoning models return empty content (see the LLM
+            # node's provider for the long version).
+            reasoning_effort="none",
+        )
+    except ProviderError as exc:
+        log.warning(
+            "enrich.vision_failed", code=str(exc.error_code), error=str(exc)[:200]
+        )
         return None
+    parsed = _parse_json_reply(resp.text)
+    if parsed is None:
+        log.warning("enrich.vision_unparseable", head=resp.text[:120])
+    return parsed
 
 
 async def describe_images(
     sources: list[str], *, context: str | None, settings: Settings
 ) -> dict[str, Any] | None:
     """Caption/tags/OCR/palette for one or more frames of the same asset."""
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not api_key or not sources:
+    if not os.getenv("GMI_API_KEY") or not sources:
         return None
     prompt = "Describe this media for search."
     if context:
         prompt += f' It was generated from the prompt: "{context[:500]}"'
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     content += [{"type": "image_url", "image_url": {"url": s}} for s in sources]
-    parsed = await _chat(system=_VISION_SYSTEM, content=content, settings=settings, api_key=api_key)
+    parsed = await _chat(
+        system=_VISION_SYSTEM,
+        content=content,
+        response_format=_DescribedFormat,
+        settings=settings,
+    )
     return _clean_described(parsed) if parsed else None
 
 
@@ -179,14 +190,13 @@ async def describe_audio_prompt(
     prompt: str, *, settings: Settings
 ) -> dict[str, Any] | None:
     """Mood/genre/instrument tags for music or SFX, derived from its prompt."""
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not api_key or not prompt.strip():
+    if not os.getenv("GMI_API_KEY") or not prompt.strip():
         return None
     parsed = await _chat(
         system=_AUDIO_SYSTEM,
         content=f'The generation prompt was: "{prompt[:1000]}"',
+        response_format=_AudioFormat,
         settings=settings,
-        api_key=api_key,
     )
     if not parsed:
         return None
@@ -200,7 +210,7 @@ async def describe_audio_prompt(
 
 
 def _fetchable_url(asset: Asset, settings: Settings) -> str | None:
-    """A URL OpenRouter's model can fetch, or None when only bytes will do."""
+    """A URL the vision model can fetch, or None when only bytes will do."""
     if settings.storage_mode is StorageMode.B2:
         from app.engine.manifests import sign_for_fetch
 
@@ -210,7 +220,7 @@ def _fetchable_url(asset: Asset, settings: Settings) -> str | None:
 
 async def _image_source(asset: Asset, settings: Settings) -> str | None:
     """The image as something a vision model accepts: presigned URL, or a data
-    URL in local mode (localhost is not fetchable from OpenRouter)."""
+    URL in local mode (localhost is not fetchable from GMI Cloud)."""
     url = _fetchable_url(asset, settings)
     if url:
         return url

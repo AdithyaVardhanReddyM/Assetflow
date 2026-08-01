@@ -1,6 +1,7 @@
 import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import {
+  Bricolage_Grotesque,
   Geist,
   Geist_Mono,
   Figtree,
@@ -24,6 +25,11 @@ const instrumentSerif = Instrument_Serif({
 });
 
 const figtree = Figtree({ subsets: ["latin"], variable: "--font-sans" });
+
+const bricolage = Bricolage_Grotesque({
+  subsets: ["latin"],
+  variable: "--font-bricolage",
+});
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -55,6 +61,7 @@ export default function RootLayout({
         geistMono.variable,
         "font-sans",
         figtree.variable,
+        bricolage.variable,
         instrumentSansHeading.variable,
         instrumentSerif.variable,
       )}

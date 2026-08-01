@@ -4,7 +4,7 @@
 
 Idempotent and resumable: `done` rows are skipped, `failed` rows are retried,
 and interrupting it loses nothing but time. Serial with a small pause between
-assets — this walks straight at OpenRouter and Jina, and a burst would only
+assets — this walks straight at GMI Cloud and Jina, and a burst would only
 trade rate-limit errors for the minutes it saves.
 """
 
