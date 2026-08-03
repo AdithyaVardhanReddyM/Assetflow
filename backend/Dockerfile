@@ -27,6 +27,6 @@ ENV CAPTIONS_FONTS_DIR=/app/public/fonts/captions
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
-# Host :: binds dual-stack (IPv4 + IPv6) on Linux; Railway's edge and private
-# networking reach the container over IPv6, where 0.0.0.0 is unreachable.
-CMD uvicorn app.main:create_app --factory --host :: --port ${PORT:-8000}
+# serve.py binds one dual-stack socket: Railway's edge speaks IPv6 to the
+# container, its healthcheck speaks IPv4, and uvicorn's --host can't do both.
+CMD ["python", "serve.py"]
