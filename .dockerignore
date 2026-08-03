@@ -1,0 +1,20 @@
+# Keep the Docker build context small and secret-free.
+.git
+node_modules
+.next
+out
+build
+
+# Secrets: env comes from the host platform, never baked into the image.
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Backend local state
+backend/.venv
+backend/.data
+backend/.pytest_cache
+backend/.ruff_cache
+**/__pycache__
+*.pyc
