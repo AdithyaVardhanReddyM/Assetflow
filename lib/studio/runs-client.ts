@@ -366,6 +366,9 @@ export function streamRun(
       const { value, done: eof } = await reader.read();
       if (eof) return;
       buffer += decoder.decode(value, { stream: true });
+      // sse-starlette delimits with \r\n; "\n\n" never matches a CRLF stream.
+      // Normalizing the whole buffer also heals a \r\n split across chunks.
+      buffer = buffer.replace(/\r\n/g, "\n");
 
       let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
