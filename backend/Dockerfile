@@ -27,4 +27,6 @@ ENV CAPTIONS_FONTS_DIR=/app/public/fonts/captions
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
-CMD uvicorn app.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8000}
+# Host :: binds dual-stack (IPv4 + IPv6) on Linux; Railway's edge and private
+# networking reach the container over IPv6, where 0.0.0.0 is unreachable.
+CMD uvicorn app.main:create_app --factory --host :: --port ${PORT:-8000}
