@@ -12,9 +12,10 @@ import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_DIR.parent
@@ -48,7 +49,12 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     api_port: int = 8000
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    # NoDecode: pydantic-settings otherwise requires list fields set via real
+    # environment variables to be JSON arrays; these are documented as plain
+    # comma-separated strings, so hand the raw value to _split_csv instead.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3000"]
+    )
 
     # --- modes: both default to the credential-free path ---
     genblaze_mode: GenblazeMode = GenblazeMode.MOCK
@@ -67,7 +73,7 @@ class Settings(BaseSettings):
     # to keep in sync between the two apps.
     clerk_issuer: str = ""
     next_public_clerk_publishable_key: str = ""
-    clerk_authorized_parties: list[str] = Field(default_factory=list)
+    clerk_authorized_parties: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Escape hatch for local work before Clerk keys are restored. Never in prod;
     # guarded by an assertion in create_app().
     auth_dev_bypass: bool = False
